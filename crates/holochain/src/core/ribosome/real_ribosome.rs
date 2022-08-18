@@ -67,7 +67,7 @@ use crate::core::ribosome::host_fn::x_salsa20_poly1305_shared_secret_create_rand
 use crate::core::ribosome::host_fn::x_salsa20_poly1305_shared_secret_export::x_salsa20_poly1305_shared_secret_export;
 use crate::core::ribosome::host_fn::x_salsa20_poly1305_shared_secret_ingest::x_salsa20_poly1305_shared_secret_ingest;
 use crate::core::ribosome::host_fn::zome_info::zome_info;
-use crate::core::ribosome::real_ribosome::wasmparser::Operator as WasmOperator;
+//use crate::core::ribosome::real_ribosome::wasmparser::Operator as WasmOperator;
 use crate::core::ribosome::CallContext;
 use crate::core::ribosome::Invocation;
 use crate::core::ribosome::RibosomeT;
@@ -75,7 +75,7 @@ use crate::core::ribosome::ZomeCallInvocation;
 use fallible_iterator::FallibleIterator;
 use holochain_types::prelude::*;
 use holochain_wasmer_host::module::SerializedModuleCache;
-use wasmer_middlewares::Metering;
+//use wasmer_middlewares::Metering;
 // This is here because there were errors about different crate versions
 // without it.
 use kitsune_p2p_types::dependencies::lair_keystore_api::dependencies::parking_lot::lock_api::RwLock;
@@ -478,12 +478,12 @@ impl RealRibosome {
     }
 
     pub fn cranelift() -> Cranelift {
-        let cost_function = |_operator: &WasmOperator| -> u64 { 1 };
+        //let cost_function = |_operator: &WasmOperator| -> u64 { 1 };
         // @todo 10 giga-ops is totally arbitrary cutoff so we probably
         // want to make the limit configurable somehow.
-        let metering = Arc::new(Metering::new(10_000_000_000, cost_function));
+        //let metering = Arc::new(Metering::new(10_000_000_000, cost_function));
         let mut cranelift = Cranelift::default();
-        cranelift.canonicalize_nans(true).push_middleware(metering);
+        cranelift.canonicalize_nans(true);//.push_middleware(metering);
         cranelift
     }
 
