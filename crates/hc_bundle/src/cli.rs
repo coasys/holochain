@@ -453,7 +453,8 @@ impl HcWebAppBundleSubcommand {
     }
 }
 
-async fn get_dna_name(manifest_path: &Path) -> HcBundleResult<String> {
+/// Get the name of the DNA for a given manifest path
+pub async fn get_dna_name(manifest_path: &Path) -> HcBundleResult<String> {
     let manifest_path = manifest_path.to_path_buf();
     let manifest_path = manifest_path.join(ValidatedDnaManifest::path());
     let manifest_yaml = ffs::read_to_string(&manifest_path).await?;
