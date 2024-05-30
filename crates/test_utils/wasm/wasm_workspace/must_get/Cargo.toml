@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 
 # reminder - do not use workspace deps
 [dependencies]
-serde = "1.0"
+serde = "1.0.98"
 holochain_test_wasm_common = { path = "../../../wasm_common" }
 hdk = { path = "../../../../hdk" }
 thiserror = "1"

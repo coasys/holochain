@@ -21,7 +21,7 @@ ghost_actor = "0.3.0-alpha.6"
 hc_sleuth = { version = "^0.2.1-rc.0", path = "../hc_sleuth" }
 holo_hash = { version = "^0.3.1-rc.0", path = "../holo_hash" }
 holochain_keystore = { version = "^0.3.1-rc.0", path = "../holochain_keystore" }
-holochain_serialized_bytes = "=0.0.54"
+holochain_serialized_bytes = { version = "=0.0.54", git = "https://github.com/coasys/holochain-serialization.git", rev = "6eaa4ea8913bfd977fcc4577e833f4dc18a215f7" }
 holochain_types = { version = "^0.3.1-rc.0", path = "../holochain_types" }
 holochain_zome_types = { version = "^0.3.1-rc.0", path = "../holochain_zome_types" }
 kitsune_p2p = { version = "^0.3.1-rc.0", path = "../kitsune_p2p/kitsune_p2p" }
@@ -30,7 +30,7 @@ holochain_nonce = { version = "^0.3.1-rc.0", path = "../holochain_nonce" }
 mockall = "0.11.3"
 holochain_trace = { version = "^0.3.1-rc.0", path = "../holochain_trace" }
 rand = "0.8.5"
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0.98", features = ["derive"] }
 serde_bytes = "0.11"
 serde_json = { version = "1.0.51", features = ["preserve_order"] }
 thiserror = "1.0.22"

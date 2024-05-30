@@ -17,7 +17,7 @@ holo_hash = { version = "^0.3.1-rc.0", path = "../holo_hash", features = [
 ] }
 holochain_sqlite = { version = "^0.3.1-rc.0", path = "../holochain_sqlite" }
 holochain_p2p = { version = "^0.3.1-rc.0", path = "../holochain_p2p" }
-holochain_serialized_bytes = "=0.0.54"
+holochain_serialized_bytes = { version = "=0.0.54", git = "https://github.com/coasys/holochain-serialization.git", rev = "6eaa4ea8913bfd977fcc4577e833f4dc18a215f7" }
 holochain_state = { version = "^0.3.1-rc.0", path = "../holochain_state" }
 holochain_types = { version = "^0.3.1-rc.0", path = "../holochain_types" }
 holochain_trace = { version = "^0.3.1-rc.0", path = "../holochain_trace" }

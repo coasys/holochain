@@ -16,7 +16,7 @@ holochain_util = { path = "../holochain_util", version = "^0.3.1-rc.0"}
 futures = "0.3"
 reqwest = "0.11.20"
 rmp-serde = "=1.1.2"
-serde = { version = "1.0", features = ["serde_derive", "derive"] }
+serde = { version = "1.0.98", features = ["serde_derive", "derive"] }
 serde_bytes = "0.11"
 thiserror = "1.0"
 

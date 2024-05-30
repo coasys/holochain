@@ -29,7 +29,7 @@ tracing-subscriber = { version = "0.3.16", features = [ "env-filter", "time", "j
 
 # opentelemetry = { version = "0.8", default-features = false, features = ["trace", "serialize"], optional = true }
 # tracing-opentelemetry = { version = "0.8.0", optional = true }
-holochain_serialized_bytes = {version = "0.0.54", optional = true }
+holochain_serialized_bytes = { version = "=0.0.54", optional = true, git = "https://github.com/coasys/holochain-serialization.git", rev = "6eaa4ea8913bfd977fcc4577e833f4dc18a215f7" }
 serde_bytes = { version = "0.11", optional = true }
 tokio = { version = "1.27", features = [ "sync" ], optional = true }
 shrinkwraprs = { version = "0.3.0", optional = true }

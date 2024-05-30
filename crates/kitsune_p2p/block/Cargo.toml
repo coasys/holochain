@@ -14,7 +14,7 @@ edition = "2021"
 [dependencies]
 kitsune_p2p_timestamp = { version = "^0.3.1-rc.0", path = "../timestamp" }
 kitsune_p2p_bin_data = { version = "^0.3.1-rc.0", path = "../bin_data" }
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0.98", features = ["derive"] }
 
 [lints]
 workspace = true

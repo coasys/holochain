@@ -21,14 +21,14 @@ holochain_integrity_types = { version = "^0.3.1-rc.0", path = "../holochain_inte
   "tracing",
 ] }
 holochain_nonce = { version = "^0.3.1-rc.0", path = "../holochain_nonce" }
-holochain_serialized_bytes = "=0.0.54"
-serde = { version = "1.0", features = ["derive", "rc"] }
+holochain_serialized_bytes = { version = "=0.0.54", git = "https://github.com/coasys/holochain-serialization.git", rev = "6eaa4ea8913bfd977fcc4577e833f4dc18a215f7" }
+serde = { version = "1.0.98", features = ["derive", "rc"] }
 serde_bytes = "0.11"
 serde_yaml = { version = "0.9", optional = true }
 subtle = "2"
 thiserror = "1.0.22"
 tracing = "0.1"
-holochain_wasmer_common = { version = "=0.0.93" }
+holochain_wasmer_common = { version = "=0.0.94", git = "https://github.com/coasys/holochain-wasmer.git", rev = "52979e943861530bbafc48297b131fdec52c3e21" }
 derive_more = "0.99"
 
 # fixturator dependencies

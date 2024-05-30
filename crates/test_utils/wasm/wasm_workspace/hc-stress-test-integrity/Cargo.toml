@@ -11,4 +11,4 @@ name = "files_integrity"
 [dependencies]
 hdi = { path = "../../../../hdi" }
 
-serde = "1.0"
+serde = "1.0.98"

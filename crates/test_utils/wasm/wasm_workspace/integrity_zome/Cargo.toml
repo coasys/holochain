@@ -10,7 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 # reminder - do not use workspace deps
 [dependencies]
-serde = "1.0"
+serde = "1.0.98"
 hdi = { path = "../../../../hdi" }
 holochain_mock_hdi = { path = "../../../../mock_hdi", optional = true }
 

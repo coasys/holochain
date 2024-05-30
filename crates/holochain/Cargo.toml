@@ -36,11 +36,11 @@ holochain_conductor_api = { version = "^0.3.1-rc.0", path = "../holochain_conduc
 holochain_keystore = { version = "^0.3.1-rc.0", path = "../holochain_keystore", default-features = false }
 holochain_p2p = { version = "^0.3.1-rc.0", path = "../holochain_p2p" }
 holochain_sqlite = { version = "^0.3.1-rc.0", path = "../holochain_sqlite" }
-holochain_serialized_bytes = "=0.0.54"
+holochain_serialized_bytes = { version = "=0.0.54", git = "https://github.com/coasys/holochain-serialization.git", rev = "6eaa4ea8913bfd977fcc4577e833f4dc18a215f7" }
 holochain_state = { version = "^0.3.1-rc.0", path = "../holochain_state" }
 holochain_types = { version = "^0.3.1-rc.0", path = "../holochain_types" }
 holochain_util = { version = "^0.3.1-rc.0", path = "../holochain_util" }
-holochain_wasmer_host = "=0.0.93"
+holochain_wasmer_host = { version = "=0.0.94", git = "https://github.com/coasys/holochain-wasmer.git", rev = "52979e943861530bbafc48297b131fdec52c3e21" }
 holochain_websocket = { version = "^0.3.1-rc.0", path = "../holochain_websocket" }
 holochain_zome_types = { version = "^0.3.1-rc.0", path = "../holochain_zome_types", features = [
   "full",
@@ -68,7 +68,7 @@ rand = "0.8.5"
 rand_chacha = "0.3.1"
 rand-utf8 = "0.0.1"
 rusqlite = { version = "0.29" }
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0.98", features = ["derive"] }
 serde_bytes = "0.11.12"
 serde_json = { version = "1.0.51", features = ["preserve_order"] }
 serde_yaml = "0.9"
@@ -151,7 +151,7 @@ tokio-tungstenite = "0.21"
 
 [build-dependencies]
 hdk = { version = "^0.3.1-rc.0", path = "../hdk" }
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0.98", features = ["derive"] }
 serde_json = { version = "1.0.51" }
 toml = "0.8"
 chrono = { version = "0.4.6", features = ["serde"] }
