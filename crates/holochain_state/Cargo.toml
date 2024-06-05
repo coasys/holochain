@@ -11,7 +11,7 @@ edition = "2021"
 # reminder - do not use workspace deps
 [dependencies]
 aitia = { version = "^0.2.1-rc.0", path = "../aitia" }
-chrono = { version = "0.4.22", default-features = false, features = [
+chrono = { version = "0.4.38", default-features = false, features = [
     "clock",
     "std",
     "oldtime",
