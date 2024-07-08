@@ -11,7 +11,7 @@ name = "files"
 [dependencies]
 hdk = { path = "../../../../hdk" }
 
-serde = "1.0"
+serde = "1.0.98"
 
 # workaround to make it slightly easier to import hc-scress-test zomes
 files_integrity = { path = "../hc-stress-test-integrity" }

@@ -801,7 +801,7 @@ dependencies = [
 name = "fixt"
 version = "0.4.0-dev.2"
 dependencies = [
- "holochain_serialized_bytes",
+ "holochain_serialized_bytes 0.0.55 (git+https://github.com/coasys/holochain-serialization.git?rev=f9577913773931ec797261f90968903b1b4e27a8)",
  "lazy_static",
  "parking_lot",
  "paste",
@@ -1114,7 +1114,7 @@ dependencies = [
  "derive_more",
  "fixt",
  "futures",
- "holochain_serialized_bytes",
+ "holochain_serialized_bytes 0.0.55 (git+https://github.com/coasys/holochain-serialization.git?rev=f9577913773931ec797261f90968903b1b4e27a8)",
  "holochain_util",
  "holochain_wasmer_common",
  "kitsune_p2p_dht_arc",
@@ -1132,7 +1132,7 @@ dependencies = [
  "derive_builder 0.20.0",
  "holo_hash",
  "holochain_secure_primitive",
- "holochain_serialized_bytes",
+ "holochain_serialized_bytes 0.0.55 (git+https://github.com/coasys/holochain-serialization.git?rev=f9577913773931ec797261f90968903b1b4e27a8)",
  "holochain_util",
  "kitsune_p2p_timestamp",
  "serde",
@@ -1174,7 +1174,21 @@ version = "0.0.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "719fa847cf9f772f7e8e1a6f11d801e1383cc5af043292042665da9a6ce5c742"
 dependencies = [
- "holochain_serialized_bytes_derive",
+ "holochain_serialized_bytes_derive 0.0.55 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rmp-serde",
+ "serde",
+ "serde-transcode",
+ "serde_bytes",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "holochain_serialized_bytes"
+version = "0.0.55"
+source = "git+https://github.com/coasys/holochain-serialization.git?rev=f9577913773931ec797261f90968903b1b4e27a8#f9577913773931ec797261f90968903b1b4e27a8"
+dependencies = [
+ "holochain_serialized_bytes_derive 0.0.55 (git+https://github.com/coasys/holochain-serialization.git?rev=f9577913773931ec797261f90968903b1b4e27a8)",
  "rmp-serde",
  "serde",
  "serde-transcode",
@@ -1188,6 +1202,15 @@ name = "holochain_serialized_bytes_derive"
 version = "0.0.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e6a221b5650251e09ef0b9223cf39e72b5222492cffc6bb4bdf36b2a6bc91aa"
+dependencies = [
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
+name = "holochain_serialized_bytes_derive"
+version = "0.0.55"
+source = "git+https://github.com/coasys/holochain-serialization.git?rev=f9577913773931ec797261f90968903b1b4e27a8#f9577913773931ec797261f90968903b1b4e27a8"
 dependencies = [
  "quote",
  "syn 1.0.109",
@@ -1219,7 +1242,7 @@ version = "0.0.95"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81862ba8234412864273d21983c99af4e8b97739a5e4c354030470acdc6b431c"
 dependencies = [
- "holochain_serialized_bytes",
+ "holochain_serialized_bytes 0.0.55 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_bytes",
  "test-fuzz",
@@ -1233,7 +1256,7 @@ version = "0.0.95"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fce20cd8eb137a355394e57612cf2cf7836dab57948d56af9f9fe080ea168d41"
 dependencies = [
- "holochain_serialized_bytes",
+ "holochain_serialized_bytes 0.0.55 (registry+https://github.com/rust-lang/crates.io-index)",
  "holochain_wasmer_common",
  "parking_lot",
  "paste",
@@ -1251,7 +1274,7 @@ dependencies = [
  "holo_hash",
  "holochain_integrity_types",
  "holochain_nonce",
- "holochain_serialized_bytes",
+ "holochain_serialized_bytes 0.0.55 (git+https://github.com/coasys/holochain-serialization.git?rev=f9577913773931ec797261f90968903b1b4e27a8)",
  "holochain_wasmer_common",
  "kitsune_p2p_block",
  "kitsune_p2p_dht",

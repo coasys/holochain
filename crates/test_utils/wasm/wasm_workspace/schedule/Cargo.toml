@@ -16,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 # reminder - do not use workspace deps
 [dependencies]
 hdk = { path = "../../../../hdk" }
-serde = "1.0"
+serde = "1.0.98"
 hdi = { path = "../../../../hdi" }
 
 [dev-dependencies]

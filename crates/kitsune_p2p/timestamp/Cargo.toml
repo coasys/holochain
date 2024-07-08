@@ -12,7 +12,7 @@ edition = "2021"
 
 # reminder - do not use workspace deps
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0.98", features = ["derive"] }
 
 # Dependencies not needed for integrity.
 chrono = { version = "0.4.22", default-features = false, features = [
@@ -35,7 +35,7 @@ rand = { version = "0.8", optional = true }
 
 
 [dev-dependencies]
-holochain_serialized_bytes = "=0.0.55"
+holochain_serialized_bytes = { version = "=0.0.55", git = "https://github.com/coasys/holochain-serialization.git", rev = "f9577913773931ec797261f90968903b1b4e27a8" }
 serde_yaml = "0.9"
 
 [lints]

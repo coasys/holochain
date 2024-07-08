@@ -24,7 +24,7 @@ holo_hash = { version = "^0.4.0-dev.7", path = "../holo_hash", features = [
 fallible-iterator = "0.3.0"
 hc_sleuth = { version = "^0.4.0-dev.11", path = "../hc_sleuth" }
 holochain_keystore = { version = "^0.4.0-dev.11", path = "../holochain_keystore" }
-holochain_serialized_bytes = "=0.0.55"
+holochain_serialized_bytes = { version = "=0.0.55", git = "https://github.com/coasys/holochain-serialization.git", rev = "f9577913773931ec797261f90968903b1b4e27a8" }
 holochain_p2p = { version = "^0.4.0-dev.11", path = "../holochain_p2p" }
 holochain_types = { version = "^0.4.0-dev.11", path = "../holochain_types" }
 holochain_zome_types = { version = "^0.4.0-dev.9", path = "../holochain_zome_types", features = [
@@ -36,7 +36,7 @@ holochain_nonce = { version = "^0.4.0-dev.4", path = "../holochain_nonce" }
 one_err = "0.0.8"
 parking_lot = "0.12"
 shrinkwraprs = "0.3.0"
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0.98", features = ["derive"] }
 serde_json = { version = "1.0.51", features = ["preserve_order"] }
 thiserror = "1.0.22"
 tokio = { version = "1.36.0", features = ["full"] }

@@ -16,7 +16,7 @@ derive_more = "0.99"
 fallible-iterator = "0.3.0"
 futures = "0.3"
 holo_hash = { path = "../holo_hash", version = "^0.4.0-dev.7" }
-holochain_serialized_bytes = "=0.0.55"
+holochain_serialized_bytes = { version = "=0.0.55", git = "https://github.com/coasys/holochain-serialization.git", rev = "f9577913773931ec797261f90968903b1b4e27a8" }
 holochain_util = { version = "^0.4.0-dev.1", path = "../holochain_util", features = [
   "backtrace",
   "time",
@@ -36,7 +36,7 @@ r2d2 = "0.8"
 r2d2_sqlite = { version = "0.24.0", package = "hc_r2d2_sqlite" }
 rmp-serde = "=1.3.0"
 scheduled-thread-pool = "0.2"
-serde = "1.0"
+serde = "1.0.98"
 serde_json = { version = "1.0.51", features = ["preserve_order"] }
 shrinkwraprs = "0.3.0"
 tempfile = "3.3"

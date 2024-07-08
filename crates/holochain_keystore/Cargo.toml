@@ -17,7 +17,7 @@ futures = "0.3"
 holo_hash = { version = "^0.4.0-dev.7", path = "../holo_hash", features = [
   "full",
 ] }
-holochain_serialized_bytes = "=0.0.55"
+holochain_serialized_bytes = { version = "=0.0.55", git = "https://github.com/coasys/holochain-serialization.git", rev = "f9577913773931ec797261f90968903b1b4e27a8" }
 holochain_zome_types = { path = "../holochain_zome_types", version = "^0.4.0-dev.9" }
 kitsune_p2p_types = { version = "^0.4.0-dev.8", path = "../kitsune_p2p/types" }
 holochain_secure_primitive = { version = "^0.4.0-dev.1", path = "../holochain_secure_primitive" }
@@ -27,7 +27,7 @@ must_future = "0.1.2"
 nanoid = "0.4.0"
 one_err = "0.0.8"
 parking_lot = "0.12"
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0.98", features = ["derive"] }
 serde_bytes = "0.11"
 sodoken = "=0.0.11"
 thiserror = "1.0.22"

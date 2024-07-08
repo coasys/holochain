@@ -17,10 +17,10 @@ holo_hash = { version = "^0.4.0-dev.7", path = "../holo_hash", features = [
   "full",
 ] }
 holochain_state_types = { version = "^0.4.0-dev.8", path = "../holochain_state_types" }
-holochain_serialized_bytes = "=0.0.55"
+holochain_serialized_bytes = { version = "=0.0.55", git = "https://github.com/coasys/holochain-serialization.git", rev = "f9577913773931ec797261f90968903b1b4e27a8" }
 holochain_types = { version = "^0.4.0-dev.11", path = "../holochain_types" }
 holochain_zome_types = { version = "^0.4.0-dev.9", path = "../holochain_zome_types" }
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0.98", features = ["derive"] }
 serde_yaml = "0.9"
 tracing = "0.1.26"
 thiserror = "1.0.22"

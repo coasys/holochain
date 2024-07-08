@@ -16,7 +16,7 @@ derive_more = "0.99"
 gcollections = "1.5.0"
 intervallum = "1.4.0"
 num-traits = "0.2"
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0.98", features = ["derive"] }
 kitsune_p2p_timestamp = { version = "^0.4.0-dev.2", path = "../timestamp" }
 
 arbitrary = { version = "1", features = ["derive"], optional = true }
