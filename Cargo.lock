@@ -2560,21 +2560,6 @@ dependencies = [
 [[package]]
 name = "hc_seed_bundle"
 version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "849aaef544dc9a561bcf1af4cbbc02e4cd24904b623aa1d0311f756fc2a96d38"
-dependencies = [
- "futures",
- "one_err",
- "rmp-serde",
- "rmpv",
- "serde",
- "serde_bytes",
- "sodoken 0.0.11",
-]
-
-[[package]]
-name = "hc_seed_bundle"
-version = "0.2.4"
 source = "git+https://github.com/coasys/lair.git?rev=05802500ec58381a440da07985b89539213b1a54#05802500ec58381a440da07985b89539213b1a54"
 dependencies = [
  "futures",
@@ -4364,7 +4349,7 @@ dependencies = [
  "kitsune_p2p_dht_arc",
  "kitsune_p2p_timestamp",
  "kitsune_p2p_types",
- "lair_keystore_api 0.4.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "lair_keystore_api",
  "mockall",
  "once_cell",
  "parking_lot 0.12.3",
@@ -4398,7 +4383,7 @@ name = "lair_keystore"
 version = "0.4.5"
 source = "git+https://github.com/coasys/lair.git?rev=05802500ec58381a440da07985b89539213b1a54#05802500ec58381a440da07985b89539213b1a54"
 dependencies = [
- "lair_keystore_api 0.4.5 (git+https://github.com/coasys/lair.git?rev=05802500ec58381a440da07985b89539213b1a54)",
+ "lair_keystore_api",
  "pretty_assertions",
  "rpassword",
  "rusqlite",
@@ -4411,37 +4396,11 @@ dependencies = [
 [[package]]
 name = "lair_keystore_api"
 version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9519a48df54d2041f8697bba7c3957263a5f2bb720ae6c4954004bad51693c61"
-dependencies = [
- "base64 0.22.1",
- "dunce",
- "hc_seed_bundle 0.2.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "lru",
- "nanoid",
- "once_cell",
- "parking_lot 0.12.3",
- "rcgen",
- "serde",
- "serde_json",
- "serde_yaml",
- "time",
- "tokio",
- "toml 0.8.14",
- "tracing",
- "url",
- "winapi 0.3.9",
- "zeroize",
-]
-
-[[package]]
-name = "lair_keystore_api"
-version = "0.4.5"
 source = "git+https://github.com/coasys/lair.git?rev=05802500ec58381a440da07985b89539213b1a54#05802500ec58381a440da07985b89539213b1a54"
 dependencies = [
  "base64 0.22.1",
  "dunce",
- "hc_seed_bundle 0.2.4 (git+https://github.com/coasys/lair.git?rev=05802500ec58381a440da07985b89539213b1a54)",
+ "hc_seed_bundle",
  "lru",
  "nanoid",
  "once_cell",
