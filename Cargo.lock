@@ -2897,7 +2897,7 @@ dependencies = [
  "rand-utf8",
  "rand_chacha 0.3.1",
  "regex",
- "reqwest 0.12.5",
+ "reqwest 0.11.27",
  "rusqlite",
  "sbd-server",
  "sd-notify",
@@ -3751,6 +3751,19 @@ dependencies = [
 
 [[package]]
 name = "hyper-tls"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6183ddfa99b85da61a140bea0efc93fdf56ceaa041b37d553518030827f9905"
+dependencies = [
+ "bytes",
+ "hyper 0.14.29",
+ "native-tls",
+ "tokio",
+ "tokio-native-tls",
+]
+
+[[package]]
+name = "hyper-tls"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "70206fc6890eaca9fde8a0bf71caa2ddfc9fe045ac9e5c70df101a7dbde866e0"
@@ -4295,7 +4308,7 @@ dependencies = [
  "kitsune_p2p_types",
  "parking_lot 0.12.3",
  "rand 0.8.5",
- "reqwest 0.12.5",
+ "reqwest 0.11.27",
  "serde",
  "serde_bytes",
  "thiserror",
@@ -4315,7 +4328,7 @@ dependencies = [
  "kitsune_p2p_bootstrap_client",
  "kitsune_p2p_types",
  "rand 0.8.5",
- "reqwest 0.12.5",
+ "reqwest 0.11.27",
  "serde",
  "serde_bytes",
  "tokio",
@@ -4949,7 +4962,7 @@ dependencies = [
  "matches",
  "proptest",
  "proptest-derive 0.5.0",
- "reqwest 0.12.5",
+ "reqwest 0.11.27",
  "rmp-serde",
  "serde",
  "serde_bytes",
@@ -6321,10 +6334,12 @@ dependencies = [
  "http-body 0.4.6",
  "hyper 0.14.29",
  "hyper-rustls 0.24.2",
+ "hyper-tls 0.5.0",
  "ipnet",
  "js-sys",
  "log",
  "mime",
+ "native-tls",
  "once_cell",
  "percent-encoding",
  "pin-project-lite",
@@ -6336,6 +6351,7 @@ dependencies = [
  "sync_wrapper 0.1.2",
  "system-configuration",
  "tokio",
+ "tokio-native-tls",
  "tokio-rustls 0.24.1",
  "tower-service",
  "url",
@@ -6363,7 +6379,7 @@ dependencies = [
  "http-body-util",
  "hyper 1.3.1",
  "hyper-rustls 0.27.2",
- "hyper-tls",
+ "hyper-tls 0.6.0",
  "hyper-util",
  "ipnet",
  "js-sys",

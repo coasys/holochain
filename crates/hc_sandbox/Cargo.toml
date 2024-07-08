@@ -22,7 +22,7 @@ path = "src/bin/hc-sandbox.rs"
 [dependencies]
 anyhow = "1.0"
 ansi_term = "0.12"
-chrono = { version = "0.4.22", default-features = false, features = [
+chrono = { version = "0.4.38", default-features = false, features = [
   "clock",
   "std",
   "oldtime",
