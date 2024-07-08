@@ -301,11 +301,11 @@ impl EndpointAdapt for MemEndpointAdapt {
 
             let bad_url = |reason: &str| Err(format!("invalid url {} : {}", url, reason).into());
 
-            if url.scheme() != "kitsune-mem" {
+            if url.as_url2().scheme() != "kitsune-mem" {
                 return bad_url("scheme must be kitsune-mem");
             }
 
-            let id = match url.host_str() {
+            let id = match url.as_url2().host_str() {
                 None => return bad_url("no host specified"),
                 Some(id) => id,
             };

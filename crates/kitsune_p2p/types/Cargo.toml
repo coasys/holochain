@@ -34,7 +34,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 sysinfo = "0.30"
 thiserror = "1.0.22"
 tokio = { version = "1.27", features = ["full"] }
-url = "2"
+url = "<2.5.0"
 url2 = "0.0.6"
 
 fixt = { version = "^0.4.0-dev.2", path = "../../fixt", optional = true }

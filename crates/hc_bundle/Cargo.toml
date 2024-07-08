@@ -24,7 +24,7 @@ path = "src/bin/hc-dna.rs"
 
 # reminder - do not use workspace deps
 [dependencies]
-holochain_wasmer_host = { version = "=0.0.95", git = "https://github.com/coasys/holochain-wasmer.git",   rev = "bfab1d1d34228f270fdc965d6bec2330cda49ebe" }
+holochain_wasmer_host = { version = "=0.0.95", git = "https://github.com/coasys/holochain-wasmer.git",   rev = "1842b9687d490645403d939a9a1c86ea183a7827" }
 wasmer = { version = "=4.3.3", git="https://github.com/fayeed/wasmer.git", rev = "ecc5593b62040fbec4e960ecf636e0f2c89bce08"}
 futures = "0.3"
 anyhow = "1.0"

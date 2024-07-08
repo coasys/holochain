@@ -2132,7 +2132,7 @@ version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13624c2627564efccf4934284bdd98cbaa14e79b0b5a141218e507b3a823456"
 dependencies = [
- "percent-encoding",
+ "percent-encoding 2.3.1",
 ]
 
 [[package]]
@@ -2626,7 +2626,7 @@ dependencies = [
  "once_cell",
  "ratatui",
  "tokio",
- "url",
+ "url 1.7.2",
 ]
 
 [[package]]
@@ -2904,10 +2904,10 @@ dependencies = [
  "tracing-subscriber",
  "tx5-go-pion-turn",
  "unwrap_to",
- "url",
+ "url 1.7.2",
  "url2",
  "uuid",
- "wasmer",
+ "wasmer 4.3.3",
  "wasmer-middlewares",
 ]
 
@@ -2978,7 +2978,7 @@ dependencies = [
  "tokio",
  "tracing",
  "walkdir",
- "wasmer",
+ "wasmer 4.3.3",
 ]
 
 [[package]]
@@ -3385,7 +3385,7 @@ dependencies = [
  "parking_lot 0.12.3",
  "pretty_assertions",
  "proptest",
- "proptest-derive 0.4.0",
+ "proptest-derive 0.5.0",
  "rand 0.8.5",
  "regex",
  "rusqlite",
@@ -3437,20 +3437,20 @@ dependencies = [
 [[package]]
 name = "holochain_wasmer_common"
 version = "0.0.95"
-source = "git+https://github.com/coasys/holochain-wasmer.git?rev=bfab1d1d34228f270fdc965d6bec2330cda49ebe#bfab1d1d34228f270fdc965d6bec2330cda49ebe"
+source = "git+https://github.com/coasys/holochain-wasmer.git?rev=1842b9687d490645403d939a9a1c86ea183a7827#1842b9687d490645403d939a9a1c86ea183a7827"
 dependencies = [
  "holochain_serialized_bytes",
  "serde",
  "serde_bytes",
  "test-fuzz",
  "thiserror",
- "wasmer",
+ "wasmer 4.3.3",
 ]
 
 [[package]]
 name = "holochain_wasmer_guest"
 version = "0.0.95"
-source = "git+https://github.com/coasys/holochain-wasmer.git?rev=bfab1d1d34228f270fdc965d6bec2330cda49ebe#bfab1d1d34228f270fdc965d6bec2330cda49ebe"
+source = "git+https://github.com/coasys/holochain-wasmer.git?rev=1842b9687d490645403d939a9a1c86ea183a7827#1842b9687d490645403d939a9a1c86ea183a7827"
 dependencies = [
  "holochain_serialized_bytes",
  "holochain_wasmer_common",
@@ -3463,7 +3463,7 @@ dependencies = [
 [[package]]
 name = "holochain_wasmer_host"
 version = "0.0.95"
-source = "git+https://github.com/coasys/holochain-wasmer.git?rev=bfab1d1d34228f270fdc965d6bec2330cda49ebe#bfab1d1d34228f270fdc965d6bec2330cda49ebe"
+source = "git+https://github.com/coasys/holochain-wasmer.git?rev=1842b9687d490645403d939a9a1c86ea183a7827#1842b9687d490645403d939a9a1c86ea183a7827"
 dependencies = [
  "bimap",
  "bytes",
@@ -3474,7 +3474,7 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "tracing",
- "wasmer",
+ "wasmer 4.3.3",
  "wasmer-middlewares",
 ]
 
@@ -3709,6 +3709,17 @@ name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
+
+[[package]]
+name = "idna"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38f09e0f0b1fb55fdee1f17470ad800da77af5186a1a76c026b679358b7e844e"
+dependencies = [
+ "matches",
+ "unicode-bidi",
+ "unicode-normalization",
+]
 
 [[package]]
 name = "idna"
@@ -4081,13 +4092,13 @@ dependencies = [
  "num-cmp",
  "once_cell",
  "parking_lot 0.12.3",
- "percent-encoding",
+ "percent-encoding 2.3.1",
  "regex",
  "reqwest",
  "serde",
  "serde_json",
  "time",
- "url",
+ "url 2.5.2",
  "uuid",
 ]
 
@@ -4365,7 +4376,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing-subscriber",
- "url",
+ "url 1.7.2",
  "url2",
 ]
 
@@ -4413,7 +4424,7 @@ dependencies = [
  "tokio",
  "toml 0.8.14",
  "tracing",
- "url",
+ "url 2.5.2",
  "winapi 0.3.9",
  "zeroize",
 ]
@@ -5407,6 +5418,12 @@ dependencies = [
 
 [[package]]
 name = "percent-encoding"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31010dd2e1ac33d5b46a5b413495239882813e0369f8ed8a5e266f173602f831"
+
+[[package]]
+name = "percent-encoding"
 version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3148f5046208a5d56bcfc03053e3ca6334e51da8dfb19b6cdc8b306fae3283e"
@@ -6215,7 +6232,7 @@ dependencies = [
  "mime",
  "native-tls",
  "once_cell",
- "percent-encoding",
+ "percent-encoding 2.3.1",
  "pin-project-lite",
  "rustls 0.21.12",
  "rustls-pemfile 1.0.4",
@@ -6229,7 +6246,7 @@ dependencies = [
  "tokio-rustls 0.24.1",
  "tokio-util",
  "tower-service",
- "url",
+ "url 2.5.2",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-streams",
@@ -6651,7 +6668,7 @@ dependencies = [
  "schemars_derive",
  "serde",
  "serde_json",
- "url",
+ "url 2.5.2",
 ]
 
 [[package]]
@@ -8070,7 +8087,7 @@ dependencies = [
  "rustls-pki-types",
  "sha1",
  "thiserror",
- "url",
+ "url 2.5.2",
  "utf-8",
 ]
 
@@ -8087,7 +8104,7 @@ dependencies = [
  "tracing",
  "tx5-connection",
  "tx5-core",
- "url",
+ "url 2.5.2",
 ]
 
 [[package]]
@@ -8120,7 +8137,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "url",
+ "url 2.5.2",
 ]
 
 [[package]]
@@ -8134,7 +8151,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tx5-go-pion-sys",
- "url",
+ "url 2.5.2",
 ]
 
 [[package]]
@@ -8313,7 +8330,18 @@ dependencies = [
  "base64 0.22.1",
  "log",
  "once_cell",
- "url",
+ "url 2.5.2",
+]
+
+[[package]]
+name = "url"
+version = "1.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd4e7c0d531266369519a4aa4f399d748bd37043b00bde1e4ff1f60a120b355a"
+dependencies = [
+ "idna 0.1.5",
+ "matches",
+ "percent-encoding 1.0.1",
 ]
 
 [[package]]
@@ -8323,8 +8351,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22784dbdf76fdde8af1aeda5622b546b422b6fc585325248a2bf9f5e41e94d6c"
 dependencies = [
  "form_urlencoded",
- "idna",
- "percent-encoding",
+ "idna 0.5.0",
+ "percent-encoding 2.3.1",
  "serde",
 ]
 
@@ -8335,7 +8363,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c89cd13f1de9862d363308f5ffdadcd2b64b2a4a812fb296a80b7d3e80011b1e"
 dependencies = [
  "serde",
- "url",
+ "url 2.5.2",
 ]
 
 [[package]]
@@ -8447,7 +8475,7 @@ dependencies = [
  "mime",
  "mime_guess",
  "multer",
- "percent-encoding",
+ "percent-encoding 2.3.1",
  "pin-project",
  "scoped-tls",
  "serde",
@@ -8620,11 +8648,37 @@ dependencies = [
  "thiserror",
  "tracing",
  "wasm-bindgen",
- "wasmer-compiler",
+ "wasmer-compiler 4.3.1",
+ "wasmer-derive 4.3.1",
+ "wasmer-types 4.3.1",
+ "wasmer-vm 4.3.1",
+ "winapi 0.3.9",
+]
+
+[[package]]
+name = "wasmer"
+version = "4.3.3"
+source = "git+https://github.com/fayeed/wasmer.git?rev=ecc5593b62040fbec4e960ecf636e0f2c89bce08#ecc5593b62040fbec4e960ecf636e0f2c89bce08"
+dependencies = [
+ "bytes",
+ "cfg-if 1.0.0",
+ "derivative",
+ "indexmap 1.9.3",
+ "js-sys",
+ "more-asserts",
+ "rustc-demangle",
+ "serde",
+ "serde-wasm-bindgen",
+ "shared-buffer",
+ "target-lexicon",
+ "thiserror",
+ "tracing",
+ "wasm-bindgen",
+ "wasmer-compiler 4.3.3",
  "wasmer-compiler-cranelift",
- "wasmer-derive",
- "wasmer-types",
- "wasmer-vm",
+ "wasmer-derive 4.3.3",
+ "wasmer-types 4.3.3",
+ "wasmer-vm 4.3.3",
  "wat",
  "winapi 0.3.9",
 ]
@@ -8650,8 +8704,36 @@ dependencies = [
  "shared-buffer",
  "smallvec 1.13.2",
  "thiserror",
- "wasmer-types",
- "wasmer-vm",
+ "wasmer-types 4.3.1",
+ "wasmer-vm 4.3.1",
+ "wasmparser",
+ "winapi 0.3.9",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "wasmer-compiler"
+version = "4.3.3"
+source = "git+https://github.com/fayeed/wasmer.git?rev=ecc5593b62040fbec4e960ecf636e0f2c89bce08#ecc5593b62040fbec4e960ecf636e0f2c89bce08"
+dependencies = [
+ "backtrace",
+ "bytes",
+ "cfg-if 1.0.0",
+ "enum-iterator",
+ "enumset",
+ "lazy_static",
+ "leb128",
+ "libc",
+ "memmap2 0.5.10",
+ "more-asserts",
+ "region",
+ "rkyv",
+ "self_cell",
+ "shared-buffer",
+ "smallvec 1.13.2",
+ "thiserror",
+ "wasmer-types 4.3.3",
+ "wasmer-vm 4.3.3",
  "wasmparser",
  "winapi 0.3.9",
  "xxhash-rust",
@@ -8659,9 +8741,8 @@ dependencies = [
 
 [[package]]
 name = "wasmer-compiler-cranelift"
-version = "4.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95287b79973ad5f485215733ef9f0d4bb951a6b7e655585d2bd3d4a4ba1253c9"
+version = "4.3.3"
+source = "git+https://github.com/fayeed/wasmer.git?rev=ecc5593b62040fbec4e960ecf636e0f2c89bce08#ecc5593b62040fbec4e960ecf636e0f2c89bce08"
 dependencies = [
  "cranelift-codegen",
  "cranelift-entity",
@@ -8672,8 +8753,8 @@ dependencies = [
  "smallvec 1.13.2",
  "target-lexicon",
  "tracing",
- "wasmer-compiler",
- "wasmer-types",
+ "wasmer-compiler 4.3.3",
+ "wasmer-types 4.3.3",
 ]
 
 [[package]]
@@ -8695,7 +8776,7 @@ dependencies = [
  "serde_yaml",
  "thiserror",
  "toml 0.8.14",
- "url",
+ "url 2.5.2",
 ]
 
 [[package]]
@@ -8711,14 +8792,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasmer-derive"
+version = "4.3.3"
+source = "git+https://github.com/fayeed/wasmer.git?rev=ecc5593b62040fbec4e960ecf636e0f2c89bce08#ecc5593b62040fbec4e960ecf636e0f2c89bce08"
+dependencies = [
+ "proc-macro-error",
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
 name = "wasmer-middlewares"
 version = "4.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "667dbe64667a478fd5726111180dd757113f3589a589f831bfe4ae1a256ae77e"
 dependencies = [
- "wasmer",
- "wasmer-types",
- "wasmer-vm",
+ "wasmer 4.3.1",
+ "wasmer-types 4.3.1",
+ "wasmer-vm 4.3.1",
 ]
 
 [[package]]
@@ -8726,6 +8818,26 @@ name = "wasmer-types"
 version = "4.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83cb97b6b20084757a2a8d548dc0d4179c3fe9e2d711740423a1e6aa3f8b9091"
+dependencies = [
+ "bytecheck",
+ "enum-iterator",
+ "enumset",
+ "getrandom 0.2.15",
+ "hex",
+ "indexmap 1.9.3",
+ "more-asserts",
+ "rkyv",
+ "sha2",
+ "target-lexicon",
+ "thiserror",
+ "webc",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "wasmer-types"
+version = "4.3.3"
+source = "git+https://github.com/fayeed/wasmer.git?rev=ecc5593b62040fbec4e960ecf636e0f2c89bce08#ecc5593b62040fbec4e960ecf636e0f2c89bce08"
 dependencies = [
  "bytecheck",
  "enum-iterator",
@@ -8766,7 +8878,34 @@ dependencies = [
  "region",
  "scopeguard",
  "thiserror",
- "wasmer-types",
+ "wasmer-types 4.3.1",
+ "winapi 0.3.9",
+]
+
+[[package]]
+name = "wasmer-vm"
+version = "4.3.3"
+source = "git+https://github.com/fayeed/wasmer.git?rev=ecc5593b62040fbec4e960ecf636e0f2c89bce08#ecc5593b62040fbec4e960ecf636e0f2c89bce08"
+dependencies = [
+ "backtrace",
+ "cc",
+ "cfg-if 1.0.0",
+ "corosensei",
+ "crossbeam-queue",
+ "dashmap 5.5.3",
+ "derivative",
+ "enum-iterator",
+ "fnv",
+ "indexmap 1.9.3",
+ "lazy_static",
+ "libc",
+ "mach2",
+ "memoffset 0.9.1",
+ "more-asserts",
+ "region",
+ "scopeguard",
+ "thiserror",
+ "wasmer-types 4.3.3",
  "winapi 0.3.9",
 ]
 
@@ -8837,7 +8976,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml 0.7.8",
- "url",
+ "url 2.5.2",
  "wasmer-config",
 ]
 

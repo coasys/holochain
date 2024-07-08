@@ -40,7 +40,7 @@ holochain_serialized_bytes = { version = "=0.0.55", git = "https://github.com/co
 holochain_state = { version = "^0.4.0-dev.11", path = "../holochain_state" }
 holochain_types = { version = "^0.4.0-dev.11", path = "../holochain_types" }
 holochain_util = { version = "^0.4.0-dev.1", path = "../holochain_util" }
-holochain_wasmer_host = {version = "=0.0.95", git = "https://github.com/coasys/holochain-wasmer.git",   rev = "bfab1d1d34228f270fdc965d6bec2330cda49ebe"}
+holochain_wasmer_host = {version = "=0.0.95", git = "https://github.com/coasys/holochain-wasmer.git",   rev = "1842b9687d490645403d939a9a1c86ea183a7827"}
 holochain_websocket = { version = "^0.4.0-dev.11", path = "../holochain_websocket" }
 holochain_zome_types = { version = "^0.4.0-dev.9", path = "../holochain_zome_types", features = [
   "full",
@@ -85,7 +85,7 @@ task-motel = "0.1.0"
 tracing = "0.1.37"
 tracing-futures = "0.2.5"
 tracing-subscriber = "0.3.16"
-url = "2.4"
+url = "<2.5.0"
 url2 = "0.0.6"
 uuid = { version = "1.8", features = ["serde", "v4"] }
 holochain_wasm_test_utils = { version = "^0.4.0-dev.11", path = "../test_utils/wasm" }

@@ -21,10 +21,10 @@ impl TxUrl {
 }
 
 impl std::ops::Deref for TxUrl {
-    type Target = url::Url;
+    type Target = url2::Url2;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &*self.0
     }
 }
 
