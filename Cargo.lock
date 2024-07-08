@@ -2569,8 +2569,7 @@ dependencies = [
 [[package]]
 name = "hc_r2d2_sqlite"
 version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a95a4a8a02468f63e725a3881594a6720933f4e620087e5c2e34681d14cef05"
+source = "git+https://github.com/fayeed/r2d2-sqlite.git?rev=6dc52f833d4fbf9a0834a31de8200a29e04b5779#6dc52f833d4fbf9a0834a31de8200a29e04b5779"
 dependencies = [
  "r2d2",
  "rusqlite",
@@ -2582,6 +2581,20 @@ name = "hc_seed_bundle"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "849aaef544dc9a561bcf1af4cbbc02e4cd24904b623aa1d0311f756fc2a96d38"
+dependencies = [
+ "futures",
+ "one_err",
+ "rmp-serde",
+ "rmpv",
+ "serde",
+ "serde_bytes",
+ "sodoken 0.0.11",
+]
+
+[[package]]
+name = "hc_seed_bundle"
+version = "0.2.4"
+source = "git+https://github.com/coasys/lair.git?rev=05802500ec58381a440da07985b89539213b1a54#05802500ec58381a440da07985b89539213b1a54"
 dependencies = [
  "futures",
  "one_err",
@@ -4472,7 +4485,7 @@ dependencies = [
  "kitsune_p2p_dht_arc",
  "kitsune_p2p_timestamp",
  "kitsune_p2p_types",
- "lair_keystore_api",
+ "lair_keystore_api 0.4.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "mockall",
  "once_cell",
  "parking_lot 0.12.3",
@@ -4504,10 +4517,9 @@ dependencies = [
 [[package]]
 name = "lair_keystore"
 version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0da3e3e1bd2644dc2974ef622743cd83f2c661b3c6c67acb00cda4725646def"
+source = "git+https://github.com/coasys/lair.git?rev=05802500ec58381a440da07985b89539213b1a54#05802500ec58381a440da07985b89539213b1a54"
 dependencies = [
- "lair_keystore_api",
+ "lair_keystore_api 0.4.5 (git+https://github.com/coasys/lair.git?rev=05802500ec58381a440da07985b89539213b1a54)",
  "pretty_assertions",
  "rpassword",
  "rusqlite",
@@ -4525,7 +4537,32 @@ checksum = "9519a48df54d2041f8697bba7c3957263a5f2bb720ae6c4954004bad51693c61"
 dependencies = [
  "base64 0.22.1",
  "dunce",
- "hc_seed_bundle",
+ "hc_seed_bundle 0.2.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "lru",
+ "nanoid",
+ "once_cell",
+ "parking_lot 0.12.3",
+ "rcgen",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "time",
+ "tokio",
+ "toml 0.8.14",
+ "tracing",
+ "url",
+ "winapi 0.3.9",
+ "zeroize",
+]
+
+[[package]]
+name = "lair_keystore_api"
+version = "0.4.5"
+source = "git+https://github.com/coasys/lair.git?rev=05802500ec58381a440da07985b89539213b1a54#05802500ec58381a440da07985b89539213b1a54"
+dependencies = [
+ "base64 0.22.1",
+ "dunce",
+ "hc_seed_bundle 0.2.4 (git+https://github.com/coasys/lair.git?rev=05802500ec58381a440da07985b89539213b1a54)",
  "lru",
  "nanoid",
  "once_cell",
@@ -4650,9 +4687,8 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c10584274047cb335c23d3e61bcef8e323adae7c5c8c760540f73610177fc3f"
+version = "0.29.0"
+source = "git+https://github.com/coasys/rusqlite.git?rev=12ec1330bd4b46411ab9895364da4a3e172d0fbb#12ec1330bd4b46411ab9895364da4a3e172d0fbb"
 dependencies = [
  "cc",
  "openssl-sys",
@@ -6539,9 +6575,8 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.31.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b838eba278d213a8beaf485bd313fd580ca4505a00d5871caeb1457c55322cae"
+version = "0.29.0"
+source = "git+https://github.com/coasys/rusqlite.git?rev=12ec1330bd4b46411ab9895364da4a3e172d0fbb#12ec1330bd4b46411ab9895364da4a3e172d0fbb"
 dependencies = [
  "bitflags 2.6.0",
  "fallible-iterator 0.3.0",
