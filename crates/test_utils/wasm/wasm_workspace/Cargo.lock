@@ -1214,7 +1214,7 @@ dependencies = [
 [[package]]
 name = "holochain_wasmer_common"
 version = "0.0.95"
-source = "git+https://github.com/coasys/holochain-wasmer.git?rev=1842b9687d490645403d939a9a1c86ea183a7827#1842b9687d490645403d939a9a1c86ea183a7827"
+source = "git+https://github.com/coasys/holochain-wasmer.git?rev=b2af50855db66095b2503c2c091b79829f684e94#b2af50855db66095b2503c2c091b79829f684e94"
 dependencies = [
  "holochain_serialized_bytes",
  "serde",
@@ -1227,7 +1227,7 @@ dependencies = [
 [[package]]
 name = "holochain_wasmer_guest"
 version = "0.0.95"
-source = "git+https://github.com/coasys/holochain-wasmer.git?rev=1842b9687d490645403d939a9a1c86ea183a7827#1842b9687d490645403d939a9a1c86ea183a7827"
+source = "git+https://github.com/coasys/holochain-wasmer.git?rev=b2af50855db66095b2503c2c091b79829f684e94#b2af50855db66095b2503c2c091b79829f684e94"
 dependencies = [
  "holochain_serialized_bytes",
  "holochain_wasmer_common",
@@ -1497,6 +1497,15 @@ name = "log"
 version = "0.4.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7a70ba024b9dc04c27ea2f0c0548feb474ec5c54bba33a7f72f873a39d07b24"
+
+[[package]]
+name = "mach"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b823e83b2affd8f40a9ee8c29dbc56404c1e34cd2710921f2801e2cf29527afa"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "mach2"
@@ -3434,8 +3443,9 @@ dependencies = [
 
 [[package]]
 name = "wasmer"
-version = "4.3.3"
-source = "git+https://github.com/fayeed/wasmer.git?rev=ecc5593b62040fbec4e960ecf636e0f2c89bce08#ecc5593b62040fbec4e960ecf636e0f2c89bce08"
+version = "4.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ce4a267a570e121c9375136adefa2c48810273907de9c6817bc19db4d6144bc"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -3462,8 +3472,9 @@ dependencies = [
 
 [[package]]
 name = "wasmer-compiler"
-version = "4.3.3"
-source = "git+https://github.com/fayeed/wasmer.git?rev=ecc5593b62040fbec4e960ecf636e0f2c89bce08#ecc5593b62040fbec4e960ecf636e0f2c89bce08"
+version = "4.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9c23098e86ef1038155684fe50f0c1079a0e2a2e70f115b789df17e6ba98d20"
 dependencies = [
  "backtrace",
  "bytes",
@@ -3472,7 +3483,6 @@ dependencies = [
  "enumset",
  "lazy_static",
  "leb128",
- "libc",
  "memmap2 0.5.10",
  "more-asserts",
  "region",
@@ -3490,8 +3500,9 @@ dependencies = [
 
 [[package]]
 name = "wasmer-compiler-cranelift"
-version = "4.3.3"
-source = "git+https://github.com/fayeed/wasmer.git?rev=ecc5593b62040fbec4e960ecf636e0f2c89bce08#ecc5593b62040fbec4e960ecf636e0f2c89bce08"
+version = "4.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95287b79973ad5f485215733ef9f0d4bb951a6b7e655585d2bd3d4a4ba1253c9"
 dependencies = [
  "cranelift-codegen",
  "cranelift-entity",
@@ -3530,8 +3541,9 @@ dependencies = [
 
 [[package]]
 name = "wasmer-derive"
-version = "4.3.3"
-source = "git+https://github.com/fayeed/wasmer.git?rev=ecc5593b62040fbec4e960ecf636e0f2c89bce08#ecc5593b62040fbec4e960ecf636e0f2c89bce08"
+version = "4.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48f36aeeecb655f15fdd358bdf6e4cec27df181468fa4226084157e8462bd5e"
 dependencies = [
  "proc-macro-error",
  "proc-macro2",
@@ -3541,8 +3553,9 @@ dependencies = [
 
 [[package]]
 name = "wasmer-types"
-version = "4.3.3"
-source = "git+https://github.com/fayeed/wasmer.git?rev=ecc5593b62040fbec4e960ecf636e0f2c89bce08#ecc5593b62040fbec4e960ecf636e0f2c89bce08"
+version = "4.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83cb97b6b20084757a2a8d548dc0d4179c3fe9e2d711740423a1e6aa3f8b9091"
 dependencies = [
  "bytecheck",
  "enum-iterator",
@@ -3561,8 +3574,9 @@ dependencies = [
 
 [[package]]
 name = "wasmer-vm"
-version = "4.3.3"
-source = "git+https://github.com/fayeed/wasmer.git?rev=ecc5593b62040fbec4e960ecf636e0f2c89bce08#ecc5593b62040fbec4e960ecf636e0f2c89bce08"
+version = "4.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc1e19d986844b17b927ec8b0c7f3da6a7a2c2cb3b0f8ca5d4cb1a1f71bfb124"
 dependencies = [
  "backtrace",
  "cc",
@@ -3576,7 +3590,7 @@ dependencies = [
  "indexmap 1.9.3",
  "lazy_static",
  "libc",
- "mach2",
+ "mach",
  "memoffset",
  "more-asserts",
  "region",

@@ -40,7 +40,7 @@ holochain_serialized_bytes = { version = "=0.0.55", git = "https://github.com/co
 holochain_state = { version = "^0.4.0-dev.11", path = "../holochain_state" }
 holochain_types = { version = "^0.4.0-dev.11", path = "../holochain_types" }
 holochain_util = { version = "^0.4.0-dev.1", path = "../holochain_util" }
-holochain_wasmer_host = {version = "=0.0.95", git = "https://github.com/coasys/holochain-wasmer.git",   rev = "1842b9687d490645403d939a9a1c86ea183a7827"}
+holochain_wasmer_host = {version = "=0.0.95", git = "https://github.com/coasys/holochain-wasmer.git",   rev = "b2af50855db66095b2503c2c091b79829f684e94"}
 holochain_websocket = { version = "^0.4.0-dev.11", path = "../holochain_websocket" }
 holochain_zome_types = { version = "^0.4.0-dev.9", path = "../holochain_zome_types", features = [
   "full",
@@ -90,7 +90,7 @@ url2 = "0.0.6"
 uuid = { version = "1.8", features = ["serde", "v4"] }
 holochain_wasm_test_utils = { version = "^0.4.0-dev.11", path = "../test_utils/wasm" }
 tiny-keccak = { version = "2.0.2", features = ["keccak", "sha3"] }
-wasmer = { version = "=4.3.3", git="https://github.com/fayeed/wasmer.git", rev = "ecc5593b62040fbec4e960ecf636e0f2c89bce08"}
+wasmer = { version = "=4.3.1"}
 wasmer-middlewares = "=4.3.1"
 opentelemetry_api = { version = "=0.20.0", features = ["metrics"] }
 

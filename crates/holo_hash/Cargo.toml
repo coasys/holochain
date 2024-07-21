@@ -34,7 +34,7 @@ rusqlite = { version = "0.29", optional = true, git = "https://github.com/coasys
 serde = { version = "1.0.98", optional = true }
 serde_bytes = { version = "0.11", optional = true }
 tracing = { version = "0.1", optional = true }
-holochain_wasmer_common = { version = "=0.0.95", optional = true, git = "https://github.com/coasys/holochain-wasmer.git",   rev = "1842b9687d490645403d939a9a1c86ea183a7827" }
+holochain_wasmer_common = { version = "=0.0.95", optional = true, git = "https://github.com/coasys/holochain-wasmer.git",   rev = "b2af50855db66095b2503c2c091b79829f684e94" }
 
 [dev-dependencies]
 serde_json = { version = "1.0.51", features = ["preserve_order"] }
