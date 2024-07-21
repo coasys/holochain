@@ -145,7 +145,6 @@ pub struct InstallAppPayload {
     /// Optional: If app installation fails due to genesis failure, normally the app will be
     /// immediately uninstalled. When this flag is set, the app is left installed with empty cells intact.
     /// This can be useful for using `graft_records_onto_source_chain`, or for diagnostics.
-    #[cfg(feature = "chc")]
     #[serde(default)]
     pub ignore_genesis_failure: bool,
 }
@@ -501,7 +500,11 @@ impl InstalledAppCommon {
         self.disabled_clone_cells().map(|(_, cell_id)| cell_id)
     }
 
-    /// Iterator of all cells, both provisioned and cloned
+    /// Iterator of all cells, both provisioned and cloned.
+    // NOTE: as our app state model becomes more nuanced, we need to give careful attention to
+    // the definition of this function, since this represents all cells in use by the conductor.
+    // Any cell which exists and is not returned by this function is fair game for purging
+    // during app installation. See [`Conductor::remove_dangling_cells`].
     pub fn all_cells(&self) -> impl Iterator<Item = &CellId> {
         self.provisioned_cells()
             .map(|(_, c)| c)
@@ -795,6 +798,12 @@ impl InstalledAppCommon {
 }
 
 /// The status of an installed app.
+///
+/// App Status is a combination of two pieces of independent state:
+/// - Enabled/Disabled, which is a designation set by the user via the conductor admin interface.
+/// - Running/Stopped, which is a fact about the reality of the app in the course of its operation.
+///
+/// The combinations of these basic states give rise to the unified App Status.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, SerializedBytes)]
 #[serde(rename_all = "snake_case")]
 pub enum AppStatus {
@@ -961,11 +970,14 @@ impl AppStatusFx {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum StoppedAppReason {
-    /// Same meaning as [`InstalledAppInfoStatus::Paused`](https://docs.rs/holochain_conductor_api/0.0.33/holochain_conductor_api/enum.InstalledAppInfoStatus.html#variant.Paused).
+    /// Same meaning as [`AppStatus::Paused`].
     Paused(PausedAppReason),
 
-    /// Same meaning as [`InstalledAppInfoStatus::Disabled`](https://docs.rs/holochain_conductor_api/0.0.33/holochain_conductor_api/enum.InstalledAppInfoStatus.html#variant.Disabled).
+    /// Same meaning as [`AppStatus::Disabled`].
     Disabled(DisabledAppReason),
+
+    /// Same meaning as [`AppStatus::AwaitingMemProofs`].
+    AwaitingMemproofs,
 }
 
 impl StoppedAppReason {
@@ -975,9 +987,7 @@ impl StoppedAppReason {
         match status {
             AppStatus::Paused(reason) => Some(Self::Paused(reason.clone())),
             AppStatus::Disabled(reason) => Some(Self::Disabled(reason.clone())),
-            AppStatus::AwaitingMemproofs => {
-                Some(Self::Disabled(DisabledAppReason::AwaitingMemproofs))
-            }
+            AppStatus::AwaitingMemproofs => Some(Self::AwaitingMemproofs),
             AppStatus::Running => None,
         }
     }
@@ -988,6 +998,7 @@ impl From<StoppedAppReason> for AppStatus {
         match reason {
             StoppedAppReason::Paused(reason) => Self::Paused(reason),
             StoppedAppReason::Disabled(reason) => Self::Disabled(reason),
+            StoppedAppReason::AwaitingMemproofs => Self::AwaitingMemproofs,
         }
     }
 }
@@ -1007,8 +1018,11 @@ pub enum PausedAppReason {
 pub enum DisabledAppReason {
     /// The app is freshly installed, and never started
     NeverStarted,
-    /// The app is partially installed, i.e. awaiting membrane proofs
-    AwaitingMemproofs,
+    /// The app is fully installed and deferred memproofs have been provided by the UI,
+    /// but the app has not been enabled.
+    /// The app can be enabled via the app interface in this state, which is why this is
+    /// separate from other disabled states.
+    NotStartedAfterProvidingMemproofs,
     /// The disabling was done manually by the user (via admin interface)
     User,
     /// The disabling was due to an UNRECOVERABLE error
