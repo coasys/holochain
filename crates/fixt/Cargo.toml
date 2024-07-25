@@ -1,6 +1,6 @@
 [package]
 name = "fixt"
-version = "0.3.1-rc.0"
+version = "0.3.2-rc.0"
 description = "minimum viable fixtures"
 license = "Apache-2.0"
 homepage = "https://github.com/holochain/holochain"
@@ -12,7 +12,7 @@ edition = "2021"
 
 # reminder - do not use workspace deps
 [dependencies]
-holochain_serialized_bytes = { version = "=0.0.54", git = "https://github.com/coasys/holochain-serialization.git", rev = "6eaa4ea8913bfd977fcc4577e833f4dc18a215f7" }
+holochain_serialized_bytes = { version = "=0.0.55", git = "https://github.com/coasys/holochain-serialization.git", rev = "f9577913773931ec797261f90968903b1b4e27a8" }
 lazy_static = "1.4"
 parking_lot = "0.12"
 paste = "1.0.12"

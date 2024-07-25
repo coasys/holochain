@@ -7,6 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## Unreleased
 
+## 0.3.2-rc.1
+
+## 0.3.2-rc.0
+
+- System validation: Added a new rule that no new actions are allowed following a chain close action.
+
+## 0.3.1
+
+## 0.3.1-rc.2
+
+- App validation workflow: Reduce interval to re-trigger when dependencies are missing from 10 seconds to 100-1000 ms, according to number of missing dependencies.
+
+## 0.3.1-rc.1
+
+- Update Holochain Wasmer to v0.0.94 to get a fix for a deallocation bug that was causing crashes when calling zome functions on Rust 1.78. \#3900
+
 ## 0.3.1-rc.0
 
 - Fix an issue which caused a `WebsocketClosed` error to be logged when signals are sent after a client has closed their connection. \#3824

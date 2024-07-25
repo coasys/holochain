@@ -1,6 +1,6 @@
 [package]
 name = "kitsune_p2p_timestamp"
-version = "0.3.1-rc.0"
+version = "0.3.2-rc.0"
 description = "Microsecond-precision timestamp datatype for kitsune_p2p"
 license = "Apache-2.0"
 homepage = "https://github.com/holochain/holochain"
@@ -23,7 +23,7 @@ chrono = { version = "0.4.38", default-features = false, features = [
 ], optional = true }
 
 # Dependencies only needed for full.
-rusqlite = { version = "0.29", optional = true }
+rusqlite = { version = "0.31", optional = true }
 
 # Dependencies only needed for testing by downstream crates.
 arbitrary = { version = "1.0", features = ["derive"], optional = true }
@@ -35,7 +35,7 @@ rand = { version = "0.8", optional = true }
 
 
 [dev-dependencies]
-holochain_serialized_bytes = { version = "=0.0.54", git = "https://github.com/coasys/holochain-serialization.git", rev = "6eaa4ea8913bfd977fcc4577e833f4dc18a215f7" }
+holochain_serialized_bytes = { version = "=0.0.55", git = "https://github.com/coasys/holochain-serialization.git", rev = "f9577913773931ec797261f90968903b1b4e27a8" }
 serde_yaml = "0.9"
 
 [lints]

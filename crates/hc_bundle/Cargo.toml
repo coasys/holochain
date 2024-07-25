@@ -1,6 +1,6 @@
 [package]
 name = "holochain_cli_bundle"
-version = "0.3.1-rc.0"
+version = "0.3.2-rc.1"
 description = "DNA and hApp bundling functionality for the `hc` Holochain CLI utility"
 license = "Apache-2.0"
 homepage = "https://github.com/holochain/holochain"
@@ -24,17 +24,17 @@ path = "src/bin/hc-dna.rs"
 
 # reminder - do not use workspace deps
 [dependencies]
-holochain_wasmer_host = { version = "=0.0.94", git = "https://github.com/coasys/holochain-wasmer.git", rev = "52979e943861530bbafc48297b131fdec52c3e21" }
-wasmer = "=4.2.8"
+holochain_wasmer_host = { version = "=0.0.95", git = "https://github.com/coasys/holochain-wasmer.git", rev = "b2af50855db66095b2503c2c091b79829f684e94" }
+wasmer = "=4.3.1"
 futures = "0.3"
 anyhow = "1.0"
 clap = { version = "4.0", features = ["derive"] }
 holochain_util = { path = "../holochain_util", features = [
     "backtrace",
-], version = "^0.3.1-rc.0"}
-holochain_serialized_bytes = { version = "=0.0.54", git = "https://github.com/coasys/holochain-serialization.git", rev = "6eaa4ea8913bfd977fcc4577e833f4dc18a215f7" }
-holochain_types = { version = "^0.3.1-rc.0", path = "../holochain_types" }
-mr_bundle = { version = "^0.3.1-rc.0", path = "../mr_bundle" }
+], version = "^0.3.1"}
+holochain_serialized_bytes = { version = "=0.0.55", git = "https://github.com/coasys/holochain-serialization.git", rev = "f9577913773931ec797261f90968903b1b4e27a8" }
+holochain_types = { version = "^0.3.2-rc.1", path = "../holochain_types" }
+mr_bundle = { version = "^0.3.2-rc.0", path = "../mr_bundle" }
 serde_yaml = "0.9"
 thiserror = "1.0.22"
 tracing = "0.1"
