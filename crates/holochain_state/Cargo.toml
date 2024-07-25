@@ -12,7 +12,6 @@ edition = "2021"
 [dependencies]
 aitia = { version = "^0.2.2-rc.0", path = "../aitia" }
 chrono = { version = "0.4.38", default-features = false, features = [
-eb25b16a36dda12327ce7f1f2b77d90ed6064d
     "clock",
     "std",
     "oldtime",
