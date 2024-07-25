@@ -68,7 +68,8 @@ rand = "0.8.5"
 rand_chacha = "0.3.1"
 rand-utf8 = "0.0.1"
 serde = { version = "1.0.98", features = ["derive"] }
-rusqlite = { version = "0.29.0" }
+rusqlite = { version = "0.29", git = "https://github.com/coasys/rusqlite.git", rev = "12ec1330bd4b46411ab9895364da4a3e172d0fbb" }
+
 serde_bytes = "0.11.12"
 serde_json = { version = "1.0.51", features = ["preserve_order"] }
 serde_yaml = "0.9"
@@ -156,7 +157,7 @@ serde_json = { version = "1.0.51" }
 toml = "0.8"
 chrono = { version = "0.4.6", features = ["serde"] }
 hostname = "0.4"
-lair_keystore = { version = "0.4.5", default-features = false, features = [
+lair_keystore = { version = "0.4.5", git = "https://github.com/coasys/lair.git", rev = "05802500ec58381a440da07985b89539213b1a54", default-features = false, features = [
   "rusqlite-bundled-sqlcipher-vendored-openssl",
 ] }
 
