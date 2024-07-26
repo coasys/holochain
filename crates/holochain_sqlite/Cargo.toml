@@ -33,7 +33,7 @@ once_cell = "1.4.1"
 num_cpus = "1.13.0"
 parking_lot = "0.12"
 r2d2 = "0.8"
-r2d2_sqlite = { version = "0.24.0", package = "hc_r2d2_sqlite", git = "https://github.com/coasys/r2d2-sqlite.git", rev = "6dc52f833d4fbf9a0834a31de8200a29e04b5779" }
+r2d2_sqlite = { version = "0.24.0", package = "hc_r2d2_sqlite", git = "https://github.com/fayeed/r2d2-sqlite.git", rev = "6dc52f833d4fbf9a0834a31de8200a29e04b5779" }
 rmp-serde = "1.3.0"
 scheduled-thread-pool = "0.2"
 serde = "1.0.98"
