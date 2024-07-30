@@ -12,7 +12,7 @@ edition = "2021"
 
 # reminder - do not use workspace deps
 [dependencies]
-holochain_serialized_bytes = "=0.0.54"
+holochain_serialized_bytes = { version = "0.0.54", git = "https://github.com/coasys/holochain-serialization.git", rev = "e922b503d8230b35e725709603e672541d269fff" }
 lazy_static = "1.4"
 parking_lot = "0.12"
 paste = "1.0.12"

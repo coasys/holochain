@@ -24,7 +24,7 @@ path = "src/bin/hc-dna.rs"
 
 # reminder - do not use workspace deps
 [dependencies]
-holochain_wasmer_host = "=0.0.94"
+holochain_wasmer_host = {version = "=0.0.94", git = "https://github.com/coasys/holochain-wasmer.git", rev = "f2e9c2b1536d626ef7fb4622c28d682ff275057c"}
 wasmer = "=4.2.8"
 futures = "0.3"
 anyhow = "1.0"
@@ -32,7 +32,7 @@ clap = { version = "4.0", features = ["derive"] }
 holochain_util = { version = "^0.4.0-dev.1", path = "../holochain_util", features = [
   "backtrace",
 ] }
-holochain_serialized_bytes = "=0.0.54"
+holochain_serialized_bytes = { version = "0.0.54", git = "https://github.com/coasys/holochain-serialization.git", rev = "e922b503d8230b35e725709603e672541d269fff" }
 holochain_types = { version = "^0.4.0-dev.7", path = "../holochain_types" }
 mr_bundle = { version = "^0.4.0-dev.2", path = "../mr_bundle" }
 serde_yaml = "0.9"

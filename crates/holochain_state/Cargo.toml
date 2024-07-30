@@ -24,7 +24,7 @@ holo_hash = { version = "^0.4.0-dev.5", path = "../holo_hash", features = [
 fallible-iterator = "0.2.0"
 hc_sleuth = { version = "^0.4.0-dev.7", path = "../hc_sleuth" }
 holochain_keystore = { version = "^0.4.0-dev.7", path = "../holochain_keystore" }
-holochain_serialized_bytes = "=0.0.54"
+holochain_serialized_bytes = { version = "0.0.54", git = "https://github.com/coasys/holochain-serialization.git", rev = "e922b503d8230b35e725709603e672541d269fff" }
 holochain_p2p = { version = "^0.4.0-dev.7", path = "../holochain_p2p" }
 holochain_types = { version = "^0.4.0-dev.7", path = "../holochain_types" }
 holochain_zome_types = { version = "^0.4.0-dev.6", path = "../holochain_zome_types", features = [
