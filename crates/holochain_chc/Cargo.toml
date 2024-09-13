@@ -25,7 +25,7 @@ serde_bytes = "0.11.12"
 serde_json = { version = "1.0.51", features = ["preserve_order"] }
 thiserror = "1.0.22"
 tracing = "0.1"
-url = "2.4"
+url = "2.5.0"
 
 holochain_serialized_bytes = { version = "=0.0.55", optional = true }
 reqwest = { version = "0.12", features = [
