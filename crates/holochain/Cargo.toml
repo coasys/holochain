@@ -158,7 +158,7 @@ toml = "0.8"
 chrono = { version = "0.4.6", features = ["serde"] }
 hostname = "0.4"
 #lair_keystore = { version = "0.4.7", default-features = false, features = [
-lair_keystore = { version = "0.4.5", git = "https://github.com/coasys/lair.git", rev = "05802500ec58381a440da07985b89539213b1a54", default-features = false, features = [
+lair_keystore = { version = "0.4.7", git = "https://github.com/coasys/lair.git", branch = "0.4.7-coasys", default-features = false, features = [
   "rusqlite-bundled-sqlcipher-vendored-openssl",
 ] }
 

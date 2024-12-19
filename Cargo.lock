@@ -2575,7 +2575,7 @@ dependencies = [
 [[package]]
 name = "hc_seed_bundle"
 version = "0.2.4"
-source = "git+https://github.com/coasys/lair.git?rev=05802500ec58381a440da07985b89539213b1a54#05802500ec58381a440da07985b89539213b1a54"
+source = "git+https://github.com/coasys/lair.git?branch=0.4.7-coasys#7d2879390e82a86713810783c7a0a1605352329d"
 dependencies = [
  "futures",
  "one_err",
@@ -3665,7 +3665,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "socket2 0.5.8",
+ "socket2 0.4.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -4517,7 +4517,7 @@ dependencies = [
  "kitsune_p2p_dht_arc",
  "kitsune_p2p_timestamp",
  "kitsune_p2p_types",
- "lair_keystore_api 0.4.5",
+ "lair_keystore_api 0.4.7 (git+https://github.com/coasys/lair.git?branch=0.4.7-coasys)",
  "mockall",
  "once_cell",
  "parking_lot 0.12.3",
@@ -4529,7 +4529,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
- "sysinfo 0.32.1",
+ "sysinfo",
  "thiserror 1.0.69",
  "tokio",
  "tracing-subscriber",
@@ -4548,27 +4548,28 @@ dependencies = [
 
 [[package]]
 name = "lair_keystore"
-version = "0.4.5"
-source = "git+https://github.com/coasys/lair.git?rev=05802500ec58381a440da07985b89539213b1a54#05802500ec58381a440da07985b89539213b1a54"
+version = "0.4.7"
+source = "git+https://github.com/coasys/lair.git?branch=0.4.7-coasys#7d2879390e82a86713810783c7a0a1605352329d"
 dependencies = [
- "lair_keystore_api 0.4.5",
+ "lair_keystore_api 0.4.7 (git+https://github.com/coasys/lair.git?branch=0.4.7-coasys)",
  "pretty_assertions",
  "rpassword",
  "rusqlite",
  "sqlformat",
  "structopt",
- "sysinfo 0.30.13",
+ "sysinfo",
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "lair_keystore_api"
-version = "0.4.5"
-source = "git+https://github.com/coasys/lair.git?rev=05802500ec58381a440da07985b89539213b1a54#05802500ec58381a440da07985b89539213b1a54"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a05265b4edc56b686aa359eb573d5d6e59ea41d54e1be7c1a5081fac7e032d5"
 dependencies = [
  "base64 0.22.1",
  "dunce",
- "hc_seed_bundle 0.2.4 (git+https://github.com/coasys/lair.git?rev=05802500ec58381a440da07985b89539213b1a54)",
+ "hc_seed_bundle 0.2.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "lru",
  "nanoid",
  "once_cell",
@@ -4589,12 +4590,11 @@ dependencies = [
 [[package]]
 name = "lair_keystore_api"
 version = "0.4.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a05265b4edc56b686aa359eb573d5d6e59ea41d54e1be7c1a5081fac7e032d5"
+source = "git+https://github.com/coasys/lair.git?branch=0.4.7-coasys#7d2879390e82a86713810783c7a0a1605352329d"
 dependencies = [
  "base64 0.22.1",
  "dunce",
- "hc_seed_bundle 0.2.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "hc_seed_bundle 0.2.4 (git+https://github.com/coasys/lair.git?branch=0.4.7-coasys)",
  "lru",
  "nanoid",
  "once_cell",
@@ -7586,21 +7586,6 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
-version = "0.30.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a5b4ddaee55fb2bea2bf0e5000747e5f5c0de765e5a5ff87f4cd106439f4bb3"
-dependencies = [
- "cfg-if 1.0.0",
- "core-foundation-sys",
- "libc",
- "ntapi",
- "once_cell",
- "rayon",
- "windows 0.52.0",
-]
-
-[[package]]
-name = "sysinfo"
 version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4c33cd241af0f2e9e3b5c32163b873b29956890b5342e6745b917ce9d490f4af"
@@ -8403,7 +8388,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f1ab16d7a72dfc886548328256f2736357583b3737e091b02b9dd05c45b4389"
 dependencies = [
  "futures",
- "lair_keystore_api 0.4.7",
+ "lair_keystore_api 0.4.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "once_cell",
  "parking_lot 0.12.3",
  "rand 0.8.5",

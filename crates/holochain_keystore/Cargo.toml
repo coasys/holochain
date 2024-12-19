@@ -22,7 +22,7 @@ holochain_zome_types = { path = "../holochain_zome_types", version = "^0.3.6"}
 kitsune_p2p_types = { version = "^0.3.6", path = "../kitsune_p2p/types" }
 holochain_secure_primitive = { version = "^0.3.6", path = "../holochain_secure_primitive" }
 holochain_util = { version = "^0.3.6", path = "../holochain_util" }
-lair_keystore = { version = "0.4.5", git = "https://github.com/coasys/lair.git", rev = "05802500ec58381a440da07985b89539213b1a54", default-features = false }
+lair_keystore = { version = "0.4.7", git = "https://github.com/coasys/lair.git", branch = "0.4.7-coasys", default-features = false }
 must_future = "0.1.2"
 nanoid = "0.4.0"
 one_err = "0.0.8"
