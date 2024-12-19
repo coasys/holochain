@@ -7,6 +7,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## \[Unreleased\]
 
+## 0.3.6
+
+## 0.3.6-rc.0
+
+## 0.3.5
+
+## 0.3.4
+
+## 0.3.4-rc.0
+
+- Fix sql formatting to resolve new complaints thrown by `sqlformat` 0.2.6. Pin `sqlformat` dependency to 0.2.6.
+- Bump `lair_keystore` & `lair_keystore_api` to 0.4.6
+
+## 0.3.3
+
+## 0.3.3-rc.0
+
+## 0.3.2
+
 ## 0.3.2-rc.1
 
 ## 0.3.2-rc.0

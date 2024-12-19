@@ -7,6 +7,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## Unreleased
 
+## 0.2.6
+
+## 0.2.6-rc.0
+
+## 0.2.5
+
+## 0.2.5-rc.0
+
+## 0.2.4
+
+## 0.2.4-rc.0
+
+## 0.2.3
+
+## 0.2.3-rc.0
+
+## 0.2.2
+
 ## 0.2.2-rc.1
 
 ## 0.2.2-rc.0
