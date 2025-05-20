@@ -2400,6 +2400,7 @@ dependencies = [
  "hdk",
  "holochain",
  "holochain_keystore",
+ "holochain_serialized_bytes",
  "holochain_types",
  "rand 0.8.5",
  "rand-utf8",
