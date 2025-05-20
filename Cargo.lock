@@ -2425,22 +2425,6 @@ dependencies = [
 [[package]]
 name = "hc_seed_bundle"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba7dccfe4fef9db0bfc6ae68488e7517f1790bc62262d05beefa2377218978c3"
-dependencies = [
- "futures",
- "one_err",
- "rmp-serde",
- "rmpv",
- "serde",
- "serde_bytes",
- "sodoken",
- "tokio",
-]
-
-[[package]]
-name = "hc_seed_bundle"
-version = "0.3.1"
 source = "git+https://github.com/coasys/lair.git?branch=0.6.1-coasys#873c5f928d9e6054f2fd08038317cdcb2273a84f"
 dependencies = [
  "futures",
@@ -2696,7 +2680,7 @@ dependencies = [
  "kitsune2_bootstrap_srv",
  "kitsune2_core",
  "lair_keystore",
- "lair_keystore_api 0.6.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "lair_keystore_api",
  "maplit",
  "matches",
  "mockall",
@@ -3065,7 +3049,7 @@ dependencies = [
  "kitsune2_api",
  "kitsune2_core",
  "kitsune2_gossip",
- "lair_keystore_api 0.6.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "lair_keystore_api",
  "mockall",
  "opentelemetry_api",
  "parking_lot",
@@ -4302,7 +4286,7 @@ name = "lair_keystore"
 version = "0.6.1"
 source = "git+https://github.com/coasys/lair.git?branch=0.6.1-coasys#873c5f928d9e6054f2fd08038317cdcb2273a84f"
 dependencies = [
- "lair_keystore_api 0.6.1 (git+https://github.com/coasys/lair.git?branch=0.6.1-coasys)",
+ "lair_keystore_api",
  "pretty_assertions",
  "rpassword",
  "rusqlite",
@@ -4315,36 +4299,11 @@ dependencies = [
 [[package]]
 name = "lair_keystore_api"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ee05a24db1c24d9b5e8f97c9b9d18fbddc9fb4adb505f097fd19f1f8396fdc1"
-dependencies = [
- "base64 0.22.1",
- "dunce",
- "hc_seed_bundle 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "lru 0.13.0",
- "nanoid",
- "once_cell",
- "one_err",
- "rcgen",
- "serde",
- "serde_json",
- "serde_yaml",
- "tokio",
- "toml",
- "tracing",
- "url",
- "winapi 0.3.9",
- "zeroize",
-]
-
-[[package]]
-name = "lair_keystore_api"
-version = "0.6.1"
 source = "git+https://github.com/coasys/lair.git?branch=0.6.1-coasys#873c5f928d9e6054f2fd08038317cdcb2273a84f"
 dependencies = [
  "base64 0.22.1",
  "dunce",
- "hc_seed_bundle 0.3.1 (git+https://github.com/coasys/lair.git?branch=0.6.1-coasys)",
+ "hc_seed_bundle",
  "lru 0.13.0",
  "nanoid",
  "once_cell",
