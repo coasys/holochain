@@ -22,7 +22,6 @@ use holochain_keystore::MetaLairClient;
 use holochain_p2p::actor::GetLinksOptions;
 use holochain_p2p::{HolochainP2pDna, HolochainP2pDnaT};
 use holochain_state::host_fn_workspace::SourceChainWorkspace;
-use holochain_types::db_cache::DhtDbQueryCache;
 use holochain_types::prelude::*;
 use holochain_wasm_test_utils::TestWasmPair;
 use std::sync::Arc;
@@ -87,7 +86,6 @@ pub enum MaybeLinkable {
 pub struct HostFnCaller {
     pub authored_db: DbWrite<DbKindAuthored>,
     pub dht_db: DbWrite<DbKindDht>,
-    pub dht_db_cache: DhtDbQueryCache,
     pub cache: DbWrite<DbKindCache>,
     pub dpki: Option<DpkiImpl>,
     pub ribosome: RealRibosome,
@@ -120,7 +118,6 @@ impl HostFnCaller {
             .get_or_create_authored_db(cell_id.dna_hash(), cell_id.agent_pubkey().clone())
             .unwrap();
         let dht_db = handle.get_dht_db(cell_id.dna_hash()).unwrap();
-        let dht_db_cache = handle.get_dht_db_cache(cell_id.dna_hash()).unwrap();
         let cache = handle.get_cache_db(cell_id).await.unwrap();
         let keystore = handle.keystore().clone();
         let network = holochain_p2p::HolochainP2pDna::new(
@@ -147,7 +144,6 @@ impl HostFnCaller {
         HostFnCaller {
             authored_db,
             dht_db,
-            dht_db_cache,
             cache,
             dpki: None,
             ribosome,
@@ -180,7 +176,6 @@ impl HostFnCaller {
             signal_tx,
             zome_path,
             call_zome_handle,
-            dht_db_cache,
         } = self.clone();
 
         let (cell_id, zome_name) = zome_path.into();
@@ -188,7 +183,6 @@ impl HostFnCaller {
         let workspace = SourceChainWorkspace::new(
             authored_db,
             dht_db,
-            dht_db_cache,
             cache,
             keystore.clone(),
             cell_id.agent_pubkey().clone(),
@@ -296,7 +290,7 @@ impl HostFnCaller {
         output
     }
 
-    pub async fn delete_entry<'env>(&self, input: DeleteInput) -> ActionHash {
+    pub async fn delete_entry(&self, input: DeleteInput) -> ActionHash {
         let (ribosome, call_context, workspace) = self.unpack().await;
         let output = {
             let r = host_fn::delete::delete(ribosome, call_context, input);
@@ -353,7 +347,7 @@ impl HostFnCaller {
         host_fn::get::get(ribosome, call_context, vec![input]).unwrap()
     }
 
-    pub async fn get_details<'env>(
+    pub async fn get_details(
         &self,
         entry_hash: AnyDhtHash,
         options: GetOptions,
@@ -363,7 +357,7 @@ impl HostFnCaller {
         host_fn::get_details::get_details(ribosome, call_context, vec![input]).unwrap()
     }
 
-    pub async fn create_link<'env>(
+    pub async fn create_link(
         &self,
         base: AnyLinkableHash,
         target: AnyLinkableHash,
@@ -395,7 +389,7 @@ impl HostFnCaller {
         output
     }
 
-    pub async fn delete_link<'env>(&self, link_add_hash: ActionHash) -> ActionHash {
+    pub async fn delete_link(&self, link_add_hash: ActionHash) -> ActionHash {
         let (ribosome, call_context, workspace) = self.unpack().await;
         let output = {
             host_fn::delete_link::delete_link(
@@ -419,7 +413,7 @@ impl HostFnCaller {
         output
     }
 
-    pub async fn get_links<'env>(
+    pub async fn get_links(
         &self,
         base: AnyLinkableHash,
         type_query: LinkTypeFilter,
@@ -452,7 +446,7 @@ impl HostFnCaller {
         output
     }
 
-    pub async fn get_link_details<'env>(
+    pub async fn get_link_details(
         &self,
         base: AnyLinkableHash,
         type_query: LinkTypeFilter,

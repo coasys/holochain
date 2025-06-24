@@ -1,7 +1,6 @@
 use crate::{prelude::*, query::get_public_op_from_db};
 use holo_hash::{AnyLinkableHash, DhtOpHash, HasHash};
 use holochain_types::{
-    db_cache::DhtDbQueryCache,
     dht_op::{ChainOpType, DhtOp, DhtOpHashed},
     prelude::*,
 };
@@ -16,7 +15,6 @@ pub async fn authored_ops_to_dht_db(
     hashes: Vec<(DhtOpHash, AnyLinkableHash)>,
     authored_db: DbRead<DbKindAuthored>,
     dht_db: DbWrite<DbKindDht>,
-    dht_db_cache: &DhtDbQueryCache,
 ) -> StateMutationResult<()> {
     // Check if any agents in this space are an authority for these hashes.
     let mut should_hold_hashes = Vec::new();
@@ -28,8 +26,7 @@ pub async fn authored_ops_to_dht_db(
     }
 
     // Clone the ops into the dht db for the hashes that should be held.
-    authored_ops_to_dht_db_without_check(should_hold_hashes, authored_db, dht_db, dht_db_cache)
-        .await
+    authored_ops_to_dht_db_without_check(should_hold_hashes, authored_db, dht_db).await
 }
 
 /// Insert any authored ops that have been locally validated
@@ -43,7 +40,6 @@ pub async fn authored_ops_to_dht_db_without_check(
     hashes: Vec<DhtOpHash>,
     authored_db: DbRead<DbKindAuthored>,
     dht_db: DbWrite<DbKindDht>,
-    dht_db_cache: &DhtDbQueryCache,
 ) -> StateMutationResult<()> {
     // Get the ops from the authored database.
     let mut ops = Vec::with_capacity(hashes.len());
@@ -59,25 +55,14 @@ pub async fn authored_ops_to_dht_db_without_check(
             StateMutationResult::Ok(ops)
         })
         .await?;
-    let mut activity = Vec::new();
-    let activity = dht_db
+    dht_db
         .write_async(|txn| {
             for op in ops {
-                if let Some(op) = insert_locally_validated_op(txn, op)? {
-                    activity.push(op);
-                }
+                insert_locally_validated_op(txn, op)?;
             }
-            StateMutationResult::Ok(activity)
+            StateMutationResult::Ok(())
         })
         .await?;
-    for op in activity {
-        dht_db_cache
-            .set_activity_ready_to_integrate(
-                &op.author(),
-                op.as_chain_op().map(|op| op.action().action_seq()),
-            )
-            .await?;
-    }
     Ok(())
 }
 
@@ -128,9 +113,10 @@ fn insert_locally_validated_op(
 fn filter_private_entry(dht_op: DhtOpHashed) -> DhtOpResult<DhtOpHashed> {
     #[allow(irrefutable_let_patterns)]
     if let DhtOp::ChainOp(op) = dht_op.as_content() {
-        let is_private = op.action().entry_type().map_or(false, |et| {
-            matches!(et.visibility(), EntryVisibility::Private)
-        });
+        let is_private = op
+            .action()
+            .entry_type()
+            .is_some_and(|et| matches!(et.visibility(), EntryVisibility::Private));
         let is_entry = op.entry().into_option().is_some();
         if is_private && is_entry {
             let op_type = op.get_type();
@@ -153,7 +139,7 @@ fn is_private_store_entry(op: &DhtOp) -> bool {
     if let DhtOp::ChainOp(op) = op {
         op.action()
             .entry_type()
-            .map_or(false, |et| *et.visibility() == EntryVisibility::Private)
+            .is_some_and(|et| *et.visibility() == EntryVisibility::Private)
             && op.get_type() == ChainOpType::StoreEntry
     } else {
         false

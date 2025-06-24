@@ -39,7 +39,6 @@ pub struct SourceChain<AuthorDb = DbWrite<DbKindAuthored>, DhtDb = DbWrite<DbKin
     scratch: SyncScratch,
     vault: AuthorDb,
     dht_db: DhtDb,
-    dht_db_cache: DhtDbQueryCache,
     keystore: MetaLairClient,
     author: Arc<AgentPubKey>,
     head_info: Option<HeadInfo>,
@@ -413,7 +412,6 @@ impl SourceChain {
                     let child_chain = Self::new(
                         self.vault.clone(),
                         self.dht_db.clone(),
-                        self.dht_db_cache.clone(),
                         keystore.clone(),
                         (*self.author).clone(),
                     )
@@ -446,7 +444,6 @@ impl SourceChain {
                     ops_to_integrate,
                     self.vault.clone().into(),
                     self.dht_db.clone(),
-                    &self.dht_db_cache,
                 )
                 .await?;
                 SourceChainResult::Ok(actions)
@@ -524,7 +521,6 @@ where
     pub async fn new(
         vault: AuthorDb,
         dht_db: DhtDb,
-        dht_db_cache: DhtDbQueryCache,
         keystore: MetaLairClient,
         author: AgentPubKey,
     ) -> SourceChainResult<Self> {
@@ -542,7 +538,6 @@ where
             scratch,
             vault,
             dht_db,
-            dht_db_cache,
             keystore,
             author,
             head_info,
@@ -558,7 +553,6 @@ where
     pub async fn raw_empty(
         vault: AuthorDb,
         dht_db: DhtDb,
-        dht_db_cache: DhtDbQueryCache,
         keystore: MetaLairClient,
         author: AgentPubKey,
     ) -> SourceChainResult<Self> {
@@ -574,7 +568,6 @@ where
             scratch,
             vault,
             dht_db,
-            dht_db_cache,
             keystore,
             author,
             head_info,
@@ -914,8 +907,7 @@ where
                                 let action = from_blob::<SignedAction>(row.get("action_blob")?)?;
                                 let (action, signature) = action.into();
                                 let private_entry = action
-                                    .entry_type()
-                                    .map_or(false, |e| *e.visibility() == EntryVisibility::Private);
+                                    .entry_type().is_some_and(|e| *e.visibility() == EntryVisibility::Private);
                                 let hash: ActionHash = row.get("action_hash")?;
                                 let action = ActionHashed::with_pre_hashed(action, hash);
                                 let shh = SignedActionHashed::with_presigned(action, signature);
@@ -1096,7 +1088,6 @@ async fn rebase_actions_on(
 pub async fn genesis(
     authored: DbWrite<DbKindAuthored>,
     dht_db: DbWrite<DbKindDht>,
-    dht_db_cache: &DhtDbQueryCache,
     keystore: MetaLairClient,
     dna_hash: DnaHash,
     agent_pubkey: AgentPubKey,
@@ -1190,13 +1181,7 @@ pub async fn genesis(
     // We don't check for authorityship here because during genesis we have no opportunity
     // to discover that the network is sharded and that we should not be an authority for
     // these items, so we assume we are an authority.
-    authored_ops_to_dht_db_without_check(
-        ops_to_integrate,
-        authored.clone().into(),
-        dht_db,
-        dht_db_cache,
-    )
-    .await?;
+    authored_ops_to_dht_db_without_check(ops_to_integrate, authored.clone().into(), dht_db).await?;
     Ok(())
 }
 
@@ -1417,7 +1402,6 @@ impl From<SourceChain> for SourceChainRead {
         SourceChainRead {
             vault: chain.vault.into(),
             dht_db: chain.dht_db.into(),
-            dht_db_cache: chain.dht_db_cache,
             scratch: chain.scratch,
             keystore: chain.keystore,
             author: chain.author,
@@ -1451,12 +1435,9 @@ mod tests {
         let db = test_db.to_db();
         let alice = fixt!(AgentPubKey, Predictable, 0);
 
-        let dht_db_cache = DhtDbQueryCache::new(dht_db.to_db().into());
-
         source_chain::genesis(
             db.clone(),
             dht_db.to_db(),
-            &dht_db_cache,
             keystore.clone(),
             fake_dna_hash(1),
             alice.clone(),
@@ -1464,30 +1445,12 @@ mod tests {
             None,
         )
         .await?;
-        let chain_1 = SourceChain::new(
-            db.clone(),
-            dht_db.to_db(),
-            dht_db_cache.clone(),
-            keystore.clone(),
-            alice.clone(),
-        )
-        .await?;
-        let chain_2 = SourceChain::new(
-            db.clone(),
-            dht_db.to_db(),
-            dht_db_cache.clone(),
-            keystore.clone(),
-            alice.clone(),
-        )
-        .await?;
-        let chain_3 = SourceChain::new(
-            db.clone(),
-            dht_db.to_db(),
-            dht_db_cache.clone(),
-            keystore.clone(),
-            alice.clone(),
-        )
-        .await?;
+        let chain_1 =
+            SourceChain::new(db.clone(), dht_db.to_db(), keystore.clone(), alice.clone()).await?;
+        let chain_2 =
+            SourceChain::new(db.clone(), dht_db.to_db(), keystore.clone(), alice.clone()).await?;
+        let chain_3 =
+            SourceChain::new(db.clone(), dht_db.to_db(), keystore.clone(), alice.clone()).await?;
 
         let action_builder = builder::CloseChain { new_target: None };
         chain_1
@@ -1540,12 +1503,9 @@ mod tests {
         let db = test_db.to_db();
         let alice = fixt!(AgentPubKey, Predictable, 0);
 
-        let dht_db_cache = DhtDbQueryCache::new(dht_db.to_db().into());
-
         source_chain::genesis(
             db.clone(),
             dht_db.to_db(),
-            &dht_db_cache,
             keystore.clone(),
             fake_dna_hash(1),
             alice.clone(),
@@ -1555,30 +1515,12 @@ mod tests {
         .await
         .unwrap();
 
-        let chain_1 = SourceChain::new(
-            db.clone(),
-            dht_db.to_db(),
-            dht_db_cache.clone(),
-            keystore.clone(),
-            alice.clone(),
-        )
-        .await?;
-        let chain_2 = SourceChain::new(
-            db.clone(),
-            dht_db.to_db(),
-            dht_db_cache.clone(),
-            keystore.clone(),
-            alice.clone(),
-        )
-        .await?;
-        let chain_3 = SourceChain::new(
-            db.clone(),
-            dht_db.to_db(),
-            dht_db_cache.clone(),
-            keystore.clone(),
-            alice.clone(),
-        )
-        .await?;
+        let chain_1 =
+            SourceChain::new(db.clone(), dht_db.to_db(), keystore.clone(), alice.clone()).await?;
+        let chain_2 =
+            SourceChain::new(db.clone(), dht_db.to_db(), keystore.clone(), alice.clone()).await?;
+        let chain_3 =
+            SourceChain::new(db.clone(), dht_db.to_db(), keystore.clone(), alice.clone()).await?;
 
         let entry_1 = Entry::App(fixt!(AppEntryBytes));
         let eh1 = EntryHash::with_data_sync(&entry_1);
@@ -1672,14 +1614,12 @@ mod tests {
     async fn delete_valid_agent_pub_key() {
         let authored_db = test_authored_db().to_db();
         let dht_db = test_dht_db().to_db();
-        let dht_db_cache = DhtDbQueryCache::new(dht_db.clone().into());
         let keystore = test_keystore();
         let agent_key = keystore.new_sign_keypair_random().await.unwrap();
 
         source_chain::genesis(
             authored_db.clone(),
             dht_db.clone(),
-            &dht_db_cache,
             keystore.clone(),
             fake_dna_hash(1),
             agent_key.clone(),
@@ -1690,7 +1630,7 @@ mod tests {
         .unwrap();
 
         // Delete valid agent pub key should succeed.
-        let chain = SourceChain::new(authored_db, dht_db, dht_db_cache, keystore, agent_key)
+        let chain = SourceChain::new(authored_db, dht_db, keystore, agent_key)
             .await
             .unwrap();
         let result = chain.delete_valid_agent_pub_key().await;
@@ -1707,7 +1647,6 @@ mod tests {
     async fn test_get_cap_grant() -> SourceChainResult<()> {
         let test_db = test_authored_db();
         let dht_db = test_dht_db();
-        let dht_db_cache = DhtDbQueryCache::new(dht_db.to_db().into());
         let keystore = test_keystore();
         let db = test_db.to_db();
         let secret = Some(CapSecretFixturator::new(Unpredictable).next().unwrap());
@@ -1730,7 +1669,6 @@ mod tests {
         source_chain::genesis(
             db.clone(),
             dht_db.to_db(),
-            &dht_db_cache,
             keystore.clone(),
             fake_dna_hash(1),
             alice.clone(),
@@ -1740,14 +1678,8 @@ mod tests {
         .await
         .unwrap();
 
-        let chain = SourceChain::new(
-            db.clone(),
-            dht_db.to_db(),
-            dht_db_cache.clone(),
-            keystore.clone(),
-            alice.clone(),
-        )
-        .await?;
+        let chain =
+            SourceChain::new(db.clone(), dht_db.to_db(), keystore.clone(), alice.clone()).await?;
         // alice as chain author always has a valid cap grant; provided secrets
         // are ignored
         assert_eq!(
@@ -1824,14 +1756,9 @@ mod tests {
 
         // commit grant update to alice's source chain
         let (updated_action_hash, updated_entry_hash) = {
-            let chain = SourceChain::new(
-                db.clone(),
-                dht_db.to_db(),
-                dht_db_cache.clone(),
-                keystore.clone(),
-                alice.clone(),
-            )
-            .await?;
+            let chain =
+                SourceChain::new(db.clone(), dht_db.to_db(), keystore.clone(), alice.clone())
+                    .await?;
             let (entry, entry_hash) =
                 EntryHashed::from_content_sync(Entry::CapGrant(updated_grant.clone())).into_inner();
             let action_builder = builder::Update {
@@ -1903,7 +1830,6 @@ mod tests {
             source_chain::genesis(
                 db.clone(),
                 dht_db.to_db(),
-                &dht_db_cache,
                 keystore.clone(),
                 fake_dna_hash(1),
                 carol.clone(),
@@ -1912,15 +1838,10 @@ mod tests {
             )
             .await
             .unwrap();
-            let carol_chain = SourceChain::new(
-                db.clone(),
-                dht_db.clone(),
-                dht_db_cache.clone(),
-                keystore.clone(),
-                carol.clone(),
-            )
-            .await
-            .unwrap();
+            let carol_chain =
+                SourceChain::new(db.clone(), dht_db.clone(), keystore.clone(), carol.clone())
+                    .await
+                    .unwrap();
             let maybe_cap_grant = carol_chain
                 .valid_cap_grant(("".into(), "".into()), alice.clone(), secret)
                 .await
@@ -1930,14 +1851,9 @@ mod tests {
 
         // delete updated cap grant
         {
-            let chain = SourceChain::new(
-                db.clone(),
-                dht_db.to_db(),
-                dht_db_cache.clone(),
-                keystore.clone(),
-                alice.clone(),
-            )
-            .await?;
+            let chain =
+                SourceChain::new(db.clone(), dht_db.to_db(), keystore.clone(), alice.clone())
+                    .await?;
             let action_builder = builder::Delete {
                 deletes_address: updated_action_hash,
                 deletes_entry_address: updated_entry_hash,
@@ -1984,14 +1900,9 @@ mod tests {
             GrantedFunctions::All,
         );
         let (original_action_address, original_entry_address) = {
-            let chain = SourceChain::new(
-                db.clone(),
-                dht_db.to_db(),
-                dht_db_cache.clone(),
-                keystore.clone(),
-                alice.clone(),
-            )
-            .await?;
+            let chain =
+                SourceChain::new(db.clone(), dht_db.to_db(), keystore.clone(), alice.clone())
+                    .await?;
             let (entry, entry_hash) =
                 EntryHashed::from_content_sync(Entry::CapGrant(unrestricted_grant.clone()))
                     .into_inner();
@@ -2033,7 +1944,6 @@ mod tests {
                 source_chain::genesis(
                     db.clone(),
                     dht_db.to_db(),
-                    &dht_db_cache,
                     keystore.clone(),
                     fake_dna_hash(1),
                     bob.clone(),
@@ -2042,15 +1952,10 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let bob_chain = SourceChain::new(
-                    db.clone(),
-                    dht_db.clone(),
-                    dht_db_cache.clone(),
-                    keystore.clone(),
-                    bob.clone(),
-                )
-                .await
-                .unwrap();
+                let bob_chain =
+                    SourceChain::new(db.clone(), dht_db.clone(), keystore.clone(), bob.clone())
+                        .await
+                        .unwrap();
                 let maybe_cap_grant = bob_chain
                     .valid_cap_grant(("".into(), "".into()), carol.clone(), None)
                     .await
@@ -2061,14 +1966,9 @@ mod tests {
 
         // delete unrestricted cap grant
         {
-            let chain = SourceChain::new(
-                db.clone(),
-                dht_db.to_db(),
-                dht_db_cache.clone(),
-                keystore.clone(),
-                alice.clone(),
-            )
-            .await?;
+            let chain =
+                SourceChain::new(db.clone(), dht_db.to_db(), keystore.clone(), alice.clone())
+                    .await?;
             let action_builder = builder::Delete {
                 deletes_address: original_action_address,
                 deletes_entry_address: original_entry_address,
@@ -2114,14 +2014,9 @@ mod tests {
         );
 
         {
-            let chain = SourceChain::new(
-                db.clone(),
-                dht_db.to_db(),
-                dht_db_cache.clone(),
-                keystore.clone(),
-                alice.clone(),
-            )
-            .await?;
+            let chain =
+                SourceChain::new(db.clone(), dht_db.to_db(), keystore.clone(), alice.clone())
+                    .await?;
 
             // commit first grant to alice's chain
             let (entry, entry_hash) =
@@ -2207,7 +2102,6 @@ mod tests {
         holochain_trace::test_run();
         let test_db = test_authored_db();
         let dht_db = test_dht_db();
-        let dht_db_cache = DhtDbQueryCache::new(dht_db.to_db().into());
         let keystore = test_keystore();
         let vault = test_db.to_db();
 
@@ -2228,7 +2122,6 @@ mod tests {
         genesis(
             vault.clone(),
             dht_db.to_db(),
-            &dht_db_cache,
             keystore.clone(),
             fixt!(DnaHash),
             (*author).clone(),
@@ -2241,7 +2134,6 @@ mod tests {
         let source_chain = SourceChain::new(
             vault.clone(),
             dht_db.to_db(),
-            dht_db_cache.clone(),
             keystore.clone(),
             (*author).clone(),
         )
@@ -2303,7 +2195,6 @@ mod tests {
         let source_chain = SourceChain::new(
             vault.clone(),
             dht_db.to_db(),
-            dht_db_cache.clone(),
             keystore.clone(),
             (*author).clone(),
         )
@@ -2321,14 +2212,12 @@ mod tests {
     async fn source_chain_buffer_dump_entries_json() -> SourceChainResult<()> {
         let test_db = test_authored_db();
         let dht_db = test_dht_db();
-        let dht_db_cache = DhtDbQueryCache::new(dht_db.to_db().into());
         let keystore = test_keystore();
         let vault = test_db.to_db();
         let author = keystore.new_sign_keypair_random().await.unwrap();
         genesis(
             vault.clone(),
             dht_db.to_db(),
-            &dht_db_cache,
             keystore.clone(),
             fixt!(DnaHash),
             author.clone(),
@@ -2360,7 +2249,6 @@ mod tests {
     async fn source_chain_query() {
         let test_db = test_authored_db();
         let dht_db = test_dht_db();
-        let dht_db_cache = DhtDbQueryCache::new(dht_db.to_db().into());
         let keystore = test_keystore();
         let vault = test_db.to_db();
         let alice = keystore.new_sign_keypair_random().await.unwrap();
@@ -2370,7 +2258,6 @@ mod tests {
         genesis(
             vault.clone(),
             dht_db.to_db(),
-            &dht_db_cache,
             keystore.clone(),
             dna_hash.clone(),
             alice.clone(),
@@ -2383,7 +2270,6 @@ mod tests {
         genesis(
             vault.clone(),
             dht_db.to_db(),
-            &dht_db_cache,
             keystore.clone(),
             dna_hash.clone(),
             bob.clone(),
@@ -2395,7 +2281,7 @@ mod tests {
 
         // test_db.dump_tmp();
 
-        let chain = SourceChain::new(vault, dht_db.to_db(), dht_db_cache, keystore, alice.clone())
+        let chain = SourceChain::new(vault, dht_db.to_db(), keystore, alice.clone())
             .await
             .unwrap();
 
@@ -2505,7 +2391,6 @@ mod tests {
     async fn source_chain_query_ordering() {
         let test_db = test_authored_db();
         let dht_db = test_dht_db();
-        let dht_db_cache = DhtDbQueryCache::new(dht_db.to_db().into());
         let keystore = test_keystore();
         let vault = test_db.to_db();
         let alice = keystore.new_sign_keypair_random().await.unwrap();
@@ -2514,7 +2399,6 @@ mod tests {
         genesis(
             vault.clone(),
             dht_db.to_db(),
-            &dht_db_cache,
             keystore.clone(),
             dna_hash.clone(),
             alice.clone(),
@@ -2524,7 +2408,7 @@ mod tests {
         .await
         .unwrap();
 
-        let chain = SourceChain::new(vault, dht_db.to_db(), dht_db_cache, keystore, alice.clone())
+        let chain = SourceChain::new(vault, dht_db.to_db(), keystore, alice.clone())
             .await
             .unwrap();
 
@@ -2546,7 +2430,6 @@ mod tests {
     async fn init_zomes_complete() {
         let test_db = test_authored_db();
         let dht_db = test_dht_db();
-        let dht_db_cache = DhtDbQueryCache::new(dht_db.to_db().into());
         let keystore = test_keystore();
         let vault = test_db.to_db();
         let alice = keystore.new_sign_keypair_random().await.unwrap();
@@ -2555,7 +2438,6 @@ mod tests {
         genesis(
             vault.clone(),
             dht_db.to_db(),
-            &dht_db_cache,
             keystore.clone(),
             dna_hash.clone(),
             alice.clone(),
@@ -2565,7 +2447,7 @@ mod tests {
         .await
         .unwrap();
 
-        let chain = SourceChain::new(vault, dht_db.to_db(), dht_db_cache, keystore, alice.clone())
+        let chain = SourceChain::new(vault, dht_db.to_db(), keystore, alice.clone())
             .await
             .unwrap();
 
