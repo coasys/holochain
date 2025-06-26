@@ -351,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "fixt"
-version = "0.5.2"
+version = "0.5.3-rc.0"
 dependencies = [
  "holochain_serialized_bytes",
  "lazy_static",
@@ -503,12 +503,13 @@ checksum = "bf151400ff0baff5465007dd2f3e717f3fe502074ca563069ce3a6629d07b289"
 
 [[package]]
 name = "hdi"
-version = "0.6.2"
+version = "0.6.3-rc.0"
 dependencies = [
  "getrandom",
  "hdk_derive",
  "holo_hash",
  "holochain_integrity_types",
+ "holochain_serialized_bytes",
  "holochain_wasmer_guest",
  "paste",
  "serde",
@@ -519,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "hdk"
-version = "0.5.2"
+version = "0.5.3-rc.0"
 dependencies = [
  "getrandom",
  "hdi",
@@ -538,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "hdk_derive"
-version = "0.5.2"
+version = "0.5.3-rc.0"
 dependencies = [
  "darling 0.14.4",
  "heck 0.5.0",
@@ -567,7 +568,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "holo_hash"
-version = "0.5.2"
+version = "0.5.3-rc.0"
 dependencies = [
  "base64",
  "blake2b_simd",
@@ -587,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "holochain_integrity_types"
-version = "0.5.2"
+version = "0.5.3-rc.0"
 dependencies = [
  "derive_builder",
  "holo_hash",
@@ -612,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "holochain_nonce"
-version = "0.5.2"
+version = "0.5.3-rc.0"
 dependencies = [
  "getrandom",
  "holochain_secure_primitive",
@@ -630,9 +631,9 @@ dependencies = [
 
 [[package]]
 name = "holochain_serialized_bytes"
-version = "0.0.55"
+version = "0.0.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "719fa847cf9f772f7e8e1a6f11d801e1383cc5af043292042665da9a6ce5c742"
+checksum = "ad33bcab89bdceca5498f1b2fd5c4d1c07d35749deba965c2911494001845ac8"
 dependencies = [
  "holochain_serialized_bytes_derive",
  "rmp-serde",
@@ -640,30 +641,31 @@ dependencies = [
  "serde-transcode",
  "serde_bytes",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.12",
 ]
 
 [[package]]
 name = "holochain_serialized_bytes_derive"
-version = "0.0.55"
+version = "0.0.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e6a221b5650251e09ef0b9223cf39e72b5222492cffc6bb4bdf36b2a6bc91aa"
+checksum = "01865625f72d8b6a05487440dfce3c03b0fc83ae03bba7ed6bfbc2f6f8143d14"
 dependencies = [
  "quote",
- "syn 1.0.109",
+ "syn 2.0.100",
 ]
 
 [[package]]
 name = "holochain_test_wasm_common"
-version = "0.5.2"
+version = "0.5.3-rc.0"
 dependencies = [
  "hdk",
+ "holochain_serialized_bytes",
  "serde",
 ]
 
 [[package]]
 name = "holochain_timestamp"
-version = "0.5.2"
+version = "0.5.3-rc.0"
 dependencies = [
  "chrono",
  "serde",
@@ -671,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "holochain_util"
-version = "0.5.2"
+version = "0.5.3-rc.0"
 dependencies = [
  "cfg-if",
  "colored",
@@ -682,9 +684,9 @@ dependencies = [
 
 [[package]]
 name = "holochain_wasmer_common"
-version = "0.0.99"
+version = "0.0.101"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c826653a839b4cd5ac5728c52daab4cd27e1bcc23bdd5121ef64977f7a25196"
+checksum = "2246138152bef3637f773399fb7118527715f3d03bea85c442d299a518f2bfd1"
 dependencies = [
  "holochain_serialized_bytes",
  "serde",
@@ -694,9 +696,9 @@ dependencies = [
 
 [[package]]
 name = "holochain_wasmer_guest"
-version = "0.0.99"
+version = "0.0.101"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbe3e79d77552986719fd47a1134bbb46f67c16a09b96ca0b6ef90af03d4f34d"
+checksum = "b408ee73bd97b4daeae9a420fe3c321063d0aeaeee08bbbb3f7d9ae25d6f87a4"
 dependencies = [
  "holochain_serialized_bytes",
  "holochain_wasmer_common",
@@ -707,7 +709,7 @@ dependencies = [
 
 [[package]]
 name = "holochain_zome_types"
-version = "0.5.2"
+version = "0.5.3-rc.0"
 dependencies = [
  "derive_builder",
  "derive_more",
@@ -1152,9 +1154,9 @@ checksum = "56e6fa9c48d24d85fb3de5ad847117517440f6beceb7798af16b4a87d616b8d0"
 
 [[package]]
 name = "serde"
-version = "1.0.203"
+version = "1.0.219"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7253ab4de971e72fb7be983802300c30b5a7f0c2e56fab8abfc6a214307c0094"
+checksum = "5f0e2c6ed6606019b4e29e69dbaba95b11854410e5347d525002456dbbb786b6"
 dependencies = [
  "serde_derive",
 ]
@@ -1179,9 +1181,9 @@ dependencies = [
 
 [[package]]
 name = "serde_derive"
-version = "1.0.203"
+version = "1.0.219"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "500cbc0ebeb6f46627f50f3f5811ccf6bf00643be300b4c3eabc0ef55dc5b5ba"
+checksum = "5b0276cf7f2c73365f7157c8123c21cd9a50fbbd844757af28ca1f5925fc2a00"
 dependencies = [
  "proc-macro2",
  "quote",
