@@ -94,8 +94,8 @@ uuid = { version = "1.8", features = ["serde", "v4"] }
 sha3 = "0.10"
 opentelemetry_api = { version = "=0.20.0", features = ["metrics"] }
 indexmap = { version = "2.6.0", features = ["serde"] }
-wasmer = { version = "5.0.2", default-features = false }
-wasmer-middlewares = { version = "5.0.2", optional = true, default-features = false }
+wasmer = { version = "6", default-features = false }
+wasmer-middlewares = { version = "6", optional = true, default-features = false }
 
 # Dependencies for test_utils / other optional deps
 fixt = { version = "^0.5.3-rc.0", path = "../fixt", optional = true }
