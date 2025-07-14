@@ -38,7 +38,8 @@ pub(super) async fn build_preserialized_wasm<M: Manifest>(
                             }
                             Err(e) => Err(HcBundleError::SerializedModuleError(e)),
                         },
-                        Err(e) => Err(HcBundleError::MiscError(Box::new(e))),                    }
+                        Err(e) => Err(HcBundleError::MiscError(Box::new(e))),
+                    }
                 } else {
                     Ok(())
                 }

@@ -6,6 +6,18 @@ default_semver_increment_mode: !pre_patch rc
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+
+## 0.5.4
+
+## 0.5.4-rc.0
+
+- It’s possible to configure an advanced setting for the network layer that shows tracing information about network connectivity and state changes. Rather than having to configure that in Holochain runtimes, it is now automatically enabled when the `NETAUDIT` tracing target is enabled at `WARN` level or lower.
+
+## 0.5.3
+
+## 0.5.3-rc.0
+
+- Updates rusqlite to 0.36.
 - Updates holochain\_serialized\_bytes to 0.0.56 which updates serde to 1.0.219, now requires projects using serialized bytes to have a direct dependency on it similarly to serde itself.
 - Updates holochain-wasmer to 0.0.101, which updates to wasmer to v6 and drops support for precompiled iOS modules which was deprecated at 0.4.
 - Filter out unresponsive agents when publishing ops. Any URL that is set as unresponsive in the peer meta store will be filtered out when determining the agents near a location to publish to.
