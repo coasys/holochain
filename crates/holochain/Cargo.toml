@@ -143,7 +143,8 @@ contrafact = "0.2.0-rc.1"
 criterion = { version = "0.5", features = ["async_tokio"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 isotest = "0"
-lair_keystore = "0.6.2"
+# lair_keystore = "0.6.2"
+lair_keystore_api = { version = "0.6.1", git = "https://github.com/coasys/lair.git", branch = "0.6.1-coasys" }
 maplit = "1"
 pretty_assertions = "1.4"
 regex = "1.5"
@@ -161,7 +162,8 @@ serde_json = { version = "1.0.51" }
 toml = "0.8"
 chrono = { version = "0.4.6", features = ["serde"] }
 hostname = "0.4"
-lair_keystore = { version = "0.6.2", default-features = false, features = [
+#lair_keystore = { version = "0.6.2", default-features = false, features = [
+lair_keystore = { version = "0.6.1", default-features = false, features = [
   "rusqlite-bundled-sqlcipher-vendored-openssl",
 ], git = "https://github.com/coasys/lair.git", branch = "0.6.1-coasys" }
 
