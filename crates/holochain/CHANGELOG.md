@@ -7,6 +7,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## Unreleased
 
+## 0.5.5
+
+## 0.5.5-rc.3
+
+## 0.5.5-rc.2
+
+- Update Kitsune2 to 0.1.14 and tx5 to 0.3.11 to get various bugfixes.
+- As part of the tx5 update, go-pion has been upgraded to v4, and as part of the Kitsune2 update, there are now features to allow either libdatachannel or go-pion to be used as the WebRTC backend. The default is still libdatachannel.
+
+## 0.5.5-rc.1
+
+## 0.5.5-rc.0
+
+- Update to a new Kitsune2 version that contains a fix for an out-of-bounds array access bug in the DHT model.
+- As part of the fix below, the Holo hash method `to_k2_op` on a DhtOpHash` has been deprecated and replaced with  `to\_located\_k2\_op\_id\`.
+- Fixes a bug where the wrong DhtOp location was reported to Kitsune2. This resulted in conductors not being able to sync with each other. This change can upgrade existing conductors and new data should sync correctly. However, part of the DHT model gets persisted and to fix bad data in the persisted model, the model has to be wiped and rebuilt. This will result in a short startup delay when upgrading to this version. After the first startup, the startup time should be back to normal.
+- Update Kitsune2 and tx5 to a version that contains a fix for a tx5 bug which would cause failed WebRTC connections to fall back to using the relay over signal instead of closing the connection. When the connection is closed because of an error, it can be reopened. If a connection is treated as relayed, it will stay relayed and not switch back to a direct connection.
+
 ## 0.5.4
 
 ## 0.5.4-rc.0

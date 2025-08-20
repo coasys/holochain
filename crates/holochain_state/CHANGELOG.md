@@ -7,6 +7,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## \[Unreleased\]
 
+## 0.5.5
+
+## 0.5.5-rc.3
+
+## 0.5.5-rc.2
+
+## 0.5.5-rc.1
+
+## 0.5.5-rc.0
+
+### Fixed
+
+- Tracing macro on `source_chain::flush` function was skipping the `network` parameter that was removed, it now skips the new `chc` parameter that replaced the `network` parameter.
+
 ## 0.5.4
 
 ## 0.5.4-rc.0
