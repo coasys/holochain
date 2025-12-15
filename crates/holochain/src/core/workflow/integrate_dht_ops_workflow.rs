@@ -46,6 +46,12 @@ pub async fn integrate_dht_ops_workflow(
                         if let Some(warrantee) = warrantee {
                             match validation_status {
                                 ValidationStatus::Valid => {
+                                    tracing::error!(
+                                        ?warrantee,
+                                        ?op_hash,
+                                        ?author,
+                                        msg = "🚫 VALID WARRANT - BLOCKING WARRANTEE PERMANENTLY",
+                                    );
                                     tracing::info!(
                                         ?warrantee,
                                         ?op_hash,
@@ -54,6 +60,12 @@ pub async fn integrate_dht_ops_workflow(
                                     block_agents.push((warrantee, op_hash));
                                 }
                                 ValidationStatus::Rejected => {
+                                    tracing::error!(
+                                        ?author,
+                                        ?op_hash,
+                                        ?warrantee,
+                                        msg = "🚫 INVALID WARRANT - BLOCKING WARRANT AUTHOR PERMANENTLY",
+                                    );
                                     tracing::info!(
                                         ?author,
                                         ?op_hash,
@@ -92,10 +104,17 @@ pub async fn integrate_dht_ops_workflow(
             Ok(interval) => {
                 for (block_agent, invalid_op_hash) in block_agents {
                     // Block agent
+                    let cell_id = CellId::new(network.dna_hash(), block_agent.clone());
+                    tracing::error!(
+                        agent = ?block_agent,
+                        cell_id = ?cell_id,
+                        invalid_op_hash = ?invalid_op_hash,
+                        msg = "🔒 BLOCKING AGENT PERMANENTLY (from now until Timestamp::MAX)",
+                    );
                     if let Err(err) = network
                         .block(Block::new(
                             BlockTarget::Cell(
-                                CellId::new(network.dna_hash(), block_agent),
+                                cell_id,
                                 CellBlockReason::InvalidOp(invalid_op_hash),
                             ),
                             interval.clone(),

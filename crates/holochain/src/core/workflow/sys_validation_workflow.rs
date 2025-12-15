@@ -398,6 +398,16 @@ async fn sys_validation_workflow_inner(
             let warrant_op =
                 make_invalid_chain_warrant_op(&_keystore, _representative_agent.clone(), &chain_op)
                     .await?;
+
+            // DEBUG: Log warrant creation
+            tracing::error!(
+                op_hash = ?op_hash,
+                chain_op_type = ?chain_op.get_type(),
+                warranted_author = ?chain_op.author(),
+                warranted_action_hash = ?chain_op.action().to_hash(),
+                msg = "📜 CREATING WARRANT for invalid op",
+            );
+
             warrants.push(warrant_op);
         }
 
@@ -850,6 +860,21 @@ pub(crate) async fn validate_op(
         // Handle the errors that result in pending or awaiting deps
         Err(SysValidationError::ValidationOutcome(e)) => {
             if e.is_indeterminate() {
+                // DEBUG: Log missing dependency details
+                let op_type = match op {
+                    DhtOp::ChainOp(chain_op) => format!("ChainOp::{:?}", chain_op.get_type()),
+                    DhtOp::WarrantOp(_) => "WarrantOp".to_string(),
+                };
+                let author = match op {
+                    DhtOp::ChainOp(chain_op) => Some(chain_op.author().clone()),
+                    DhtOp::WarrantOp(warrant_op) => Some(warrant_op.warrant().author.clone()),
+                };
+                tracing::info!(
+                    op_type = %op_type,
+                    author = ?author,
+                    msg = "⏳ DhtOp has missing dependency - will retry",
+                    error = ?e,
+                );
                 // This is expected if the dependency isn't held locally and needs to be fetched from the network
                 // so downgrade the logging to trace.
                 tracing::debug!(
@@ -860,6 +885,22 @@ pub(crate) async fn validate_op(
                 );
                 Ok(Outcome::MissingDhtDep)
             } else {
+                // DEBUG: Log rejection details
+                let op_type = match op {
+                    DhtOp::ChainOp(chain_op) => format!("ChainOp::{:?}", chain_op.get_type()),
+                    DhtOp::WarrantOp(_) => "WarrantOp".to_string(),
+                };
+                let author = match op {
+                    DhtOp::ChainOp(chain_op) => Some(chain_op.author().clone()),
+                    DhtOp::WarrantOp(warrant_op) => Some(warrant_op.warrant().author.clone()),
+                };
+                tracing::error!(
+                    op_type = %op_type,
+                    author = ?author,
+                    msg = "❌ DhtOp REJECTED - WARRANT WILL BE CREATED",
+                    validation_outcome = ?e,
+                    error_msg = %e,
+                );
                 tracing::warn!(msg = "DhtOp was rejected during system validation.", ?op, error = ?e, error_msg = %e);
                 Ok(Outcome::Rejected(e.to_string()))
             }
