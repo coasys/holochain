@@ -75,7 +75,7 @@ async fn agent_is_removed_from_peer_store_when_blocked() {
     let TestActor { actor: alice, .. } = TestActor::new(&dna_hash, &addr).await;
     let space = alice
         .test_kitsune()
-        .space(dna_hash.to_k2_space())
+        .space(dna_hash.to_k2_space(), None)
         .await
         .unwrap();
     let peer_store = space.peer_store();
@@ -557,7 +557,7 @@ impl TestActor {
         actor.register_handler(Arc::new(handler)).await.unwrap();
         let space = actor
             .test_kitsune()
-            .space(dna_hash.to_k2_space())
+            .space(dna_hash.to_k2_space(), None)
             .await
             .unwrap();
         let blocks_module = space.blocks().clone();

@@ -266,7 +266,7 @@ async fn test_publish() {
     // TODO invoking process_incoming_ops is a hack,
     //      prefer calling a function on the mem store directly.
     hc2.test_kitsune()
-        .space(dna_hash.to_k2_space())
+        .space(dna_hash.to_k2_space(), None)
         .await
         .unwrap()
         .op_store()
@@ -1056,7 +1056,7 @@ async fn bridged_call_remote() {
     let agent2 = lair_client.new_sign_keypair_random().await.unwrap();
     let local_agent2 = HolochainP2pLocalAgent::new(agent2.clone(), DhtArc::FULL, 1, lair_client);
     hc1.test_kitsune()
-        .space(dna_hash.to_k2_space())
+        .space(dna_hash.to_k2_space(), None)
         .await
         .unwrap()
         .local_agent_join(Arc::new(local_agent2))
@@ -1128,7 +1128,7 @@ async fn bridged_remote_signal() {
     let agent2 = lair_client.new_sign_keypair_random().await.unwrap();
     let local_agent2 = HolochainP2pLocalAgent::new(agent2.clone(), DhtArc::FULL, 1, lair_client);
     hc1.test_kitsune()
-        .space(dna_hash.to_k2_space())
+        .space(dna_hash.to_k2_space(), None)
         .await
         .unwrap()
         .local_agent_join(Arc::new(local_agent2))

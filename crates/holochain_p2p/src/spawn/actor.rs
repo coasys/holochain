@@ -651,6 +651,7 @@ impl kitsune2_api::KitsuneHandler for HolochainP2pActor {
     fn create_space(
         &self,
         _space: kitsune2_api::SpaceId,
+        _config: Option<&kitsune2_api::Config>,
     ) -> BoxFut<'_, kitsune2_api::K2Result<kitsune2_api::DynSpaceHandler>> {
         Box::pin(async move {
             let this: Weak<dyn kitsune2_api::SpaceHandler> = self.this.clone();
@@ -967,7 +968,7 @@ impl HolochainP2pActor {
                         let db_getter = db_getter.clone();
                         let kitsune2 = kitsune2.clone();
                         async move {
-                            let space = kitsune2.clone().space(space_id.clone()).await?;
+                            let space = kitsune2.clone().space(space_id.clone(), None).await?;
                             let peer_store = space.peer_store().clone();
                             let db = db_getter(DnaHash::from_k2_space(&space_id)).await?;
                             // Prune any expired entries.
@@ -1207,7 +1208,7 @@ impl HolochainP2pActor {
         ops: Vec<StoredOp>,
     ) -> HolochainP2pResult<()> {
         self.kitsune
-            .space(space_id)
+            .space(space_id, None)
             .await?
             .inform_ops_stored(ops)
             .await
@@ -1294,7 +1295,7 @@ impl actor::HcP2p for HolochainP2pActor {
         Box::pin(async move {
             Ok(self
                 .kitsune
-                .space(dna_hash.to_k2_space())
+                .space(dna_hash.to_k2_space(), None)
                 .await?
                 .peer_store()
                 .clone())
@@ -1329,7 +1330,7 @@ impl actor::HcP2p for HolochainP2pActor {
         _maybe_agent_info: Option<AgentInfoSigned>,
     ) -> BoxFut<'_, HolochainP2pResult<()>> {
         Box::pin(async move {
-            let space = self.kitsune.space(dna_hash.to_k2_space()).await?;
+            let space = self.kitsune.space(dna_hash.to_k2_space(), None).await?;
 
             let local_agent: DynLocalAgent = Arc::new(HolochainP2pLocalAgent::new(
                 agent_pub_key,
@@ -1350,7 +1351,7 @@ impl actor::HcP2p for HolochainP2pActor {
     ) -> BoxFut<'_, HolochainP2pResult<()>> {
         Box::pin(async move {
             let space_id = dna_hash.to_k2_space();
-            let space = self.kitsune.space(space_id.clone()).await?;
+            let space = self.kitsune.space(space_id.clone(), None).await?;
 
             space.local_agent_leave(agent_pub_key.to_k2_agent()).await;
 
@@ -1388,7 +1389,7 @@ impl actor::HcP2p for HolochainP2pActor {
     ) -> BoxFut<'_, HolochainP2pResult<SerializedBytes>> {
         Box::pin(async move {
             let space_id = dna_hash.to_k2_space();
-            let space = self.kitsune.space(space_id.clone()).await?;
+            let space = self.kitsune.space(space_id.clone(), None).await?;
 
             let byte_count = zome_call_params_serialized.0.len();
 
@@ -1434,7 +1435,7 @@ impl actor::HcP2p for HolochainP2pActor {
     ) -> BoxFut<'_, HolochainP2pResult<()>> {
         Box::pin(async move {
             let space_id = dna_hash.to_k2_space();
-            let space = self.kitsune.space(space_id.clone()).await?;
+            let space = self.kitsune.space(space_id.clone(), None).await?;
 
             let byte_count: usize = target_payload_list.iter().map(|(_, p, _)| p.0.len()).sum();
 
@@ -1506,7 +1507,7 @@ impl actor::HcP2p for HolochainP2pActor {
 
             let space = dna_hash.to_k2_space();
 
-            let space = self.kitsune.space(space).await?;
+            let space = self.kitsune.space(space, None).await?;
 
             // -- actually publish the op hashes -- //
 
@@ -1551,7 +1552,7 @@ impl actor::HcP2p for HolochainP2pActor {
     ) -> BoxFut<'_, HolochainP2pResult<()>> {
         Box::pin(async move {
             let space_id = dna_hash.to_k2_space();
-            let space = self.kitsune.space(space_id.clone()).await?;
+            let space = self.kitsune.space(space_id.clone(), None).await?;
 
             let peers = self
                 .get_peers_for_location(&space, basis_hash.get_loc())
@@ -1601,7 +1602,7 @@ impl actor::HcP2p for HolochainP2pActor {
     ) -> BoxFut<'_, HolochainP2pResult<Vec<WireOps>>> {
         Box::pin(async move {
             let space_id = dna_hash.to_k2_space();
-            let space = self.kitsune.space(space_id.clone()).await?;
+            let space = self.kitsune.space(space_id.clone(), None).await?;
             let loc = dht_hash.get_loc();
             let agents = self
                 .get_random_peers_for_location("get", &space, loc)
@@ -1675,7 +1676,7 @@ impl actor::HcP2p for HolochainP2pActor {
     ) -> BoxFut<'_, HolochainP2pResult<Vec<WireLinkOps>>> {
         Box::pin(async move {
             let space_id = dna_hash.to_k2_space();
-            let space = self.kitsune.space(space_id.clone()).await?;
+            let space = self.kitsune.space(space_id.clone(), None).await?;
             let loc = link_key.base.get_loc();
             let agents = self
                 .get_random_peers_for_location("get_links", &space, loc)
@@ -1730,7 +1731,7 @@ impl actor::HcP2p for HolochainP2pActor {
     ) -> BoxFut<'_, HolochainP2pResult<CountLinksResponse>> {
         Box::pin(async move {
             let space_id = dna_hash.to_k2_space();
-            let space = self.kitsune.space(space_id.clone()).await?;
+            let space = self.kitsune.space(space_id.clone(), None).await?;
             let loc = query.base.get_loc();
             let agents = self
                 .get_random_peers_for_location("count_links", &space, loc)
@@ -1782,7 +1783,7 @@ impl actor::HcP2p for HolochainP2pActor {
     ) -> BoxFut<'_, HolochainP2pResult<Vec<AgentActivityResponse>>> {
         Box::pin(async move {
             let space_id = dna_hash.to_k2_space();
-            let space = self.kitsune.space(space_id.clone()).await?;
+            let space = self.kitsune.space(space_id.clone(), None).await?;
             let loc = agent.get_loc();
             let agents = self
                 .get_random_peers_for_location("get_agent_activity", &space, loc)
@@ -1851,7 +1852,7 @@ impl actor::HcP2p for HolochainP2pActor {
     ) -> BoxFut<'_, HolochainP2pResult<Vec<MustGetAgentActivityResponse>>> {
         Box::pin(async move {
             let space_id = dna_hash.to_k2_space();
-            let space = self.kitsune.space(space_id.clone()).await?;
+            let space = self.kitsune.space(space_id.clone(), None).await?;
             let loc = author.get_loc();
             let agents = self
                 .get_random_peers_for_location("must_get_agent_activity", &space, loc)
@@ -1906,7 +1907,7 @@ impl actor::HcP2p for HolochainP2pActor {
     ) -> BoxFut<'_, HolochainP2pResult<()>> {
         Box::pin(async move {
             let space_id = dna_hash.to_k2_space();
-            let space = self.kitsune.space(space_id.clone()).await?;
+            let space = self.kitsune.space(space_id.clone(), None).await?;
 
             let agent_id = to_agent.to_k2_agent();
 
@@ -1967,7 +1968,7 @@ impl actor::HcP2p for HolochainP2pActor {
         Box::pin(async move {
             let loc = basis.get_loc();
             let space_id = dna_hash.to_k2_space();
-            let space = self.kitsune.space(space_id.clone()).await?;
+            let space = self.kitsune.space(space_id.clone(), None).await?;
 
             for agent in space.local_agent_store().get_all().await? {
                 if agent.get_cur_storage_arc().contains(loc) {
@@ -1987,7 +1988,7 @@ impl actor::HcP2p for HolochainP2pActor {
     ) -> BoxFut<'_, HolochainP2pResult<()>> {
         Box::pin(async move {
             let space_id = dna_hash.to_k2_space();
-            let space = self.kitsune.space(space_id.clone()).await?;
+            let space = self.kitsune.space(space_id.clone(), None).await?;
 
             let mut peer_urls = Vec::with_capacity(agents.len());
             for agent in agents {
@@ -2077,7 +2078,7 @@ impl actor::HcP2p for HolochainP2pActor {
                     let all_space_ids = self.kitsune.list_spaces();
                     let mut spaces = Vec::with_capacity(all_space_ids.len());
                     for space_id in all_space_ids {
-                        spaces.push((space_id.clone(), self.kitsune.space(space_id).await?));
+                        spaces.push((space_id.clone(), self.kitsune.space(space_id, None).await?));
                     }
 
                     spaces
@@ -2134,7 +2135,7 @@ impl actor::HcP2p for HolochainP2pActor {
     ) -> BoxFut<'_, HolochainP2pResult<Vec<kitsune2_api::DhtArc>>> {
         Box::pin(async move {
             let space_id = dna_hash.to_k2_space();
-            let space = self.kitsune.space(space_id).await?;
+            let space = self.kitsune.space(space_id, None).await?;
 
             Ok(space
                 .local_agent_store()

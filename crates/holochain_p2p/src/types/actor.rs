@@ -147,7 +147,7 @@ pub trait HcP2p: 'static + Send + Sync + std::fmt::Debug {
             let mut updated_agents = Vec::new();
             for agent in self
                 .test_kitsune()
-                .space(space.clone())
+                .space(space.clone(), None)
                 .await
                 .unwrap()
                 .local_agent_store()
@@ -169,7 +169,7 @@ pub trait HcP2p: 'static + Send + Sync + std::fmt::Debug {
                     async move {
                         let all_agents_in_peer_store = self
                             .test_kitsune()
-                            .space(space.clone())
+                            .space(space.clone(), None)
                             .await
                             .unwrap()
                             .peer_store()

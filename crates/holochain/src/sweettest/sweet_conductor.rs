@@ -914,7 +914,7 @@ impl SweetConductor {
         let local_agents = self
             .holochain_p2p()
             .test_kitsune()
-            .space(dna_hash.to_k2_space())
+            .space(dna_hash.to_k2_space(), None)
             .await
             .unwrap()
             .local_agent_store()
