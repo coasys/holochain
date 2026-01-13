@@ -1,5 +1,6 @@
 use crate::tests::common::{spawn_test_bootstrap, Handler};
 use holochain_keystore::*;
+use holochain_p2p::actor::{GetLinksRequestOptions, NetworkRequestOptions};
 use holochain_p2p::event::*;
 use holochain_p2p::*;
 use holochain_trace::test_run;
@@ -266,7 +267,7 @@ async fn test_publish() {
     // TODO invoking process_incoming_ops is a hack,
     //      prefer calling a function on the mem store directly.
     hc2.test_kitsune()
-        .space(dna_hash.to_k2_space())
+        .space(dna_hash.to_k2_space(), None)
         .await
         .unwrap()
         .op_store()
@@ -373,6 +374,7 @@ async fn test_get() {
                         vec![1; 36],
                         holo_hash::hash_type::AnyDht::Entry,
                     ),
+                    NetworkRequestOptions::default(),
                 )
                 .await
                 .is_ok()
@@ -421,6 +423,7 @@ async fn test_get_with_unresponsive_agents() {
                         vec![1; 36],
                         holo_hash::hash_type::AnyDht::Entry,
                     ),
+                    NetworkRequestOptions::default(),
                 )
                 .await
                 .is_ok()
@@ -471,6 +474,7 @@ async fn test_get_when_not_all_agents_have_data() {
                         vec![1; 36],
                         holo_hash::hash_type::AnyDht::Entry,
                     ),
+                    NetworkRequestOptions::default(),
                 )
                 .await
             {
@@ -533,6 +537,7 @@ async fn test_get_when_not_all_agents_have_data_and_unresponsive_agent() {
                         vec![1; 36],
                         holo_hash::hash_type::AnyDht::Entry,
                     ),
+                    NetworkRequestOptions::default(),
                 )
                 .await
             {
@@ -586,6 +591,7 @@ async fn test_get_empty_data_better_than_no_response() {
                         vec![1; 36],
                         holo_hash::hash_type::AnyDht::Entry,
                     ),
+                    NetworkRequestOptions::default(),
                 )
                 .await
                 .is_ok()
@@ -634,7 +640,7 @@ async fn test_get_links() {
                         before: None,
                         author: None,
                     },
-                    holochain_p2p::actor::GetLinksOptions::default(),
+                    GetLinksRequestOptions::default(),
                 )
                 .await
                 .is_ok()
@@ -685,7 +691,7 @@ async fn test_get_links_with_unresponsive_agents() {
                         before: None,
                         author: None,
                     },
-                    holochain_p2p::actor::GetLinksOptions::default(),
+                    GetLinksRequestOptions::default(),
                 )
                 .await
                 .is_ok()
@@ -734,6 +740,7 @@ async fn test_count_links() {
                         after: None,
                         author: None,
                     },
+                    NetworkRequestOptions::default(),
                 )
                 .await
                 .is_ok()
@@ -784,6 +791,7 @@ async fn test_count_links_with_unresponsive_agents() {
                         after: None,
                         author: None,
                     },
+                    NetworkRequestOptions::default(),
                 )
                 .await
                 .is_ok()
@@ -920,6 +928,7 @@ async fn test_must_get_agent_activity() {
                         limit_conditions: LimitConditions::ToGenesis,
                         include_cached_entries: false,
                     },
+                    NetworkRequestOptions::default(),
                 )
                 .await
                 .is_ok()
@@ -964,6 +973,7 @@ async fn test_must_get_agent_activity_with_unresponsive_agents() {
                         limit_conditions: LimitConditions::ToGenesis,
                         include_cached_entries: false,
                     },
+                    NetworkRequestOptions::default(),
                 )
                 .await
                 .is_ok()
@@ -981,6 +991,8 @@ async fn test_must_get_agent_activity_with_unresponsive_agents() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_validation_receipts() {
+    test_run();
+
     let dna_hash = DnaHash::from_raw_36(vec![0; 36]);
     let handler = Arc::new(Handler::default());
 
@@ -1056,7 +1068,7 @@ async fn bridged_call_remote() {
     let agent2 = lair_client.new_sign_keypair_random().await.unwrap();
     let local_agent2 = HolochainP2pLocalAgent::new(agent2.clone(), DhtArc::FULL, 1, lair_client);
     hc1.test_kitsune()
-        .space(dna_hash.to_k2_space())
+        .space(dna_hash.to_k2_space(), None)
         .await
         .unwrap()
         .local_agent_join(Arc::new(local_agent2))
@@ -1128,7 +1140,7 @@ async fn bridged_remote_signal() {
     let agent2 = lair_client.new_sign_keypair_random().await.unwrap();
     let local_agent2 = HolochainP2pLocalAgent::new(agent2.clone(), DhtArc::FULL, 1, lair_client);
     hc1.test_kitsune()
-        .space(dna_hash.to_k2_space())
+        .space(dna_hash.to_k2_space(), None)
         .await
         .unwrap()
         .local_agent_join(Arc::new(local_agent2))
@@ -1219,7 +1231,11 @@ async fn spawn_test(
                 let conductor_db = conductor_db.clone();
                 Box::pin(async move { conductor_db })
             }),
-            k2_test_builder: false,
+            #[cfg(any(
+                feature = "transport-tx5-datachannel-vendored",
+                feature = "transport-tx5-backend-libdatachannel",
+                feature = "transport-tx5-backend-go-pion"
+            ))]
             network_config: Some(serde_json::json!({
                 "coreBootstrap": {
                     "serverUrl": format!("http://{bootstrap_addr}"),
@@ -1227,9 +1243,28 @@ async fn spawn_test(
                 "tx5Transport": {
                     "serverUrl": format!("ws://{bootstrap_addr}"),
                     "signalAllowPlainText": true,
+                    "timeoutS": 30,
+                    "webrtcConnectTimeoutS": 25,
                 }
             })),
-            request_timeout: Duration::from_secs(3),
+            #[cfg(all(
+                feature = "transport-iroh",
+                not(any(
+                    feature = "transport-tx5-datachannel-vendored",
+                    feature = "transport-tx5-backend-libdatachannel",
+                    feature = "transport-tx5-backend-go-pion"
+                ))
+            ))]
+            network_config: Some(serde_json::json!({
+                "coreBootstrap": {
+                    "serverUrl": format!("http://{bootstrap_addr}"),
+                },
+                "irohTransport": {
+                    "relayUrl": format!("http://{bootstrap_addr}"),
+                    "relayAllowPlainText": true,
+                }
+            })),
+            request_timeout: Duration::from_secs(10),
             ..Default::default()
         },
         lair_client.clone(),
@@ -1239,7 +1274,25 @@ async fn spawn_test(
 
     hc.register_handler(handler).await.unwrap();
 
-    hc.join(dna_hash, agent.clone(), None).await.unwrap();
+    hc.join(dna_hash.clone(), agent.clone(), None, None)
+        .await
+        .unwrap();
+
+    // Wait for the endpoint to have a current URL.
+    retry_fn_until_timeout(
+        || async {
+            hc.test_kitsune()
+                .space(dna_hash.to_k2_space(), None)
+                .await
+                .unwrap()
+                .current_url()
+                .is_some()
+        },
+        Some(20_000),
+        None,
+    )
+    .await
+    .unwrap();
 
     (agent, hc, lair_client)
 }

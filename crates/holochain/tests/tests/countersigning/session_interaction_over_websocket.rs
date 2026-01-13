@@ -99,7 +99,7 @@ async fn countersigning_session_interaction_calls() {
 
     // Await peers to discover each other.
     tokio::time::timeout(
-        Duration::from_secs(10),
+        Duration::from_secs(20),
         expect_bootstrapping_completed(&[&alice, &bob]),
     )
     .await
@@ -611,6 +611,7 @@ struct Agent {
     signing_keypair: SigningKey,
     cap_secret: CapSecret,
     config_path: PathBuf,
+    _environment: TempDir,
     _admin_rx: WsPollRecv,
     _holochain: SupervisedChild,
 }
@@ -619,15 +620,14 @@ impl Agent {
     async fn setup(bootstrap_url: String, signal_url: String, network_seed: String) -> Agent {
         let admin_port = 0;
         let tmp_dir = TempDir::new().unwrap();
-        let path = tmp_dir.keep();
-        let environment_path = path.clone();
-        let mut config = create_config(admin_port, environment_path.into());
+        let environment_path = tmp_dir.path().to_path_buf();
+        let mut config = create_config(admin_port, environment_path.clone().into());
+        config.network.request_timeout_s = 10;
         config.network.advanced = Some(serde_json::json!({
             // Allow plaintext signal for testing, and set a short timeout for network requests
             // so that shutting down a conductor won't keep tx5 busy for too long.
             "tx5Transport": {
                 "signalAllowPlainText": true,
-                "timeoutS": 5,
             },
             // Gossip faster to speed up the test.
             "k2Gossip": {
@@ -643,6 +643,7 @@ impl Agent {
             },
             // Check more often for new peer info, for when the other conductor is restarting.
             "coreBootstrap": {
+                "backoffMinMs": 1000,
                 "backoffMaxMs": 5000,
             }
         }));
@@ -656,7 +657,7 @@ impl Agent {
         config.network.bootstrap_url = Url2::parse(bootstrap_url);
         config.network.signal_url = Url2::parse(signal_url);
         config.network.mem_bootstrap = false;
-        let config_path = write_config(path.clone(), &config);
+        let config_path = write_config(environment_path, &config);
 
         let (_holochain, admin_port) = start_holochain_with_lair(config_path.clone(), true).await;
         let admin_port = admin_port.await.unwrap();
@@ -724,12 +725,13 @@ impl Agent {
             signing_keypair,
             cap_secret,
             config_path,
+            _environment: tmp_dir,
             _admin_rx,
             _holochain,
         }
     }
 
-    fn shutdown(self) -> (PathBuf, CellId, SigningKey, CapSecret) {
+    fn shutdown(self) -> (TempDir, PathBuf, CellId, SigningKey, CapSecret) {
         let Agent {
             config_path,
             cell_id,
@@ -738,16 +740,23 @@ impl Agent {
             admin_tx,
             _admin_rx,
             _holochain,
+            _environment,
             ..
         } = self;
         drop(_holochain);
         drop(admin_tx);
         drop(_admin_rx);
-        (config_path, cell_id, signing_keypair, cap_secret)
+        (
+            _environment,
+            config_path,
+            cell_id,
+            signing_keypair,
+            cap_secret,
+        )
     }
 
-    async fn startup(config: (PathBuf, CellId, SigningKey, CapSecret)) -> Agent {
-        let (config_path, cell_id, signing_keypair, cap_secret) = config;
+    async fn startup(config: (TempDir, PathBuf, CellId, SigningKey, CapSecret)) -> Agent {
+        let (environment, config_path, cell_id, signing_keypair, cap_secret) = config;
 
         let (_holochain, admin_port) = start_holochain_with_lair(config_path.clone(), true).await;
         let admin_port = admin_port.await.unwrap();
@@ -761,6 +770,7 @@ impl Agent {
             signing_keypair,
             cap_secret,
             config_path,
+            _environment: environment,
             _admin_rx,
             _holochain,
         }

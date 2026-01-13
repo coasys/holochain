@@ -5,6 +5,7 @@ use holo_hash::{
     DnaHash,
 };
 use holochain_keystore::{test_keystore, MetaLairClient};
+use holochain_p2p::actor::NetworkRequestOptions;
 use holochain_p2p::{
     actor::DynHcP2p, event::MockHcP2pHandler, spawn_holochain_p2p, HolochainP2pConfig,
     HolochainP2pError, HolochainP2pLocalAgent,
@@ -75,7 +76,7 @@ async fn agent_is_removed_from_peer_store_when_blocked() {
     let TestActor { actor: alice, .. } = TestActor::new(&dna_hash, &addr).await;
     let space = alice
         .test_kitsune()
-        .space(dna_hash.to_k2_space())
+        .space(dna_hash.to_k2_space(), None)
         .await
         .unwrap();
     let peer_store = space.peer_store();
@@ -375,6 +376,7 @@ mod blocks_impl {
 // Alice blocks Bob and makes a get request that fails.
 #[tokio::test(flavor = "multi_thread")]
 async fn get_to_blocked_agent_fails() {
+    holochain_trace::test_run();
     let dna_hash = DnaHash::from_raw_32(vec![0xaa; 32]);
     let keystore_1 = test_keystore();
     let keystore_2 = test_keystore();
@@ -386,10 +388,10 @@ async fn get_to_blocked_agent_fails() {
     let alice_pubkey = keystore_1.new_sign_keypair_random().await.unwrap();
     let bob_pubkey = keystore_2.new_sign_keypair_random().await.unwrap();
     alice
-        .join(dna_hash.clone(), alice_pubkey.clone(), None)
+        .join(dna_hash.clone(), alice_pubkey.clone(), None, None)
         .await
         .unwrap();
-    bob.join(dna_hash.clone(), bob_pubkey.clone(), None)
+    bob.join(dna_hash.clone(), bob_pubkey.clone(), None, None)
         .await
         .unwrap();
     bob.test_set_full_arcs(dna_hash.to_k2_space()).await;
@@ -398,7 +400,13 @@ async fn get_to_blocked_agent_fails() {
     exchange_agent_infos(alice.clone(), bob.clone(), &dna_hash).await;
 
     // Before the block Alice can make get request and Bob answers them.
-    let response = alice.get(dna_hash.clone(), fixt!(ActionHash).into()).await;
+    let response = alice
+        .get(
+            dna_hash.clone(),
+            fixt!(ActionHash).into(),
+            NetworkRequestOptions::default(),
+        )
+        .await;
     assert!(
         response.is_ok(),
         "Expected get to succeed before block but got: {response:?}"
@@ -425,7 +433,13 @@ async fn get_to_blocked_agent_fails() {
     // implementation internally discards blocked agents when inserting.
 
     // Alice makes a get request. Bob is blocked, so there should be no one to respond.
-    let response = alice.get(dna_hash.clone(), fixt!(ActionHash).into()).await;
+    let response = alice
+        .get(
+            dna_hash.clone(),
+            fixt!(ActionHash).into(),
+            NetworkRequestOptions::default(),
+        )
+        .await;
     assert!(matches!(
         response,
         Err(HolochainP2pError::NoPeersForLocation(_, _))
@@ -435,6 +449,7 @@ async fn get_to_blocked_agent_fails() {
 // Alice blocks Bob and Bob makes a get request that fails.
 #[tokio::test(flavor = "multi_thread")]
 async fn get_by_blocked_agent_fails() {
+    holochain_trace::test_run();
     let dna_hash = DnaHash::from_raw_32(vec![0xaa; 32]);
     let keystore_1 = test_keystore();
     let keystore_2 = test_keystore();
@@ -446,10 +461,10 @@ async fn get_by_blocked_agent_fails() {
     let alice_pubkey = keystore_1.new_sign_keypair_random().await.unwrap();
     let bob_pubkey = keystore_2.new_sign_keypair_random().await.unwrap();
     alice
-        .join(dna_hash.clone(), alice_pubkey.clone(), None)
+        .join(dna_hash.clone(), alice_pubkey.clone(), None, None)
         .await
         .unwrap();
-    bob.join(dna_hash.clone(), bob_pubkey.clone(), None)
+    bob.join(dna_hash.clone(), bob_pubkey.clone(), None, None)
         .await
         .unwrap();
     alice.test_set_full_arcs(dna_hash.to_k2_space()).await;
@@ -458,8 +473,17 @@ async fn get_by_blocked_agent_fails() {
     exchange_agent_infos(alice.clone(), bob.clone(), &dna_hash).await;
 
     // Before the block Bob can make get requests and Alice answers them.
-    let response = bob.get(dna_hash.clone(), fixt!(ActionHash).into()).await;
-    assert!(response.is_ok());
+    let response = bob
+        .get(
+            dna_hash.clone(),
+            fixt!(ActionHash).into(),
+            NetworkRequestOptions::default(),
+        )
+        .await;
+    assert!(
+        response.is_ok(),
+        "expected response ok but got {response:?}"
+    );
 
     alice
         .block(Block::new(
@@ -478,7 +502,13 @@ async fn get_by_blocked_agent_fails() {
 
     // Bob makes a get request. Alice could respond, but must not, to prove the block for incoming
     // requests is effective.
-    let response = bob.get(dna_hash.clone(), fixt!(ActionHash).into()).await;
+    let response = bob
+        .get(
+            dna_hash.clone(),
+            fixt!(ActionHash).into(),
+            NetworkRequestOptions::default(),
+        )
+        .await;
     assert!(response.is_err(), "expected error, got {response:?}");
 }
 
@@ -532,7 +562,11 @@ impl TestActor {
                 let peer_meta_db = peer_meta_db.clone();
                 Box::pin(async move { Ok(peer_meta_db) })
             }),
-            k2_test_builder: false,
+            #[cfg(any(
+                feature = "transport-tx5-datachannel-vendored",
+                feature = "transport-tx5-backend-libdatachannel",
+                feature = "transport-tx5-backend-go-pion"
+            ))]
             network_config: Some(serde_json::json!({
                 "coreBootstrap": {
                     "serverUrl": format!("http://{bootstrap_addr}"),
@@ -540,6 +574,25 @@ impl TestActor {
                 "tx5Transport": {
                     "serverUrl": format!("ws://{bootstrap_addr}"),
                     "signalAllowPlainText": true,
+                    "timeoutS": 30,
+                    "webrtcConnectTimeoutS": 25,
+                }
+            })),
+            #[cfg(all(
+                feature = "transport-iroh",
+                not(any(
+                    feature = "transport-tx5-datachannel-vendored",
+                    feature = "transport-tx5-backend-libdatachannel",
+                    feature = "transport-tx5-backend-go-pion"
+                ))
+            ))]
+            network_config: Some(serde_json::json!({
+                "coreBootstrap": {
+                    "serverUrl": format!("http://{bootstrap_addr}"),
+                },
+                "irohTransport": {
+                    "relayUrl": format!("http://{bootstrap_addr}"),
+                    "relayAllowPlainText": true,
                 }
             })),
             request_timeout: Duration::from_secs(3),
@@ -557,7 +610,7 @@ impl TestActor {
         actor.register_handler(Arc::new(handler)).await.unwrap();
         let space = actor
             .test_kitsune()
-            .space(dna_hash.to_k2_space())
+            .space(dna_hash.to_k2_space(), None)
             .await
             .unwrap();
         let blocks_module = space.blocks().clone();

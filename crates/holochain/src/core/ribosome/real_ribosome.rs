@@ -29,8 +29,6 @@ use crate::core::ribosome::guest_callback::CallStream;
 #[cfg(feature = "unstable-countersigning")]
 use crate::core::ribosome::host_fn::accept_countersigning_preflight_request::accept_countersigning_preflight_request;
 use crate::core::ribosome::host_fn::agent_info::agent_info;
-#[cfg(feature = "unstable-functions")]
-use crate::core::ribosome::host_fn::block_agent::block_agent;
 use crate::core::ribosome::host_fn::call::call;
 use crate::core::ribosome::host_fn::call_info::call_info;
 use crate::core::ribosome::host_fn::capability_claims::capability_claims;
@@ -69,8 +67,6 @@ use crate::core::ribosome::host_fn::sign_ephemeral::sign_ephemeral;
 use crate::core::ribosome::host_fn::sleep::sleep;
 use crate::core::ribosome::host_fn::sys_time::sys_time;
 use crate::core::ribosome::host_fn::trace::trace;
-#[cfg(feature = "unstable-functions")]
-use crate::core::ribosome::host_fn::unblock_agent::unblock_agent;
 use crate::core::ribosome::host_fn::update::update;
 use crate::core::ribosome::host_fn::verify_signature::verify_signature;
 use crate::core::ribosome::host_fn::x_25519_x_salsa20_poly1305_decrypt::x_25519_x_salsa20_poly1305_decrypt;
@@ -618,11 +614,7 @@ impl RealRibosome {
             accept_countersigning_preflight_request,
         );
         #[cfg(feature = "unstable-functions")]
-        host_fn_builder
-            .with_host_function(&mut ns, "__hc__block_agent_1", block_agent)
-            .with_host_function(&mut ns, "__hc__unblock_agent_1", unblock_agent)
-            // TODO deprecated, remove me
-            .with_host_function(&mut ns, "__hc__sleep_1", sleep);
+        host_fn_builder.with_host_function(&mut ns, "__hc__sleep_1", sleep);
         imports.register_namespace("env", ns);
 
         (host_fn_builder.function_env, imports)
@@ -694,73 +686,13 @@ impl RealRibosome {
     }
 }
 
-/// General purpose macro which relies heavily on various impls of the form:
-/// From<Vec<(ZomeName, $callback_result)>> for ValidationResult
-macro_rules! do_callback {
-    ( $self:ident, $access:ident, $invocation:ident, $callback_result:ty ) => {{
-        use tokio_stream::StreamExt;
-        let mut results: Vec<(ZomeName, $callback_result)> = Vec::new();
-        // fallible iterator syntax instead of for loop
-        let mut call_stream = $self.call_stream($access.into(), $invocation);
-        loop {
-            let (zome_name, callback_result): (ZomeName, $callback_result) = match call_stream
-                .next()
-                .await
-            {
-                Some(Ok((zome, extern_io))) => match extern_io.decode() {
-                    Ok(callback_result) => (zome.into(), callback_result),
-                    Err(SerializedBytesError::Deserialize(err_msg)) => {
-                        // Error returned when deserialization fails due to an invalid return type
-                        return Err(RibosomeError::CallbackInvalidReturnType(err_msg));
-                    }
-                    Err(e) => return Err(RibosomeError::WasmRuntimeError(wasm_error!(e).into())),
-                },
-                Some(Err((zome, RibosomeError::WasmRuntimeError(runtime_error)))) => {
-                    let wasm_error: WasmError = runtime_error.downcast()?;
-                    if let WasmErrorInner::Deserialize(_) = wasm_error.error {
-                        // Error returned when callback called via ribosome with invalid parameters
-                        return Err(RibosomeError::CallbackInvalidParameters(String::default()));
-                    }
-
-                    (
-                        zome.into(),
-                        <$callback_result>::try_from_wasm_error(wasm_error)
-                            .map_err(|e| -> RuntimeError { WasmHostError(e).into() })?,
-                    )
-                }
-                Some(Err((
-                    _zome,
-                    RibosomeError::InlineZomeError(InlineZomeError::SerializationError(
-                        SerializedBytesError::Deserialize(err_msg),
-                    )),
-                ))) => {
-                    // Error returned when callback called via zome call with invalid parameters
-                    return Err(RibosomeError::CallbackInvalidParameters(err_msg));
-                }
-                Some(Err((_zome, other_error))) => return Err(other_error),
-                None => {
-                    break;
-                }
-            };
-            // return early if we have a definitive answer, no need to keep invoking callbacks
-            // if we know we are done
-            if callback_result.is_definitive() {
-                return Ok(vec![(zome_name, callback_result)].into());
-            }
-            results.push((zome_name, callback_result));
-        }
-        // fold all the non-definitive callbacks down into a single overall result
-        Ok(results.into())
-    }};
-}
-
 impl RealRibosome {
     async fn run_genesis_self_check_v1(
         &self,
         host_access: GenesisSelfCheckHostAccessV1,
         invocation: GenesisSelfCheckInvocationV1,
     ) -> RibosomeResult<GenesisSelfCheckResultV1> {
-        do_callback!(self, host_access, invocation, ValidateCallbackResult)
+        self.do_callback(host_access, invocation).await
     }
 
     async fn run_genesis_self_check_v2(
@@ -768,7 +700,7 @@ impl RealRibosome {
         host_access: GenesisSelfCheckHostAccessV2,
         invocation: GenesisSelfCheckInvocationV2,
     ) -> RibosomeResult<GenesisSelfCheckResultV1> {
-        do_callback!(self, host_access, invocation, ValidateCallbackResult)
+        self.do_callback(host_access, invocation).await
     }
 
     /// call a function in a zome for an invocation if it exists
@@ -857,6 +789,65 @@ impl RealRibosome {
                 Ok(result)
             }
         }
+    }
+
+    async fn do_callback<A, I, CR, R>(&self, access: A, invocation: I) -> RibosomeResult<R>
+    where
+        A: Into<HostContext>,
+        I: Invocation + 'static,
+        CR: CallbackResult + std::fmt::Debug + serde::de::DeserializeOwned,
+        R: From<Vec<(ZomeName, CR)>>,
+    {
+        use tokio_stream::StreamExt;
+        let mut results: Vec<(ZomeName, CR)> = Vec::new();
+        // fallible iterator syntax instead of for loop
+        let mut call_stream = self.call_stream(access.into(), invocation);
+        loop {
+            let (zome_name, callback_result): (ZomeName, CR) = match call_stream.next().await {
+                Some(Ok((zome, extern_io))) => match extern_io.decode() {
+                    Ok(callback_result) => (zome.into(), callback_result),
+                    Err(SerializedBytesError::Deserialize(err_msg)) => {
+                        // Error returned when deserialization fails due to an invalid return type
+                        return Err(RibosomeError::CallbackInvalidReturnType(err_msg));
+                    }
+                    Err(e) => return Err(RibosomeError::WasmRuntimeError(wasm_error!(e).into())),
+                },
+                Some(Err((zome, RibosomeError::WasmRuntimeError(runtime_error)))) => {
+                    let wasm_error: WasmError = runtime_error.downcast()?;
+                    if let WasmErrorInner::Deserialize(_) = wasm_error.error {
+                        // Error returned when callback called via ribosome with invalid parameters
+                        return Err(RibosomeError::CallbackInvalidParameters(String::default()));
+                    }
+
+                    (
+                        zome.into(),
+                        <CR>::try_from_wasm_error(wasm_error)
+                            .map_err(|e| -> RuntimeError { WasmHostError(e).into() })?,
+                    )
+                }
+                Some(Err((
+                    _zome,
+                    RibosomeError::InlineZomeError(InlineZomeError::SerializationError(
+                        SerializedBytesError::Deserialize(err_msg),
+                    )),
+                ))) => {
+                    // Error returned when callback called via zome call with invalid parameters
+                    return Err(RibosomeError::CallbackInvalidParameters(err_msg));
+                }
+                Some(Err((_zome, other_error))) => return Err(other_error),
+                None => {
+                    break;
+                }
+            };
+            // return early if we have a definitive answer, no need to keep invoking callbacks
+            // if we know we are done
+            if callback_result.is_definitive() {
+                return Ok(vec![(zome_name, callback_result)].into());
+            }
+            results.push((zome_name, callback_result));
+        }
+        // fold all the non-definitive callbacks down into a single overall result
+        Ok(results.into())
     }
 }
 
@@ -1078,7 +1069,7 @@ impl RibosomeT for RealRibosome {
         host_access: ValidateHostAccess,
         invocation: ValidateInvocation,
     ) -> RibosomeResult<ValidateResult> {
-        do_callback!(self, host_access, invocation, ValidateCallbackResult)
+        self.do_callback(host_access, invocation).await
     }
 
     async fn run_init(
@@ -1086,7 +1077,7 @@ impl RibosomeT for RealRibosome {
         host_access: InitHostAccess,
         invocation: InitInvocation,
     ) -> RibosomeResult<InitResult> {
-        do_callback!(self, host_access, invocation, InitCallbackResult)
+        self.do_callback(host_access, invocation).await
     }
 
     async fn run_entry_defs(
@@ -1094,7 +1085,7 @@ impl RibosomeT for RealRibosome {
         host_access: EntryDefsHostAccess,
         invocation: EntryDefsInvocation,
     ) -> RibosomeResult<EntryDefsResult> {
-        do_callback!(self, host_access, invocation, EntryDefsCallbackResult)
+        self.do_callback(host_access, invocation).await
     }
 
     fn zome_types(&self) -> &Arc<GlobalZomeTypes> {
@@ -1304,8 +1295,6 @@ pub mod wasm_test {
                 #[cfg(feature = "unstable-countersigning")]
                 "__hc__accept_countersigning_preflight_request_1",
                 "__hc__agent_info_1",
-                #[cfg(feature = "unstable-functions")]
-                "__hc__block_agent_1",
                 "__hc__call_1",
                 "__hc__call_info_1",
                 "__hc__capability_claims_1",
@@ -1348,8 +1337,6 @@ pub mod wasm_test {
                 "__hc__sleep_1",
                 "__hc__sys_time_1",
                 "__hc__trace_1",
-                #[cfg(feature = "unstable-functions")]
-                "__hc__unblock_agent_1",
                 "__hc__update_1",
                 "__hc__verify_signature_1",
                 "__hc__x_25519_x_salsa20_poly1305_decrypt_1",
