@@ -7,6 +7,7 @@ use holochain_wasm_test_utils::TestWasm;
 mod dht_location;
 mod enable_clone_cell_by_dna_hash;
 pub mod must_get_agent_activity_saturation;
+mod shutdown;
 mod two_apps_same_dna_hash_different_coordinators;
 mod zome_call_atomic;
 
@@ -17,7 +18,7 @@ mod zome_call_atomic;
 #[cfg(not(feature = "wasmer_wamr"))]
 async fn wasm_disk_cache() {
     holochain_trace::test_run();
-    let mut conductor = SweetConductor::from_config(SweetConductorConfig::standard()).await;
+    let mut conductor = SweetConductor::standard().await;
 
     let mut cache_dir = conductor.db_path().to_owned();
     cache_dir.push(WASM_CACHE);
@@ -53,7 +54,7 @@ async fn wasm_disk_cache() {
 async fn zome_with_no_entry_types_does_not_prevent_deletes() {
     holochain_trace::test_run();
 
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
 
     let (dna_file, _, _) =
         SweetDnaFile::unique_from_test_wasms(vec![TestWasm::ValidateRejectAppTypes, TestWasm::Crd])
@@ -87,7 +88,7 @@ async fn zome_with_no_entry_types_does_not_prevent_deletes() {
 async fn zome_with_no_link_types_does_not_prevent_delete_links() {
     holochain_trace::test_run();
 
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
 
     let (dna_file, _, _) = SweetDnaFile::unique_from_test_wasms(vec![
         TestWasm::ValidateRejectAppTypes,
@@ -249,8 +250,11 @@ async fn zero_arc_can_delete_link() {
         SweetConductorConfig::standard().tune_network_config(|nc| nc.target_arc_factor = 0);
 
     let other_config = SweetConductorConfig::standard();
-    let mut conductors =
-        SweetConductorBatch::from_configs(vec![other_config, empty_arc_conductor_config]).await;
+    let mut conductors = SweetConductorBatch::from_configs_rendezvous(vec![
+        other_config,
+        empty_arc_conductor_config,
+    ])
+    .await;
 
     let dna_file = SweetDnaFile::unique_from_test_wasms(vec![TestWasm::Link])
         .await

@@ -36,7 +36,7 @@ fn consistency(bench: &mut Criterion) {
             producer.fill(num_ops).await;
             let mut cells = vec![&consumer.cell, &producer.cell];
             cells.extend(others.cells.iter());
-            await_consistency(50, cells).await.unwrap();
+            await_consistency(cells).await.unwrap();
             // holochain_state::prelude::dump_tmp(consumer.cell.env());
         });
     }
@@ -131,7 +131,7 @@ impl Consumer {
             num = hashes.0.len();
             if start.elapsed().as_secs() > 1 {
                 for cell in cells {
-                    await_consistency(1, [cell]).await.unwrap();
+                    await_consistency_s(1, [cell]).await.unwrap();
                 }
             }
             // dump_tmp(self.cell.env());
@@ -147,8 +147,7 @@ async fn setup() -> (Producer, Consumer, Others) {
     let (dna, _, _) = SweetDnaFile::unique_from_test_wasms(vec![TestWasm::Anchor]).await;
     let config =
         SweetConductorConfig::standard().tune_network_config(|nc| nc.disable_publish = true);
-    let configs = vec![config; 5];
-    let mut conductors = SweetConductorBatch::from_configs(configs.clone()).await;
+    let mut conductors = SweetConductorBatch::from_config_rendezvous(5, config).await;
     let apps = conductors.setup_app("app", [&dna]).await.unwrap();
     let mut cells = apps
         .into_inner()

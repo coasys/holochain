@@ -7,9 +7,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## Unreleased
 
+## 0.7.0-dev.10
+
+- Rename `SweetConductor::from_standard_config` to `SweetConductor::standard`.
+- Rename `SweetConductorBatch::from_standard_config_rendezvous` to `SweetConductorBatch::standard`.
+- Fix: DbKind display implementation now properly includes the associated CellId or DnaHash of the database, instead of escaped rust code.
+
+## 0.7.0-dev.9
+
+- **BREAKING CHANGE** `ConductorConfig` now includes a field `incoming_request_concurrency_limit` for specifying the number of incoming authority requests that will be handled concurrently. Additional requests will be dropped. This limit only applies to incoming requests to `get`, `get_links`, `count_links`, `get_agent_activity`, `must_get_agent_activity`.
+- **BREAKING CHANGE** `ConductorConfig` now includes an optional field `db_max_readers` for overriding the maximum number of read connections per database.
+- Remove `mem_bootstrap` from `HolochainP2pConfig`. Either a locally spawned bootstrap server or no bootstrap service at all should be used for testing.
+- Remove `SweetConductor::from_standard_config`. It used a WAN bootstrap and relay service. A locally spawned server is used instead. The new default for `SweetConductor` is `standard()`.
+- **BREAKING** Dumping network stats with the admin and app APIs now returns a consistent response type of `HolochainTransportStats` where previously they returned `ApiTransportStats` and `TransportStats` respectively. The app response was missing blocked message counts. The Holochain type also converts `Space` values into `DnaHash` values for easier use in app code. \#5611
+
+## 0.7.0-dev.8
+
+- Locally authored data is now only published after it has been integrated. This resolves a race condition where remote conductors might fail to fetch published ops by id because they haven’t been integrated locally yet. \#5545
+- **BREAKING CHANGE**: `Conductor` function `install_app_with_manifest` is now behind the `test_utils` feature, as it was intended only for use by tests.
+- Fix: Conductor `shutdown` function now removes all running cells.
+- Fix: Ensure that only the `holochain_p2p` function `join` creates a kitsune2 space. Previously all `holochain_p2p` requests would create a kitsune2 space if it did not exist, which caused a race where workflows could recreate a removed kitsune space after Conductor shutdown.
+- CI: Run windows test workflow on windows 2025 runners. \#5594
+- **BREAKING CHANGE**: Remove features for tx5 transport variants `datachannel-vendored` and `backend-libdatachannel`. The only supported tx5 transport is `backend-go-pion` now.
+- **BREAKING CHANGE**: Default to iroh transport for all binaries.
+- Revert to iroh’s public relay server URL `https://use1-1.relay.n0.iroh-canary.iroh.link./` in the conductor config.
+- Delete deprecated block targets to block a node by its ID or a DNA of a node.
+- Remove unusable block variant `CellBlockReason::App`.
+- Reinstate tests that ensure publish and gossip doesn’t contact blocked nodes.
+- Expanded `GetOptions` with network control fields (`remote_agent_count`, `timeout_ms`) to give developers finer-grained control over network requests. The cascade now respects these options when making network calls. \#5422
+- **BREAKING CHANGE**: `GetOptions` fields are now private with getter methods. Code that accessed `options.strategy` directly must now use `options.strategy()`. \#5422
+- **BREAKING CHANGE**: `get_agent_activity` function now requires a fourth parameter `GetOptions`. \#5422
+- **BREAKING CHANGE** Test utility `await_consistency` has been renamed to `await_consistency_s`. The function `await_consistency` now has a hard-coded 60 second timeout and should always be used by default to reduce test flakiness.
 - Set default iroh relay server to `dev-test-bootstrap2-iroh-relay.holochain.org`.
 - Run test workflow for all platforms with iroh transport. One job to test tx5 on Ubuntu is kept in the workflow.
-- **BREAKING CHANGE**: Completely removed `block_agent` and `unblock_agent` host and HDK functions from Holochain. Blocking is a system-level behavior, triggered by warrants, not application-level logic. Any WASM that references these host functions will fail to instantiate. Applications must be recompiled without calls to these functions. [#5518]
+- **BREAKING CHANGE**: Completely removed `block_agent` and `unblock_agent` host and HDK functions from Holochain. Blocking is a system-level behavior, triggered by warrants, not application-level logic. Any WASM that references these host functions will fail to instantiate. Applications must be recompiled without calls to these functions. \[\#5518\]
 
 ## 0.7.0-dev.7
 

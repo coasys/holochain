@@ -7,7 +7,10 @@ use test_case::test_case;
 #[test_case(2)]
 #[test_case(4)]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "flaky local networking test; re-check after Iroh upgrade"]
+#[cfg_attr(
+    not(feature = "transport-iroh"),
+    ignore = "requires Iroh transport for stability"
+)]
 async fn conductors_call_remote(num_conductors: usize) {
     holochain_trace::test_run();
 
@@ -24,7 +27,7 @@ async fn conductors_call_remote(num_conductors: usize) {
         .map(|c| c.into_cells().into_iter().next().unwrap())
         .collect();
 
-    await_consistency(30, cells.iter()).await.unwrap();
+    await_consistency(cells.iter()).await.unwrap();
 
     let agents: Vec<_> = cells.iter().map(|c| c.agent_pubkey().clone()).collect();
 
@@ -56,5 +59,5 @@ async fn conductors_call_remote(num_conductors: usize) {
         .await;
 
     // Ensure that all the create requests were received and published.
-    await_consistency(60, cells.iter()).await.unwrap();
+    await_consistency(cells.iter()).await.unwrap();
 }

@@ -1140,7 +1140,7 @@ async fn bridged_remote_signal() {
     let agent2 = lair_client.new_sign_keypair_random().await.unwrap();
     let local_agent2 = HolochainP2pLocalAgent::new(agent2.clone(), DhtArc::FULL, 1, lair_client);
     hc1.test_kitsune()
-        .space(dna_hash.to_k2_space(), None)
+        .space_if_exists(dna_hash.to_k2_space())
         .await
         .unwrap()
         .local_agent_join(Arc::new(local_agent2))
@@ -1231,11 +1231,7 @@ async fn spawn_test(
                 let conductor_db = conductor_db.clone();
                 Box::pin(async move { conductor_db })
             }),
-            #[cfg(any(
-                feature = "transport-tx5-datachannel-vendored",
-                feature = "transport-tx5-backend-libdatachannel",
-                feature = "transport-tx5-backend-go-pion"
-            ))]
+            #[cfg(feature = "transport-tx5-backend-go-pion")]
             network_config: Some(serde_json::json!({
                 "coreBootstrap": {
                     "serverUrl": format!("http://{bootstrap_addr}"),
@@ -1249,11 +1245,7 @@ async fn spawn_test(
             })),
             #[cfg(all(
                 feature = "transport-iroh",
-                not(any(
-                    feature = "transport-tx5-datachannel-vendored",
-                    feature = "transport-tx5-backend-libdatachannel",
-                    feature = "transport-tx5-backend-go-pion"
-                ))
+                not(feature = "transport-tx5-backend-go-pion")
             ))]
             network_config: Some(serde_json::json!({
                 "coreBootstrap": {

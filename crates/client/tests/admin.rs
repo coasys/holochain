@@ -21,7 +21,7 @@ const ROLE_NAME: &str = "foo";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn app_interfaces() {
-    let conductor = SweetConductor::from_standard_config().await;
+    let conductor = SweetConductor::standard().await;
 
     // Connect admin client
     let admin_port = conductor.get_arbitrary_admin_websocket_port().unwrap();
@@ -36,7 +36,7 @@ async fn app_interfaces() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn signed_zome_call() {
-    let conductor = SweetConductor::from_standard_config().await;
+    let conductor = SweetConductor::standard().await;
 
     // Connect admin client
     let admin_port = conductor.get_arbitrary_admin_websocket_port().unwrap();
@@ -115,7 +115,7 @@ async fn signed_zome_call() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn storage_info() {
-    let conductor = SweetConductor::from_standard_config().await;
+    let conductor = SweetConductor::standard().await;
     let admin_port = conductor.get_arbitrary_admin_websocket_port().unwrap();
     let admin_ws = AdminWebsocket::connect(format!("127.0.0.1:{admin_port}"), None)
         .await
@@ -149,7 +149,7 @@ async fn storage_info() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn dump_network_stats() {
-    let conductor = SweetConductor::from_standard_config().await;
+    let conductor = SweetConductor::standard().await;
     let admin_port = conductor.get_arbitrary_admin_websocket_port().unwrap();
     let admin_ws = AdminWebsocket::connect(format!("127.0.0.1:{admin_port}"), None)
         .await
@@ -171,14 +171,6 @@ async fn dump_network_stats() {
 
     let network_stats = admin_ws.dump_network_stats().await.unwrap();
 
-    #[cfg(any(
-        feature = "transport-tx5-datachannel-vendored",
-        feature = "transport-tx5-backend-libdatachannel"
-    ))]
-    assert_eq!(
-        "BackendLibDataChannel",
-        network_stats.transport_stats.backend
-    );
     #[cfg(feature = "transport-tx5-backend-go-pion")]
     assert_eq!("BackendGoPion", network_stats.transport_stats.backend);
     #[cfg(feature = "transport-iroh")]
@@ -187,7 +179,7 @@ async fn dump_network_stats() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_info() {
-    let conductor = SweetConductor::from_standard_config().await;
+    let conductor = SweetConductor::standard().await;
     let admin_port = conductor.get_arbitrary_admin_websocket_port().unwrap();
     let admin_ws = AdminWebsocket::connect(format!("127.0.0.1:{admin_port}"), None)
         .await
@@ -245,7 +237,7 @@ async fn peer_meta_info() {
     // conductor tests in the holochain crate where the peer meta store is
     // accessible on the SweetConductor.
 
-    let conductor = SweetConductor::from_standard_config().await;
+    let conductor = SweetConductor::standard().await;
     let admin_port = conductor.get_arbitrary_admin_websocket_port().unwrap();
     let admin_ws = AdminWebsocket::connect(format!("127.0.0.1:{admin_port}"), None)
         .await
@@ -292,7 +284,7 @@ async fn peer_meta_info() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn install_app_then_list_apps_and_list_cell_ids() {
-    let conductor = SweetConductor::from_standard_config().await;
+    let conductor = SweetConductor::standard().await;
     let admin_port = conductor.get_arbitrary_admin_websocket_port().unwrap();
     let admin_ws = AdminWebsocket::connect(format!("127.0.0.1:{admin_port}"), None)
         .await
@@ -331,7 +323,7 @@ async fn install_app_then_list_apps_and_list_cell_ids() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn install_app_with_roles_settings() {
-    let conductor = SweetConductor::from_standard_config().await;
+    let conductor = SweetConductor::standard().await;
     let admin_port = conductor.get_arbitrary_admin_websocket_port().unwrap();
     let admin_ws = AdminWebsocket::connect(format!("127.0.0.1:{admin_port}"), None)
         .await
@@ -394,7 +386,7 @@ async fn install_app_with_roles_settings() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn connect_multiple_addresses() {
-    let conductor = SweetConductor::from_standard_config().await;
+    let conductor = SweetConductor::standard().await;
     let admin_port = conductor.get_arbitrary_admin_websocket_port().unwrap();
 
     let admin_ws = AdminWebsocket::connect(

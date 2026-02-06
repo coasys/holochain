@@ -23,6 +23,7 @@ use std::sync::Mutex;
 
 mod add_agent_infos;
 mod app_state;
+mod builder;
 mod cells_with_conflicting_overrides;
 mod p2p_config_override;
 mod state_dump;
@@ -182,20 +183,12 @@ async fn common_genesis_test_app(
 async fn test_signing_error_during_genesis() {
     holochain_trace::test_run();
     let bad_keystore = spawn_crude_mock_keystore(|| "spawn_crude_mock_keystore error".into()).await;
-
-    let db_dir = test_db_dir();
-    let config = ConductorConfig {
-        data_root_path: Some(db_dir.path().to_path_buf().into()),
-        ..Default::default()
-    };
-    let mut conductor = SweetConductor::new(
-        SweetConductor::handle_from_existing(bad_keystore, &config, &[]).await,
-        db_dir.into(),
-        config.into(),
-        None,
+    let mut conductor = SweetConductor::create_with_defaults(
+        SweetConductorConfig::standard(),
+        Some(bad_keystore),
+        Some(SweetLocalRendezvous::new().await),
     )
     .await;
-
     let (dna, _, _) = SweetDnaFile::unique_from_test_wasms(vec![TestWasm::Sign]).await;
 
     let result = conductor
@@ -244,7 +237,7 @@ pub(crate) fn simple_create_entry_zome() -> InlineIntegrityZome {
 #[tokio::test(flavor = "multi_thread")]
 async fn name_has_no_effect_on_dna_hash() {
     holochain_trace::test_run();
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
     let dna = SweetDnaFile::unique_empty().await;
     let apps = conductor.setup_apps("app", 3, [&dna]).await.unwrap();
     let app_id1 = apps[0].installed_app_id().clone();
@@ -318,7 +311,7 @@ async fn test_installation_fails_if_genesis_self_check_is_invalid() {
         },
     );
 
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
     let err = if let Err(err) = common_genesis_test_app(&mut conductor, bad_zome).await {
         err
     } else {
@@ -359,7 +352,7 @@ async fn test_bad_entry_validation_after_genesis_returns_zome_call_error() {
                 Ok(hash)
             });
 
-    let mut conductor = SweetConductorConfig::standard().build_conductor().await;
+    let mut conductor = SweetConductor::standard().await;
     let app = common_genesis_test_app(&mut conductor, bad_zome)
         .await
         .unwrap();
@@ -404,7 +397,7 @@ async fn test_init_concurrency() {
             Ok(())
         });
     let dnas = [mk_dna(zome).await.0];
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
     let app = conductor.setup_app("app", &dnas).await.unwrap();
     let (cell,) = app.into_tuple();
     let conductor = Arc::new(conductor);
@@ -437,7 +430,7 @@ async fn test_init_concurrency() {
 async fn test_deferred_memproof_provisioning() {
     holochain_trace::test_run();
     let (dna, _, _) = SweetDnaFile::unique_from_test_wasms(vec![TestWasm::Foo]).await;
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
     let app_id = "app-id".to_string();
     let role_name = "role".to_string();
     let bundle = app_bundle_from_dnas(&[(role_name.clone(), dna)], true, None).await;
@@ -553,7 +546,7 @@ async fn test_deferred_memproof_provisioning() {
 async fn test_deferred_memproof_provisioning_uninstall() {
     holochain_trace::test_run();
     let (dna, _, _) = SweetDnaFile::unique_from_test_wasms(vec![TestWasm::Foo]).await;
-    let conductor = SweetConductor::from_standard_config().await;
+    let conductor = SweetConductor::standard().await;
     let app_id = "app-id".to_string();
     let role_name = "role".to_string();
     let bundle = app_bundle_from_dnas(&[(role_name.clone(), dna)], true, None).await;
@@ -592,7 +585,7 @@ async fn test_list_apps_sorted_consistently() {
 
     // Install two apps on the Conductor:
     // Both share a CellId in common, and also include a distinct CellId each.
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
     let _ = conductor.setup_app("app1", [&dna1]).await.unwrap();
     let _ = conductor.setup_app("app2", [&dna1]).await.unwrap();
     let _ = conductor.setup_app("app3", [&dna1]).await.unwrap();
@@ -631,7 +624,7 @@ async fn test_app_info_cells_sorted_consistently() {
     let (dna3, _, _) = SweetDnaFile::unique_from_inline_zomes(("zome1", zome)).await;
 
     // Install app on the Conductor:
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
     let _ = conductor
         .setup_app(
             "app1",

@@ -284,7 +284,7 @@ async fn remote_signals() -> anyhow::Result<()> {
     holochain_trace::test_run();
     const NUM_CONDUCTORS: usize = 2;
 
-    let mut conductors = SweetConductorBatch::from_standard_config_rendezvous(NUM_CONDUCTORS).await;
+    let mut conductors = SweetConductorBatch::standard(NUM_CONDUCTORS).await;
 
     let dna_file = SweetDnaFile::unique_from_test_wasms(vec![TestWasm::EmitSignal])
         .await
@@ -499,7 +499,7 @@ async fn conductor_admin_interface_runs_from_config() -> Result<()> {
     let response = client.request(request).await.unwrap();
     assert_matches!(response, AdminResponse::AppsListed(_));
 
-    conductor_handle.shutdown();
+    conductor_handle.shutdown().await.unwrap().unwrap();
 
     Ok(())
 }
@@ -576,7 +576,7 @@ async fn conductor_admin_interface_ends_with_shutdown_inner() -> Result<()> {
 
     info!("client connect");
 
-    conductor_handle.shutdown();
+    conductor_handle.clone().shutdown().await.unwrap().unwrap();
 
     info!("shutdown");
 
@@ -688,7 +688,7 @@ async fn connection_limit_is_respected() {
         handles.push((sender, rx));
     }
 
-    conductor_handle.shutdown();
+    conductor_handle.shutdown().await.unwrap().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -777,22 +777,12 @@ async fn network_stats() {
         .admin_ws_client::<AdminResponse>()
         .await;
 
-    #[cfg(any(
-        feature = "transport-tx5-datachannel-vendored",
-        feature = "transport-tx5-backend-libdatachannel"
-    ))]
-    const EXPECT: &str = "BackendLibDataChannel";
     #[cfg(feature = "transport-tx5-backend-go-pion")]
     const EXPECT: &str = "BackendGoPion";
     #[cfg(all(
         feature = "transport-iroh",
-        not(any(
-            feature = "transport-tx5-datachannel-vendored",
-            feature = "transport-tx5-backend-libdatachannel",
-            feature = "transport-tx5-backend-go-pion"
-        ))
+        not(feature = "transport-tx5-backend-go-pion")
     ))]
-
     const EXPECT: &str = "iroh";
 
     let req = AdminRequest::DumpNetworkStats;
@@ -811,7 +801,7 @@ async fn network_stats() {
 async fn full_state_dump_cursor_works() {
     holochain_trace::test_run();
 
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
 
     let dna_file = SweetDnaFile::unique_from_test_wasms(vec![TestWasm::EmitSignal])
         .await
@@ -858,7 +848,7 @@ async fn full_state_dump_cursor_works() {
 async fn admin_allowed_origins() {
     holochain_trace::test_run();
 
-    let conductor = SweetConductor::from_standard_config().await;
+    let conductor = SweetConductor::standard().await;
 
     let ports = conductor
         .clone()
@@ -912,7 +902,7 @@ async fn admin_allowed_origins() {
 async fn holochain_websockets_listen_on_ipv4_and_ipv6() {
     holochain_trace::test_run();
 
-    let conductor = SweetConductor::from_standard_config().await;
+    let conductor = SweetConductor::standard().await;
 
     let admin_port = conductor.get_arbitrary_admin_websocket_port().unwrap();
 
@@ -999,7 +989,7 @@ async fn holochain_websockets_listen_on_ipv4_and_ipv6() {
 async fn emit_signal_after_app_connection_closed() {
     holochain_trace::test_run();
 
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
 
     // Install an app to emit signals from
     let dna_file = SweetDnaFile::unique_from_test_wasms(vec![TestWasm::EmitSignal])
@@ -1057,7 +1047,7 @@ async fn emit_signal_after_app_connection_closed() {
 async fn filter_messages_that_do_not_deserialize() {
     holochain_trace::test_run();
 
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
 
     let dna_file = SweetDnaFile::unique_from_test_wasms(vec![TestWasm::EmitSignal])
         .await
@@ -1147,7 +1137,7 @@ async fn filter_messages_that_do_not_deserialize() {
 async fn bind_ipv6_unspecified() {
     holochain_trace::test_run();
 
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
 
     let dna_file = SweetDnaFile::unique_from_test_wasms(vec![TestWasm::EmitSignal])
         .await
@@ -1227,7 +1217,7 @@ async fn bind_ipv6_unspecified() {
 async fn bind_invalid_addrs() {
     holochain_trace::test_run();
 
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
 
     let dna_file = SweetDnaFile::unique_from_test_wasms(vec![TestWasm::EmitSignal])
         .await

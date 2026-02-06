@@ -11,7 +11,7 @@ use crate::test_utils::inline_zomes::simple_create_read_zome;
 async fn sys_validation_agent_activity_test() {
     holochain_trace::test_run();
 
-    let mut conductors = SweetConductorBatch::from_standard_config(2).await;
+    let mut conductors = SweetConductorBatch::standard(2).await;
 
     let (dna_file, _, _) =
         SweetDnaFile::unique_from_inline_zomes(("simple", simple_create_read_zome())).await;
@@ -41,5 +41,5 @@ async fn sys_validation_agent_activity_test() {
     assert_eq!(changed, 2);
 
     conductors.exchange_peer_info().await;
-    await_consistency(15, [&cell_1, &cell_2]).await.unwrap();
+    await_consistency([&cell_1, &cell_2]).await.unwrap();
 }

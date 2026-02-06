@@ -28,7 +28,7 @@ async fn dht_location_consistency() {
     holochain_trace::test_run();
 
     // Set up two conductors with rendezvous configuration
-    let mut conductors = SweetConductorBatch::from_standard_config_rendezvous(2).await;
+    let mut conductors = SweetConductorBatch::standard(2).await;
 
     let (dna_file, _, _) = SweetDnaFile::unique_from_inline_zomes(simple_crud_zome()).await;
     let apps = conductors.setup_app("app", [&dna_file]).await.unwrap();
@@ -48,7 +48,7 @@ async fn dht_location_consistency() {
         .call::<_, ActionHash>(&alice_zome, "create_string", "alright guv'nor".to_string())
         .await;
 
-    await_consistency(30, &[alice.clone(), bob.clone()])
+    await_consistency(&[alice.clone(), bob.clone()])
         .await
         .unwrap();
 

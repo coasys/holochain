@@ -5,6 +5,7 @@ use crate::conductor::paths::DataRootPath;
 use crate::conductor::ribosome_store::RibosomeStore;
 use crate::conductor::ConductorHandle;
 use holochain_conductor_api::conductor::paths::KeystorePath;
+use holochain_conductor_api::conductor::ConductorConfigError;
 use holochain_p2p::NetworkCompatParams;
 use lair_keystore_api::types::SharedLockedArray;
 use std::sync::Mutex;
@@ -88,6 +89,13 @@ impl ConductorBuilder {
             .is_some_and(|p| p.disable_self_validation)
         {
             warn!("#\n#\n# WARNING: ConductorConfig.tuning_params.disable_self_validation is set to true. This is dangerous and not recommended outside of testing or debugging.\n#\n#");
+        }
+
+        if builder.config.db_max_readers < 2 {
+            return Err(ConductorConfigError::InvalidConfig(
+                "db_max_readers must be at least 2".to_string(),
+            )
+            .into());
         }
 
         let passphrase = match &builder.passphrase {
@@ -229,8 +237,7 @@ impl ConductorBuilder {
             report,
             compat,
             request_timeout: std::time::Duration::from_secs(config.network.request_timeout_s),
-            #[cfg(feature = "test_utils")]
-            mem_bootstrap: config.network.mem_bootstrap,
+            incoming_request_concurrency_limit: config.incoming_request_concurrency_limit,
             ..Default::default()
         };
 
@@ -462,8 +469,6 @@ impl ConductorBuilder {
             disable_publish: config.network.disable_publish,
             #[cfg(feature = "test_utils")]
             disable_gossip: config.network.disable_gossip,
-            #[cfg(feature = "test_utils")]
-            mem_bootstrap: config.network.mem_bootstrap,
             ..Default::default()
         };
 

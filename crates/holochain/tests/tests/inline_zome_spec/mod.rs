@@ -22,7 +22,7 @@ async fn inline_zome_2_agents_1_dna() -> anyhow::Result<()> {
     let (dna_file, _, _) = SweetDnaFile::unique_from_inline_zomes(simple_crud_zome()).await;
 
     // Create a Conductor
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
 
     // Install DNA and install and enable apps in conductor
     let apps = conductor.setup_apps("app", 2, &[dna_file]).await.unwrap();
@@ -38,7 +38,7 @@ async fn inline_zome_2_agents_1_dna() -> anyhow::Result<()> {
         )
         .await;
 
-    await_consistency(15, [&alice, &bobbo]).await.unwrap();
+    await_consistency([&alice, &bobbo]).await.unwrap();
 
     // Verify that bobbo can run "read" on his cell and get alice's Action
     let records: Option<Record> = conductor
@@ -61,7 +61,7 @@ async fn inline_zome_2_agents_1_dna() -> anyhow::Result<()> {
 #[cfg(feature = "test_utils")]
 async fn inline_zome_3_agents_2_dnas() -> anyhow::Result<()> {
     holochain_trace::test_run();
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
 
     let (dna_foo, _, _) = SweetDnaFile::unique_from_inline_zomes(simple_crud_zome()).await;
     let (dna_bar, _, _) = SweetDnaFile::unique_from_inline_zomes(simple_crud_zome()).await;
@@ -100,10 +100,10 @@ async fn inline_zome_3_agents_2_dnas() -> anyhow::Result<()> {
     assert_ne!(hash_foo, hash_bar);
 
     // Wait long enough for others to receive gossip
-    await_consistency(15, [&alice_foo, &bobbo_foo, &carol_foo])
+    await_consistency([&alice_foo, &bobbo_foo, &carol_foo])
         .await
         .unwrap();
-    await_consistency(15, [&alice_bar, &bobbo_bar, &carol_bar])
+    await_consistency([&alice_bar, &bobbo_bar, &carol_bar])
         .await
         .unwrap();
 
@@ -151,7 +151,7 @@ async fn get_deleted() -> anyhow::Result<()> {
     let (dna_file, _, _) = SweetDnaFile::unique_from_inline_zomes(simple_crud_zome()).await;
 
     // Create a Conductor
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
 
     // Install DNA and install and enable apps in conductor
     let alice = conductor
@@ -172,7 +172,7 @@ async fn get_deleted() -> anyhow::Result<()> {
         )
         .await;
 
-    await_consistency(15, [&alice]).await.unwrap();
+    await_consistency([&alice]).await.unwrap();
 
     let records: Option<Record> = conductor
         .call(
@@ -198,7 +198,7 @@ async fn get_deleted() -> anyhow::Result<()> {
         )
         .await;
 
-    await_consistency(15, [&alice]).await.unwrap();
+    await_consistency([&alice]).await.unwrap();
 
     let records: Vec<Option<Record>> = conductor
         .call(
@@ -219,7 +219,7 @@ async fn signal_subscription() {
     const N: usize = 10;
 
     let (dna_file, _, _) = SweetDnaFile::unique_from_inline_zomes(simple_crud_zome()).await;
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
     let app = conductor.setup_app("app", &[dna_file]).await.unwrap();
     let zome = &app.cells()[0].zome(SweetInlineZomes::COORDINATOR);
 
@@ -279,7 +279,7 @@ fn simple_validation_zome() -> InlineZomeSet {
 #[tokio::test(flavor = "multi_thread")]
 async fn simple_validation() -> anyhow::Result<()> {
     let (dna_file, _, _) = SweetDnaFile::unique_from_inline_zomes(simple_validation_zome()).await;
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
 
     let apps = conductor.setup_apps("app", 2, &[dna_file]).await.unwrap();
     let ((alice,), (_bobbo,)) = apps.into_tuples();
@@ -318,7 +318,7 @@ async fn simple_validation() -> anyhow::Result<()> {
 async fn can_call_real_zomes_too() {
     holochain_trace::test_run();
 
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
     let (mut integrity, mut coordinator) = simple_crud_zome().into_zomes();
     integrity.push(TestWasm::Create.into());
     coordinator.push(TestWasm::Create.into());
@@ -350,7 +350,7 @@ async fn call_non_existing_zome_fails_gracefully() -> anyhow::Result<()> {
     let (dna_file, _, _) = SweetDnaFile::unique_from_inline_zomes(simple_crud_zome()).await;
 
     // Create a Conductor
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
 
     // Install DNA and install and enable apps in conductor
     let app = conductor.setup_app("app1", [&dna_file]).await.unwrap();

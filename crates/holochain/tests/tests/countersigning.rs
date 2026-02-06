@@ -1,4 +1,3 @@
-use futures::future;
 use hdk::prelude::{PreflightRequest, PreflightRequestAcceptance};
 use holo_hash::{ActionHash, EntryHash};
 use holochain::conductor::api::error::{ConductorApiError, ConductorApiResult};
@@ -7,8 +6,7 @@ use holochain::core::workflow::WorkflowError;
 use holochain::prelude::CountersigningSessionState;
 use holochain::retry_until_timeout;
 use holochain::sweettest::{
-    await_consistency, SweetConductor, SweetConductorBatch, SweetConductorConfig, SweetDnaFile,
-    SweetLocalRendezvous,
+    await_consistency, SweetConductorBatch, SweetConductorConfig, SweetDnaFile,
 };
 use holochain_state::prelude::{IncompleteCommitReason, SourceChainError};
 use holochain_types::app::DisabledAppReason;
@@ -59,7 +57,7 @@ async fn listen_for_countersigning_completion() {
         .await
         .unwrap();
 
-    await_consistency(30, vec![alice, bob, &cells[2]])
+    await_consistency(vec![alice, bob, &cells[2]])
         .await
         .unwrap();
 
@@ -139,22 +137,8 @@ async fn retry_countersigning_commit_on_missing_deps() {
         nc.disable_publish = true;
         nc.disable_gossip = true;
     });
-    let rendezvous = SweetLocalRendezvous::new().await;
 
-    let mut conductors = SweetConductorBatch::new(
-        future::join_all(
-            std::iter::repeat_with(|| {
-                SweetConductor::create_with_defaults_and_metrics(
-                    config.clone(),
-                    None,
-                    Some(rendezvous.clone()),
-                    false,
-                )
-            })
-            .take(3),
-        )
-        .await,
-    );
+    let mut conductors = SweetConductorBatch::from_config_rendezvous(3, config).await;
 
     let (dna, _, _) = SweetDnaFile::unique_from_test_wasms(vec![TestWasm::CounterSigning]).await;
     let apps = conductors.setup_app("app", &[dna]).await.unwrap();
@@ -250,7 +234,7 @@ async fn retry_countersigning_commit_on_missing_deps() {
     let space = conductors[0]
         .holochain_p2p()
         .test_kitsune()
-        .space(alice.dna_hash().to_k2_space(), None)
+        .space_if_exists(alice.dna_hash().to_k2_space())
         .await
         .unwrap();
     let bob_agent_id = bob.agent_pubkey().to_k2_agent();
@@ -387,9 +371,7 @@ async fn alice_can_recover_when_bob_abandons_a_countersigning_session() {
         .await
         .unwrap();
 
-    await_consistency(30, vec![alice, bob, carol])
-        .await
-        .unwrap();
+    await_consistency(vec![alice, bob, carol]).await.unwrap();
 
     // Set up the session and accept it for both agents
     let preflight_request: PreflightRequest = conductors[0]
@@ -456,7 +438,7 @@ async fn alice_can_recover_when_bob_abandons_a_countersigning_session() {
         .unwrap();
 
     // Everyone's DHT should sync
-    await_consistency(60, [alice, bob, carol]).await.unwrap();
+    await_consistency([alice, bob, carol]).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -500,9 +482,7 @@ async fn alice_can_recover_from_a_session_timeout() {
         .await
         .unwrap();
 
-    await_consistency(30, vec![alice, bob, carol])
-        .await
-        .unwrap();
+    await_consistency(vec![alice, bob, carol]).await.unwrap();
 
     // Set up the session and accept it for both agents
     let preflight_request: PreflightRequest = conductors[0]
@@ -601,7 +581,7 @@ async fn alice_can_recover_from_a_session_timeout() {
         .unwrap();
 
     // Everyone's DHT should sync
-    await_consistency(60, [alice, bob, carol]).await.unwrap();
+    await_consistency([alice, bob, carol]).await.unwrap();
 }
 
 #[cfg(feature = "chc")]
@@ -648,7 +628,7 @@ async fn complete_session_with_chc_enabled() {
         .await
         .unwrap();
 
-    await_consistency(60, vec![alice, bob, &cells[2]])
+    await_consistency(vec![alice, bob, &cells[2]])
         .await
         .unwrap();
 
@@ -774,7 +754,7 @@ async fn session_rollback_with_chc_enabled() {
         .await
         .unwrap();
 
-    await_consistency(30, vec![alice, bob]).await.unwrap();
+    await_consistency(vec![alice, bob]).await.unwrap();
 
     // Set up the session and accept it for both agents
     let preflight_request: PreflightRequest = conductors[0]
@@ -856,7 +836,7 @@ async fn session_rollback_with_chc_enabled() {
     assert_eq!(before_chain.len() + 1, future_chain.len());
 
     // Everyone's DHT should sync
-    await_consistency(60, [alice, bob]).await.unwrap();
+    await_consistency([alice, bob]).await.unwrap();
 }
 
 #[cfg(feature = "chc")]
@@ -920,7 +900,7 @@ async fn multiple_agents_on_same_conductor_with_chc_enabled() {
         .await
         .unwrap();
 
-    await_consistency(60, vec![alice, bob, &cells[2], carol])
+    await_consistency(vec![alice, bob, &cells[2], carol])
         .await
         .unwrap();
 
@@ -1000,7 +980,7 @@ async fn multiple_agents_on_same_conductor_with_chc_enabled() {
     // Should appear in the CHC after publish
     assert_eq!(before_chain.len() + 1, after_chain.len());
 
-    await_consistency(30, vec![alice, bob, &cells[2], carol])
+    await_consistency(vec![alice, bob, &cells[2], carol])
         .await
         .unwrap();
 
@@ -1125,7 +1105,7 @@ async fn chc_should_respect_chain_lock() {
         .await
         .unwrap();
 
-    await_consistency(30, vec![alice, bob, &cells[2]])
+    await_consistency(vec![alice, bob, &cells[2]])
         .await
         .unwrap();
 
@@ -1244,7 +1224,7 @@ async fn should_be_able_to_schedule_functions_during_session() {
         .await
         .unwrap();
 
-    await_consistency(30, vec![alice, bob]).await.unwrap();
+    await_consistency(vec![alice, bob]).await.unwrap();
 
     // Set up the session and accept it for both agents
     let preflight_request: PreflightRequest = conductors[0]
@@ -1359,7 +1339,7 @@ async fn alice_can_force_abandon_session_when_automatic_resolution_has_failed_af
         .await;
     conductors.exchange_peer_info().await;
 
-    await_consistency(30, vec![alice, bob]).await.unwrap();
+    await_consistency(vec![alice, bob]).await.unwrap();
 
     // Need authority logic to work, so force setting full arcs.
     conductors[0]
@@ -1538,7 +1518,7 @@ async fn alice_can_force_publish_session_when_automatic_resolution_has_failed_af
         .await
         .unwrap();
 
-    await_consistency(30, vec![alice, bob]).await.unwrap();
+    await_consistency(vec![alice, bob]).await.unwrap();
 
     // Set up the session and accept it for both agents.
     let preflight_request: PreflightRequest = conductors[0]

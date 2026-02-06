@@ -21,14 +21,11 @@ async fn sys_validation_workflow_test() {
 
     let (dna_file, _, _) = SweetDnaFile::unique_from_test_wasms(vec![TestWasm::Create]).await;
 
-    let config = SweetConductorConfig::standard();
-    let mut conductors = SweetConductorBatch::from_config(2, config).await;
+    let mut conductors = SweetConductorBatch::standard(2).await;
     let apps = conductors.setup_app("test_app", [&dna_file]).await.unwrap();
     let ((alice,), (bob,)) = apps.into_tuples();
     let alice_cell_id = alice.cell_id().clone();
     let bob_cell_id = bob.cell_id().clone();
-
-    conductors.exchange_peer_info().await;
 
     run_test(alice_cell_id, bob_cell_id, conductors, dna_file).await;
 }
@@ -41,7 +38,7 @@ async fn sys_validation_produces_invalid_chain_op_warrant() {
     let zome = SweetInlineZomes::new(vec![], 0);
     let (dna, _, _) = SweetDnaFile::unique_from_inline_zomes(zome).await;
 
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
     let alice = conductor.setup_app("app", [&dna]).await.unwrap();
 
     // - Create an invalid op
@@ -112,7 +109,7 @@ async fn sys_validation_produces_forked_chain_warrant() {
         SweetDnaFile::unique_from_inline_zomes(crate::test_utils::inline_zomes::simple_crud_zome())
             .await;
 
-    let mut conductors = SweetConductorBatch::from_standard_config(2).await;
+    let mut conductors = SweetConductorBatch::standard(2).await;
     let ((alice,), (bob,)) = conductors
         .setup_app("app", [&dna])
         .await
@@ -164,7 +161,7 @@ async fn sys_validation_produces_forked_chain_warrant() {
         .test_write(move |txn| detect_fork(txn, &action).unwrap());
     assert!(maybe_fork.is_some());
 
-    await_consistency(30, [&alice, &bob]).await.unwrap();
+    await_consistency([&alice, &bob]).await.unwrap();
 
     //- Inject the forked op directly into bob's DHT db
     let forked_op = DhtOpHashed::from_content_sync(forked_op);

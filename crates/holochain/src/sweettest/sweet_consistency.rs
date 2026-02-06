@@ -27,16 +27,26 @@ impl DurationOrSeconds {
     }
 }
 
-/// Wait 20 s for all cells to reach consistency.
-pub async fn await_consistency_20_s<'a, I: IntoIterator<Item = &'a SweetCell>>(
+/// Wait 60s for all cells to reach consistency.
+///
+/// This should be used as the default, unless your test case specifically requires a longer duration,
+/// or requires immediate consistency
+pub async fn await_consistency<'a, I: IntoIterator<Item = &'a SweetCell>>(
     cells: I,
 ) -> Result<(), String> {
-    await_consistency(20, cells).await
+    await_consistency_s(60, cells).await
+}
+
+/// Check cell consistency.
+pub async fn check_consistency<'a, I: IntoIterator<Item = &'a SweetCell>>(
+    cells: I,
+) -> Result<(), String> {
+    await_consistency_s(Duration::ZERO, cells).await
 }
 
 /// Wait for all cells to reach consistency
 #[cfg_attr(feature = "instrument", tracing::instrument(skip_all))]
-pub async fn await_consistency<'a, I: IntoIterator<Item = &'a SweetCell>>(
+pub async fn await_consistency_s<'a, I: IntoIterator<Item = &'a SweetCell>>(
     timeout: impl Into<DurationOrSeconds>,
     cells: I,
 ) -> Result<(), String> {
@@ -186,15 +196,15 @@ async fn await_op_integration(
 
 #[cfg(test)]
 mod tests {
+    use crate::sweettest::{await_consistency_s, SweetConductorConfig};
     use crate::{
         prelude::holochain_serial,
-        sweettest::{await_consistency, SweetConductorBatch, SweetDnaFile},
+        sweettest::{await_consistency, check_consistency, SweetConductorBatch, SweetDnaFile},
         test_utils::retry_fn_until_timeout,
     };
     use ::fixt::fixt;
     use hdk::prelude::{ActionFixturator, SignatureFixturator};
     use holo_hash::ActionHash;
-    use holochain_conductor_api::conductor::{ConductorConfig, NetworkConfig};
     use holochain_serialized_bytes::SerializedBytes;
     use holochain_state::prelude::insert_op_dht;
     use holochain_types::dht_op::{ChainOp, DhtOpHashed};
@@ -207,13 +217,15 @@ mod tests {
         Entry,
     };
     use serde::{Deserialize, Serialize};
-    use std::time::Duration;
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "flaky under current networking; re-check after Iroh upgrade"]
+    #[cfg_attr(
+        not(feature = "transport-iroh"),
+        ignore = "requires Iroh transport for stability"
+    )]
     async fn consistency_reached() {
         holochain_trace::test_run();
-        let mut conductors = SweetConductorBatch::from_standard_config_rendezvous(2).await;
+        let mut conductors = SweetConductorBatch::standard(2).await;
         #[derive(Debug, Deserialize, Serialize)]
         struct E;
         holochain_serial!(E);
@@ -245,7 +257,7 @@ mod tests {
             .unwrap()
             .into_tuples();
 
-        await_consistency(15, &[alice.clone(), bob.clone()])
+        await_consistency(&[alice.clone(), bob.clone()])
             .await
             .unwrap();
 
@@ -257,14 +269,17 @@ mod tests {
             .call::<_, ()>(&bob.zome("integrity"), "make_some_noise", ())
             .await;
 
-        await_consistency(5, &[alice, bob]).await.unwrap();
+        await_consistency(&[alice, bob]).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "flaky under current networking; re-check after Iroh upgrade"]
+    #[cfg_attr(
+        not(feature = "transport-iroh"),
+        ignore = "requires Iroh transport for stability"
+    )]
     async fn consistency_reached_with_private_entry() {
         holochain_trace::test_run();
-        let mut conductors = SweetConductorBatch::from_standard_config_rendezvous(2).await;
+        let mut conductors = SweetConductorBatch::standard(2).await;
         let dna_file = SweetDnaFile::unique_from_test_wasms(vec![TestWasm::Create])
             .await
             .0;
@@ -274,7 +289,7 @@ mod tests {
             .unwrap()
             .into_tuples();
 
-        await_consistency(15, &[alice.clone(), bob.clone()])
+        await_consistency(&[alice.clone(), bob.clone()])
             .await
             .unwrap();
 
@@ -294,22 +309,20 @@ mod tests {
             )
             .await;
 
-        await_consistency(5, &[alice, bob]).await.unwrap();
+        await_consistency(&[alice, bob]).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "flaky under current networking; re-check after Iroh upgrade"]
+    #[cfg_attr(
+        not(feature = "transport-iroh"),
+        ignore = "requires Iroh transport for stability"
+    )]
     async fn consistency_not_reached_when_ops_not_synced() {
         holochain_trace::test_run();
         // No bootstrap service.
-        let config = ConductorConfig {
-            network: NetworkConfig {
-                mem_bootstrap: false,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let mut conductors = SweetConductorBatch::from_config(2, config).await;
+        let mut config = SweetConductorConfig::rendezvous(false);
+        config.network.disable_bootstrap = true;
+        let mut conductors = SweetConductorBatch::from_config_rendezvous(2, config).await;
         let dna_file = SweetDnaFile::unique_from_inline_zomes((
             "integrity",
             InlineIntegrityZome::new_unique(vec![], 0),
@@ -339,15 +352,13 @@ mod tests {
         .unwrap();
 
         // Genesis actions will be integrated but not gossiped. Consistency cannot be reached.
-        await_consistency(Duration::from_micros(1), &[alice, bob])
-            .await
-            .unwrap_err();
+        await_consistency_s(10, &[alice, bob]).await.unwrap_err();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn consistency_not_reached_when_ops_not_integrated() {
         holochain_trace::test_run();
-        let mut conductors = SweetConductorBatch::from_standard_config_rendezvous(2).await;
+        let mut conductors = SweetConductorBatch::standard(2).await;
         let dna_file = SweetDnaFile::unique_from_inline_zomes((
             "integrity",
             InlineIntegrityZome::new_unique(vec![], 0),
@@ -360,7 +371,7 @@ mod tests {
             .unwrap()
             .into_tuples();
 
-        await_consistency(40, &[alice.clone(), bob.clone()])
+        await_consistency(&[alice.clone(), bob.clone()])
             .await
             .unwrap();
 
@@ -373,8 +384,6 @@ mod tests {
             .unwrap();
 
         // Unintegrated op will prevent consistency.
-        await_consistency(Duration::from_micros(1), &[alice, bob])
-            .await
-            .unwrap_err();
+        check_consistency(&[alice, bob]).await.unwrap_err();
     }
 }

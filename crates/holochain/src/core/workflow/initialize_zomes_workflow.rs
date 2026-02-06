@@ -203,8 +203,12 @@ mod tests {
             .return_const(dna_def_hashed.clone());
 
         let db_dir = test_db_dir();
+        let config = SweetConductorConfig::standard().tune_network_config(|nc| {
+            nc.disable_bootstrap = true;
+            nc.signal_url = url2::Url2::parse("ws://dummy.url");
+        });
         let conductor_handle = Conductor::builder()
-            .config(SweetConductorConfig::standard().into())
+            .config(config.into())
             .with_data_root_path(db_dir.path().to_path_buf().into())
             .test(&[])
             .await
@@ -240,7 +244,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn commit_during_init() {
         let (dna, _, _) = SweetDnaFile::unique_from_test_wasms(vec![TestWasm::Create]).await;
-        let mut conductor = SweetConductor::from_standard_config().await;
+        let mut conductor = SweetConductor::standard().await;
         let keystore = conductor.keystore();
         let app = conductor.setup_app("app", [&dna]).await.unwrap();
         let (cell,) = app.into_tuple();
@@ -272,7 +276,7 @@ mod tests {
     async fn commit_during_init_one_zome_passes_one_fails() {
         let (dna, _, _) =
             SweetDnaFile::unique_from_test_wasms(vec![TestWasm::Create, TestWasm::InitFail]).await;
-        let mut conductor = SweetConductor::from_standard_config().await;
+        let mut conductor = SweetConductor::standard().await;
         let keystore = conductor.keystore();
         let app = conductor.setup_app("app", [&dna]).await.unwrap();
         let (cell,) = app.into_tuple();
@@ -318,7 +322,7 @@ mod tests {
 
         let (dna, _, _) = SweetDnaFile::unique_from_inline_zomes(zomes).await;
 
-        let mut conductor = SweetConductor::from_standard_config().await;
+        let mut conductor = SweetConductor::standard().await;
         let keystore = conductor.keystore();
         let app = conductor.setup_app("app", [&dna]).await.unwrap();
         let (cell,) = app.into_tuple();

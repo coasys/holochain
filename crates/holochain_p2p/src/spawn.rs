@@ -86,6 +86,13 @@ pub struct HolochainP2pConfig {
     /// If `None`, will not report.
     pub report: ReportConfig,
 
+    /// The maximum number of incoming requests that will be handled concurrently.
+    ///
+    /// Additional incoming requests over this limit are ignored.
+    /// This is only applied to incoming authority requests, i.e.
+    /// `get`, `get_links`, `count_links`, `get_agent_activity`, and `must_get_agent_activity`.
+    pub incoming_request_concurrency_limit: u16,
+
     /// If true, will disable the default bootstrap module.
     ///
     /// This flag is only used in tests.
@@ -104,12 +111,6 @@ pub struct HolochainP2pConfig {
     /// This flag is only used in tests.
     #[cfg(feature = "test_utils")]
     pub disable_gossip: bool,
-
-    /// Request using the in-memory bootstrap module instead of the real one.
-    ///
-    /// This flag is only used in tests.
-    #[cfg(feature = "test_utils")]
-    pub mem_bootstrap: bool,
 }
 
 impl std::fmt::Debug for HolochainP2pConfig {
@@ -124,7 +125,6 @@ impl std::fmt::Debug for HolochainP2pConfig {
         #[cfg(feature = "test_utils")]
         {
             dbg.field("disable_bootstrap", &self.disable_bootstrap)
-                .field("mem_bootstrap", &self.mem_bootstrap)
                 .field("disable_publish", &self.disable_publish)
                 .field("disable_gossip", &self.disable_gossip);
         }
@@ -146,14 +146,13 @@ impl Default for HolochainP2pConfig {
             compat: Default::default(),
             request_timeout: Duration::from_secs(60),
             report: ReportConfig::default(),
+            incoming_request_concurrency_limit: 4,
             #[cfg(feature = "test_utils")]
             disable_bootstrap: false,
             #[cfg(feature = "test_utils")]
             disable_publish: false,
             #[cfg(feature = "test_utils")]
             disable_gossip: false,
-            #[cfg(feature = "test_utils")]
-            mem_bootstrap: true,
         }
     }
 }

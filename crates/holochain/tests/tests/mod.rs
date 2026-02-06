@@ -1,8 +1,12 @@
 mod agent_activity;
 mod agent_scaling;
-mod app_installation;
+mod app_disable;
+mod app_install;
 mod app_interface_security;
+mod app_uninstall;
 mod authored_test;
+#[cfg(feature = "slow_tests")]
+mod blocks;
 mod clone_cell;
 // Countersigning HDK functions needed
 #[cfg(feature = "unstable-countersigning")]

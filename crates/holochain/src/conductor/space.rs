@@ -91,6 +91,7 @@ pub struct Space {
 
     root_db_dir: Arc<PathBuf>,
     db_key: DbKey,
+    db_max_readers: u16,
 }
 
 /// Test spaces
@@ -169,6 +170,7 @@ impl Spaces {
                 PoolConfig {
                     synchronous_level: db_sync_level,
                     key: db_key.clone(),
+                    max_readers: config.db_max_readers,
                 },
             )?;
             let wasm_db = DbWrite::open_with_pool_config(
@@ -177,6 +179,7 @@ impl Spaces {
                 PoolConfig {
                     synchronous_level: db_sync_level,
                     key: db_key.clone(),
+                    max_readers: config.db_max_readers,
                 },
             )?;
             ConductorResult::Ok((conductor_db, wasm_db))
@@ -198,70 +201,15 @@ impl Spaces {
         holochain_state::block::unblock(&self.conductor_db, input).await
     }
 
-    async fn node_agents_in_spaces(
-        &self,
-        node_id: &str,
-        dnas: Vec<DnaHash>,
-        holochain_p2p: DynHcP2p,
-    ) -> ConductorResult<Vec<CellId>> {
-        let mut agents = Vec::new();
-        for dna in dnas {
-            let dna_agents = holochain_p2p
-                .peer_store(dna)
-                .await?
-                .get_all()
-                .await
-                .map_err(ConductorError::other)?;
-
-            agents.extend(dna_agents);
-        }
-
-        Ok(agents
-            .into_iter()
-            .filter_map(|agent| {
-                let is_matching_node_id = agent
-                    .url
-                    .as_ref()
-                    .and_then(|url| url.peer_id())
-                    .map(|peer_id| peer_id == node_id)
-                    .unwrap_or_default();
-
-                if is_matching_node_id {
-                    Some(CellId::new(
-                        DnaHash::from_k2_space(&agent.space),
-                        AgentPubKey::from_k2_agent(&agent.agent),
-                    ))
-                } else {
-                    None
-                }
-            })
-            .collect())
-    }
-
     /// Check if some target is blocked.
     pub async fn is_blocked(
         &self,
         target_id: BlockTargetId,
         timestamp: Timestamp,
-        holochain_p2p: DynHcP2p,
+        _holochain_p2p: DynHcP2p,
     ) -> ConductorResult<bool> {
         let cell_ids = match &target_id {
             BlockTargetId::Cell(cell_id) => vec![cell_id.to_owned()],
-            #[allow(deprecated)]
-            BlockTargetId::NodeDna(node_id, dna_hash) => {
-                self.node_agents_in_spaces(node_id, vec![dna_hash.clone()], holochain_p2p)
-                    .await?
-            }
-            #[allow(deprecated)]
-            BlockTargetId::Node(node_id) => {
-                self.node_agents_in_spaces(
-                    node_id,
-                    self.map
-                        .share_ref(|m| m.keys().cloned().collect::<Vec<DnaHash>>()),
-                    holochain_p2p,
-                )
-                .await?
-            }
             // @todo
             BlockTargetId::Ip(_) => {
                 vec![]
@@ -379,6 +327,7 @@ impl Spaces {
                             self.db_dir.to_path_buf(),
                             self.config.db_sync_strategy,
                             self.db_key.clone(),
+                            self.config.db_max_readers,
                         )?;
 
                         let r = f(&space);
@@ -411,6 +360,18 @@ impl Spaces {
         dna_hash: &DnaHash,
     ) -> DatabaseResult<Vec<DbWrite<DbKindAuthored>>> {
         self.get_or_create_space_ref(dna_hash, |space| space.get_all_authored_dbs())
+    }
+
+    /// Get the authored database for this author if it already exists.
+    pub fn get_authored_db_if_present(
+        &self,
+        dna_hash: &DnaHash,
+        author: &AgentPubKey,
+    ) -> DatabaseResult<Option<DbWrite<DbKindAuthored>>> {
+        match self.map.share_ref(|spaces| spaces.get(dna_hash).cloned()) {
+            Some(space) => space.get_authored_db_if_present(author),
+            None => Ok(None),
+        }
     }
 
     /// Get the dht database (this will create the space if it doesn't already exist).
@@ -486,6 +447,7 @@ impl Space {
         root_db_dir: PathBuf,
         db_sync_strategy: DbSyncStrategy,
         db_key: DbKey,
+        db_max_readers: u16,
     ) -> DatabaseResult<Self> {
         let db_sync_level = match db_sync_strategy {
             DbSyncStrategy::Fast => DbSyncLevel::Off,
@@ -500,6 +462,7 @@ impl Space {
                     PoolConfig {
                         synchronous_level: db_sync_level,
                         key: db_key.clone(),
+                        max_readers: db_max_readers,
                     },
                 )?;
                 let dht_db = DbWrite::open_with_pool_config(
@@ -508,6 +471,7 @@ impl Space {
                     PoolConfig {
                         synchronous_level: db_sync_level,
                         key: db_key.clone(),
+                        max_readers: db_max_readers,
                     },
                 )?;
                 let peer_meta_store_db = DbWrite::open_with_pool_config(
@@ -516,6 +480,7 @@ impl Space {
                     PoolConfig {
                         synchronous_level: db_sync_level,
                         key: db_key.clone(),
+                        max_readers: db_max_readers,
                     },
                 )?;
                 let conductor_db: DbWrite<DbKindConductor> = DbWrite::open_with_pool_config(
@@ -524,6 +489,7 @@ impl Space {
                     PoolConfig {
                         synchronous_level: db_sync_level,
                         key: db_key.clone(),
+                        max_readers: db_max_readers,
                     },
                 )?;
                 DatabaseResult::Ok((cache, dht_db, peer_meta_store_db, conductor_db))
@@ -545,6 +511,7 @@ impl Space {
             conductor_db,
             root_db_dir: Arc::new(root_db_dir),
             db_key,
+            db_max_readers,
         };
         Ok(r)
     }
@@ -595,6 +562,7 @@ impl Space {
                         PoolConfig {
                             synchronous_level: DbSyncLevel::Normal,
                             key: self.db_key.clone(),
+                            max_readers: self.db_max_readers,
                         },
                     )
                 })?;
@@ -603,6 +571,14 @@ impl Space {
                 Ok(db)
             }
         }
+    }
+
+    /// Get the authored database for an agent if it exists.
+    pub fn get_authored_db_if_present(
+        &self,
+        author: &AgentPubKey,
+    ) -> DatabaseResult<Option<DbWrite<DbKindAuthored>>> {
+        Ok(self.authored_dbs.lock().get(author).cloned())
     }
 
     /// Gets authored databases for this space, for every author.
@@ -693,9 +669,70 @@ impl TestSpace {
                 temp_dir.path().to_path_buf(),
                 Default::default(),
                 Default::default(),
+                ConductorConfig::default().db_max_readers,
             )
             .unwrap(),
             _temp_dir: temp_dir,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use holochain_conductor_api::conductor::ConductorConfig;
+    use holochain_types::prelude::DnaHash;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn db_max_readers_applied_to_pools() {
+        let custom_max_readers = 24;
+
+        let temp_dir = tempfile::Builder::new().tempdir().unwrap();
+
+        let config_with_path = ConductorConfig {
+            data_root_path: Some(temp_dir.path().to_path_buf().into()),
+            db_max_readers: custom_max_readers,
+            ..Default::default()
+        };
+
+        let spaces = Spaces::new(
+            Arc::new(config_with_path),
+            Arc::new(std::sync::Mutex::new(sodoken::LockedArray::from(
+                b"passphrase".to_vec(),
+            ))),
+        )
+        .await
+        .unwrap();
+
+        let dna_hash = DnaHash::from_raw_36(vec![0; 36]);
+        let space = spaces.get_or_create_space(&dna_hash).unwrap();
+        space
+            .get_or_create_authored_db(AgentPubKey::from_raw_32(vec![0; 32]))
+            .unwrap();
+
+        // db_max_readers applied to space
+        assert_eq!(space.db_max_readers, custom_max_readers);
+
+        // db_max_readers applied to cache db
+        assert_eq!(
+            space.cache_db.connection_pool_max_size(),
+            custom_max_readers as u32 + 1
+        );
+
+        // db_max_readers applied to dht db
+        assert_eq!(
+            space.dht_db.connection_pool_max_size(),
+            custom_max_readers as u32 + 1
+        );
+
+        // db_max_readers applied to authored db
+        assert_eq!(
+            space
+                .get_all_authored_dbs()
+                .first()
+                .unwrap()
+                .connection_pool_max_size(),
+            custom_max_readers as u32 + 1
+        );
     }
 }

@@ -298,7 +298,7 @@ mod blocks_impl {
         // Second block should not error.
         actor
             .block(Block::new(
-                BlockTarget::Cell(cell_id, CellBlockReason::App(vec![])),
+                BlockTarget::Cell(cell_id, CellBlockReason::InvalidOp(fixt!(DhtOpHash))),
                 InclusiveTimestampInterval::try_new(Timestamp::now(), Timestamp::max()).unwrap(),
             ))
             .await
@@ -562,11 +562,7 @@ impl TestActor {
                 let peer_meta_db = peer_meta_db.clone();
                 Box::pin(async move { Ok(peer_meta_db) })
             }),
-            #[cfg(any(
-                feature = "transport-tx5-datachannel-vendored",
-                feature = "transport-tx5-backend-libdatachannel",
-                feature = "transport-tx5-backend-go-pion"
-            ))]
+            #[cfg(feature = "transport-tx5-backend-go-pion")]
             network_config: Some(serde_json::json!({
                 "coreBootstrap": {
                     "serverUrl": format!("http://{bootstrap_addr}"),
@@ -580,11 +576,7 @@ impl TestActor {
             })),
             #[cfg(all(
                 feature = "transport-iroh",
-                not(any(
-                    feature = "transport-tx5-datachannel-vendored",
-                    feature = "transport-tx5-backend-libdatachannel",
-                    feature = "transport-tx5-backend-go-pion"
-                ))
+                not(feature = "transport-tx5-backend-go-pion")
             ))]
             network_config: Some(serde_json::json!({
                 "coreBootstrap": {
