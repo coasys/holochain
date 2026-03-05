@@ -7,6 +7,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## Unreleased
 
+- Update kitsune2 dependencies to `0.4.0-dev.3`. #5673
+- Fixed an issue where the `on_signal` method of the client `AppWebsocket` would not handle signals for cloned cells correctly. Since Holochain now outputs signals only on connections associated with the app where they are emitted, filtering in the client is no longer necessary. #5672
+
+## 0.7.0-dev.14
+
+- Import influxive crates from https://github.com/holochain/influxive into monorepo and update their dependencies.
+- **BREAKING CHANGE** Remove implicit features created by enabling optional crates: \#5663
+  - For `holo_hash`, the `serde` and `serde_bytes` features are removed, please use `serialization` instead.
+  - For `holo_hash`, the `rusqlite` feature has been removed, please use `sqlite` or `sqlite-encrypted` instead.
+  - For `holochain_trace`, the `tokio` and `shrinkwraprs` features are removed, please use `channels` instead.
+  - For `holochain_util`, the `tokio` feature is removed, please use `tokio_helper` instead.
+  - For `holochain_util`, the `rpassword` and `sodoken` features are removed, please use `pw` instead.
+  - For `holochain_metrics`, the `influxive` feature is removed and now cannot be disabled.
+  - For `holochain`, the `metrics_influxive` feature is removed and metrics are now only controlled with configuration.
+  - For `holochain_nonce`, the `subtle-encoding` feature has been renamed to `full`.
+  - For `hdi`, the `tracing` and `tracing-core` features have been removed, please use `trace` instead.
+  - For `holochain_integrity_types`, the `subtle-encoding` feature has been removed, please use `full` instead.
+  - For `holochain_zome_types`, the `serde_yaml` feature has been removed, please use `properties` instead.
+  - For `holochain_zome_types`, the `shrinkwraprs`, `derive_builder`, and `num_enum` features have been removed; they were implicit features of the `full-dna-def` and `full` features respectively.
+  - For `holochain_p2p`, the `kitsune2_transport_iroh` feature has been removed, please use `transport-iroh` instead.
+  - For `holochain_sqlite`, the `holochain_util` feature has been removed; the dependency is now unconditionally enabled.
+
+## 0.7.0-dev.13
+
+- Stabilized chain fork warrants that were previously behind the `unstable-warrants` feature; the feature has now been removed. \#5641
+- **BREAKING CHANGE** Removed the `chc` feature and all Chain Head Coordinator (CHC) code. The `holochain_chc` crate has been removed. The `chc` Cargo feature flag no longer exists. Removed `chc` parameter from `source_chain::genesis()` and `SourceChain::flush()`. Removed `ChcHeadMoved` variant from `SourceChainError`. \#5551
+- **BREAKING CHANGE** Removed `GraftRecords` and `RecordsGrafted` from the Admin API. Grafting is no longer supported since it was intended to be used by `holochain_chc` and wasn’t safe to call in general. \#5551
+
+## 0.7.0-dev.12
+
+- **BREAKING CHANGE** The `Spaces` struct now contains dedicated `wasm_store`, `dna_def_store`, and `entry_def_store` fields instead of directly exposing the underlying `wasm_db`. These are using the new WASM database from `holochain_data` under the hood. There is no migration path from an existing installation to this version.
+
+## 0.7.0-dev.11
+
+- Added `deny_unknown_fields` to conductor configuration structs to improve UX by rejecting configurations with typos or obsolete fields. This helps catch configuration errors early. \#5455
+
 ## 0.7.0-dev.10
 
 - Rename `SweetConductor::from_standard_config` to `SweetConductor::standard`.
