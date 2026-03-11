@@ -2150,6 +2150,14 @@ impl actor::HcP2p for HolochainP2pActor {
         self.blocks_db_getter.clone()
     }
 
+    fn local_socket_addrs(&self) -> BoxFut<'_, HolochainP2pResult<Vec<std::net::SocketAddr>>> {
+        // TODO: Delegate to kitsune.transport().local_socket_addrs() once
+        // kitsune2_api is updated with the local_socket_addrs method.
+        // For now, return empty vec. The actual delegation will work when
+        // holochain upgrades to kitsune2 >= 0.4.0-dev.4.
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
     fn block(&self, block: Block) -> BoxFut<'_, HolochainP2pResult<()>> {
         Box::pin(async move {
             // Capture the target up front so we can move `block` into the DB call without cloning.

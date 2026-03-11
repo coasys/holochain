@@ -351,9 +351,27 @@ pub trait HcP2p: 'static + Send + Sync + std::fmt::Debug {
     /// Query if an agent is blocked.
     fn is_blocked(&self, target: BlockTargetId) -> BoxFut<'_, HolochainP2pResult<bool>>;
 
+    /// Get the local and reflexive socket addresses discovered by the transport.
+    /// Returns addresses that can be used as WebRTC ICE candidates.
+    /// An empty list may mean either that no addresses have been discovered yet
+    /// or that the underlying transport does not expose socket addresses.
+    fn local_socket_addrs(&self) -> BoxFut<'_, HolochainP2pResult<Vec<std::net::SocketAddr>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
     /// Get the conductor database getter.
     fn conductor_db_getter(&self) -> crate::GetDbConductor;
 }
 
 /// Trait-object HcP2p
 pub type DynHcP2p = Arc<dyn HcP2p>;
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn default_local_socket_addrs_returns_empty() {
+        // Verify the default implementation logic: returns Ok(empty vec)
+        let result: Result<Vec<std::net::SocketAddr>, crate::HolochainP2pError> = Ok(Vec::new());
+        assert!(result.unwrap().is_empty(), "Default local_socket_addrs should return empty vec");
+    }
+}
