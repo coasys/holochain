@@ -13,7 +13,7 @@ use holochain_p2p::{
 use holochain_state::{block::get_all_cell_blocks, prelude::test_conductor_db};
 use holochain_timestamp::{InclusiveTimestampInterval, Timestamp};
 use holochain_types::{
-    db::{DbKindConductor, DbKindDht, DbKindPeerMetaStore, DbWrite},
+    db::{DbKindCache, DbKindConductor, DbKindDht, DbKindPeerMetaStore, DbWrite},
     prelude::{Block, BlockTargetId, CellBlockReason, CellId},
     record::WireRecordOps,
 };
@@ -364,6 +364,7 @@ async fn get_to_blocked_agent_fails() {
             dna_hash.clone(),
             fixt!(ActionHash).into(),
             NetworkRequestOptions::default(),
+            None,
         )
         .await;
     assert!(
@@ -397,6 +398,7 @@ async fn get_to_blocked_agent_fails() {
             dna_hash.clone(),
             fixt!(ActionHash).into(),
             NetworkRequestOptions::default(),
+            None,
         )
         .await;
     assert!(matches!(
@@ -437,6 +439,7 @@ async fn get_by_blocked_agent_fails() {
             dna_hash.clone(),
             fixt!(ActionHash).into(),
             NetworkRequestOptions::default(),
+            None,
         )
         .await;
     assert!(
@@ -466,6 +469,7 @@ async fn get_by_blocked_agent_fails() {
             dna_hash.clone(),
             fixt!(ActionHash).into(),
             NetworkRequestOptions::default(),
+            None,
         )
         .await;
     assert!(response.is_err(), "expected error, got {response:?}");
@@ -506,6 +510,7 @@ impl TestActor {
         bootstrap_addr: &SocketAddr,
     ) -> Self {
         let op_db = DbWrite::test_in_mem(DbKindDht(Arc::new(dna_hash.clone()))).unwrap();
+        let cache_db = DbWrite::test_in_mem(DbKindCache(Arc::new(dna_hash.clone()))).unwrap();
         let peer_meta_db =
             DbWrite::test_in_mem(DbKindPeerMetaStore(Arc::new(dna_hash.clone()))).unwrap();
         let config = HolochainP2pConfig {
@@ -516,6 +521,10 @@ impl TestActor {
             get_db_op_store: Arc::new(move |_| {
                 let op_db = op_db.clone();
                 Box::pin(async move { Ok(op_db) })
+            }),
+            get_db_cache: Arc::new(move |_| {
+                let cache_db = cache_db.clone();
+                Box::pin(async move { Ok(cache_db) })
             }),
             get_db_peer_meta: Arc::new(move |_| {
                 let peer_meta_db = peer_meta_db.clone();
