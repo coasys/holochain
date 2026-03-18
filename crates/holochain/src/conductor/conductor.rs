@@ -2073,7 +2073,7 @@ mod app_status_impls {
                 .into_iter()
                 .zip(triggers.into_iter())
                 .enumerate()
-                .map(|(i, cell)| {
+                .map(|(i, ((_, cell), trigger))| {
                     let config_override = self
                         .resolve_cell_overrides(cell.id().dna_hash(), app_config_override.clone());
                     let cell_id = cell.id().clone();
