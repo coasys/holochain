@@ -3399,7 +3399,6 @@ dependencies = [
  "kitsune2_core",
  "kitsune2_transport_iroh",
  "kitsune2_transport_tx5",
- "lair_keystore_api 0.6.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "mockall",
  "opentelemetry 0.31.0",
  "parking_lot",
@@ -6331,19 +6330,6 @@ dependencies = [
  "base64",
  "indexmap 2.11.1",
  "quick-xml 0.38.4",
- "serde",
- "time",
-]
-
-[[package]]
-name = "plist"
-version = "1.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "740ebea15c5d1428f910cd1a5f52cebf8d25006245ed8ade92702f4943d91e07"
-dependencies = [
- "base64",
- "indexmap 2.11.1",
- "quick-xml",
  "serde",
  "time",
 ]
