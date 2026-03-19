@@ -4638,7 +4638,7 @@ dependencies = [
 [[package]]
 name = "kitsune2"
 version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
+source = "git+https://github.com/holochain/kitsune2.git?rev=d01c15ebf55082fcd7b49f8d303a84172eac59bf#d01c15ebf55082fcd7b49f8d303a84172eac59bf"
 dependencies = [
  "bytes",
  "kitsune2_api",
@@ -4652,7 +4652,7 @@ dependencies = [
 [[package]]
 name = "kitsune2_api"
 version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
+source = "git+https://github.com/holochain/kitsune2.git?rev=d01c15ebf55082fcd7b49f8d303a84172eac59bf#d01c15ebf55082fcd7b49f8d303a84172eac59bf"
 dependencies = [
  "base64",
  "bytes",
@@ -4668,7 +4668,7 @@ dependencies = [
 [[package]]
 name = "kitsune2_bootstrap_client"
 version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
+source = "git+https://github.com/holochain/kitsune2.git?rev=d01c15ebf55082fcd7b49f8d303a84172eac59bf#d01c15ebf55082fcd7b49f8d303a84172eac59bf"
 dependencies = [
  "base64",
  "kitsune2_api",
@@ -4682,7 +4682,7 @@ dependencies = [
 [[package]]
 name = "kitsune2_bootstrap_srv"
 version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
+source = "git+https://github.com/holochain/kitsune2.git?rev=d01c15ebf55082fcd7b49f8d303a84172eac59bf#d01c15ebf55082fcd7b49f8d303a84172eac59bf"
 dependencies = [
  "async-channel",
  "axum",
@@ -4715,7 +4715,7 @@ dependencies = [
 [[package]]
 name = "kitsune2_core"
 version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
+source = "git+https://github.com/holochain/kitsune2.git?rev=d01c15ebf55082fcd7b49f8d303a84172eac59bf#d01c15ebf55082fcd7b49f8d303a84172eac59bf"
 dependencies = [
  "base64",
  "bytes",
@@ -4736,7 +4736,7 @@ dependencies = [
 [[package]]
 name = "kitsune2_dht"
 version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
+source = "git+https://github.com/holochain/kitsune2.git?rev=d01c15ebf55082fcd7b49f8d303a84172eac59bf#d01c15ebf55082fcd7b49f8d303a84172eac59bf"
 dependencies = [
  "bytes",
  "kitsune2_api",
@@ -4746,7 +4746,7 @@ dependencies = [
 [[package]]
 name = "kitsune2_gossip"
 version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
+source = "git+https://github.com/holochain/kitsune2.git?rev=d01c15ebf55082fcd7b49f8d303a84172eac59bf#d01c15ebf55082fcd7b49f8d303a84172eac59bf"
 dependencies = [
  "bytes",
  "futures",
@@ -4766,7 +4766,7 @@ dependencies = [
 [[package]]
 name = "kitsune2_test_utils"
 version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
+source = "git+https://github.com/holochain/kitsune2.git?rev=d01c15ebf55082fcd7b49f8d303a84172eac59bf#d01c15ebf55082fcd7b49f8d303a84172eac59bf"
 dependencies = [
  "axum",
  "bytes",
@@ -4782,7 +4782,7 @@ dependencies = [
 [[package]]
 name = "kitsune2_transport_iroh"
 version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
+source = "git+https://github.com/holochain/kitsune2.git?rev=d01c15ebf55082fcd7b49f8d303a84172eac59bf#d01c15ebf55082fcd7b49f8d303a84172eac59bf"
 dependencies = [
  "bytes",
  "iroh",
@@ -4799,7 +4799,7 @@ dependencies = [
 [[package]]
 name = "kitsune2_transport_tx5"
 version = "0.4.0-dev.4"
-source = "git+https://github.com/holochain/kitsune2.git?rev=26159cb9bac7cc845fff57a1630aa9d7112c37d5#26159cb9bac7cc845fff57a1630aa9d7112c37d5"
+source = "git+https://github.com/holochain/kitsune2.git?rev=d01c15ebf55082fcd7b49f8d303a84172eac59bf#d01c15ebf55082fcd7b49f8d303a84172eac59bf"
 dependencies = [
  "base64",
  "bytes",

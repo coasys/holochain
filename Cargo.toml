@@ -84,16 +84,16 @@ lto = true
 
 [patch.crates-io]
 # NOTE: This branch requires unreleased kitsune2 code.
-kitsune2 = { git = "https://github.com/holochain/kitsune2.git", rev = "26159cb9bac7cc845fff57a1630aa9d7112c37d5" }
-kitsune2_api = { git = "https://github.com/holochain/kitsune2.git", rev = "26159cb9bac7cc845fff57a1630aa9d7112c37d5" }
-kitsune2_bootstrap_client = { git = "https://github.com/holochain/kitsune2.git", rev = "26159cb9bac7cc845fff57a1630aa9d7112c37d5" }
-kitsune2_bootstrap_srv = { git = "https://github.com/holochain/kitsune2.git", rev = "26159cb9bac7cc845fff57a1630aa9d7112c37d5" }
-kitsune2_core = { git = "https://github.com/holochain/kitsune2.git", rev = "26159cb9bac7cc845fff57a1630aa9d7112c37d5" }
-kitsune2_dht = { git = "https://github.com/holochain/kitsune2.git", rev = "26159cb9bac7cc845fff57a1630aa9d7112c37d5" }
-kitsune2_gossip = { git = "https://github.com/holochain/kitsune2.git", rev = "26159cb9bac7cc845fff57a1630aa9d7112c37d5" }
-kitsune2_test_utils = { git = "https://github.com/holochain/kitsune2.git", rev = "26159cb9bac7cc845fff57a1630aa9d7112c37d5" }
-kitsune2_transport_iroh = { git = "https://github.com/holochain/kitsune2.git", rev = "26159cb9bac7cc845fff57a1630aa9d7112c37d5" }
-kitsune2_transport_tx5 = { git = "https://github.com/holochain/kitsune2.git", rev = "26159cb9bac7cc845fff57a1630aa9d7112c37d5" }
+kitsune2 = { git = "https://github.com/holochain/kitsune2.git", rev = "d01c15ebf55082fcd7b49f8d303a84172eac59bf" }
+kitsune2_api = { git = "https://github.com/holochain/kitsune2.git", rev = "d01c15ebf55082fcd7b49f8d303a84172eac59bf" }
+kitsune2_bootstrap_client = { git = "https://github.com/holochain/kitsune2.git", rev = "d01c15ebf55082fcd7b49f8d303a84172eac59bf" }
+kitsune2_bootstrap_srv = { git = "https://github.com/holochain/kitsune2.git", rev = "d01c15ebf55082fcd7b49f8d303a84172eac59bf" }
+kitsune2_core = { git = "https://github.com/holochain/kitsune2.git", rev = "d01c15ebf55082fcd7b49f8d303a84172eac59bf" }
+kitsune2_dht = { git = "https://github.com/holochain/kitsune2.git", rev = "d01c15ebf55082fcd7b49f8d303a84172eac59bf" }
+kitsune2_gossip = { git = "https://github.com/holochain/kitsune2.git", rev = "d01c15ebf55082fcd7b49f8d303a84172eac59bf" }
+kitsune2_test_utils = { git = "https://github.com/holochain/kitsune2.git", rev = "d01c15ebf55082fcd7b49f8d303a84172eac59bf" }
+kitsune2_transport_iroh = { git = "https://github.com/holochain/kitsune2.git", rev = "d01c15ebf55082fcd7b49f8d303a84172eac59bf" }
+kitsune2_transport_tx5 = { git = "https://github.com/holochain/kitsune2.git", rev = "d01c15ebf55082fcd7b49f8d303a84172eac59bf" }
 # sbd-server = { path = "../sbd/rust/sbd-server" }
 # sbd-client = { path = "../sbd/rust/sbd-client" }
 # sbd-e2e-crypto-client = { path = "../sbd/rust/sbd-e2e-crypto-client" }
