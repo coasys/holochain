@@ -1452,10 +1452,24 @@ impl actor::HcP2p for HolochainP2pActor {
         config_override: Option<CellConfigOverrides>,
     ) -> BoxFut<'_, HolochainP2pResult<()>> {
         Box::pin(async move {
+            if let Some(ref overrides) = config_override {
+                tracing::info!(
+                    ?dna_hash,
+                    bootstrap_url = ?overrides.bootstrap_url,
+                    has_auth_material = overrides.base64_auth_material.is_some(),
+                    signal_url = ?overrides.signal_url,
+                    "Joining space with config overrides"
+                );
+            }
             let config_override = match config_override {
                 Some(overrides) => self.space_config_override(overrides)?,
                 None => None,
             };
+            tracing::info!(
+                ?dna_hash,
+                has_config_override = config_override.is_some(),
+                "Creating k2 space"
+            );
 
             // Create k2 space with config override.
             //
