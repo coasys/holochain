@@ -1579,7 +1579,7 @@ impl actor::HcP2p for HolochainP2pActor {
                     ?dna_hash,
                     bootstrap_url = ?overrides.bootstrap_url,
                     has_auth_material = overrides.base64_auth_material.is_some(),
-                    signal_url = ?overrides.signal_url,
+                    relay_url = ?overrides.relay_url,
                     "Joining space with config overrides"
                 );
             }
