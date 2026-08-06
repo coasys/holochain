@@ -54,6 +54,7 @@ async fn signed_zome_call() {
             roles_settings: None,
             source: AppBundleSource::Bytes(fixture::get_fixture_app_bundle()),
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();
@@ -130,6 +131,7 @@ async fn storage_info() {
             roles_settings: None,
             source: AppBundleSource::Bytes(fixture::get_fixture_app_bundle()),
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();
@@ -164,6 +166,7 @@ async fn dump_network_stats() {
             roles_settings: None,
             source: AppBundleSource::Bytes(fixture::get_fixture_app_bundle()),
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();
@@ -171,9 +174,6 @@ async fn dump_network_stats() {
 
     let network_stats = admin_ws.dump_network_stats().await.unwrap();
 
-    #[cfg(feature = "transport-tx5-backend-go-pion")]
-    assert_eq!("BackendGoPion", network_stats.transport_stats.backend);
-    #[cfg(feature = "transport-iroh")]
     assert_eq!("iroh", network_stats.transport_stats.backend);
 }
 
@@ -194,6 +194,7 @@ async fn agent_info() {
             network_seed: None,
             source: AppBundleSource::Bytes(fixture::get_fixture_app_bundle()),
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();
@@ -252,6 +253,7 @@ async fn peer_meta_info() {
             network_seed: None,
             source: AppBundleSource::Bytes(fixture::get_fixture_app_bundle()),
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();
@@ -299,6 +301,7 @@ async fn install_app_then_list_apps_and_list_cell_ids() {
             network_seed: None,
             source: AppBundleSource::Bytes(fixture::get_fixture_app_bundle()),
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();
@@ -332,7 +335,7 @@ async fn install_app_with_roles_settings() {
     let agent_key = admin_ws.generate_agent_pub_key().await.unwrap();
 
     let custom_network_seed = String::from("modified seed");
-    let custom_properties = YamlProperties::new(serde_yaml::Value::String(String::from(
+    let custom_properties = YamlProperties::new(yaml_serde::Value::String(String::from(
         "some properties provided at install time",
     )));
 
@@ -345,6 +348,7 @@ async fn install_app_with_roles_settings() {
         RoleSettings::Provisioned {
             membrane_proof: Default::default(),
             modifiers: Some(custom_modifiers),
+            init_properties: None,
         },
     );
 
@@ -356,6 +360,7 @@ async fn install_app_with_roles_settings() {
             network_seed: None,
             source: AppBundleSource::Bytes(fixture::get_fixture_app_bundle()),
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();

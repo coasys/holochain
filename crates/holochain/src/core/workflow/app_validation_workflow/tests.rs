@@ -2,12 +2,11 @@ use crate::conductor::{Conductor, ConductorHandle};
 use crate::core::ribosome::guest_callback::validate::ValidateResult;
 use crate::core::ribosome::ZomeCallInvocation;
 use crate::core::workflow::app_validation_workflow::{
-    app_validation_workflow_inner, check_app_entry_def, put_validation_limbo,
-    AppValidationWorkspace, OutcomeSummary,
+    app_validation_workflow_inner, check_app_entry_def, AppValidationWorkspace, OutcomeSummary,
 };
-use crate::core::workflow::sys_validation_workflow::validation_query;
 use crate::core::{SysValidationError, ValidationOutcome};
 use crate::sweettest::*;
+use crate::test_utils::conditional_consistency::*;
 use crate::test_utils::{
     get_valid_and_integrated_count, get_valid_and_not_integrated_count, host_fn_caller::*,
     new_invocation, new_zome_call_params, wait_for_integration,
@@ -17,32 +16,24 @@ use hdk::hdi::test_utils::set_zome_types;
 use hdk::prelude::*;
 use holo_hash::fixt::ActionHashFixturator;
 use holo_hash::fixt::EntryHashFixturator;
-use holo_hash::{fixt::AgentPubKeyFixturator, ActionHash, AnyDhtHash, DhtOpHash, EntryHash};
+use holo_hash::{fixt::AgentPubKeyFixturator, ActionHash, DhtOpHash, EntryHash};
 use holochain_conductor_api::conductor::paths::DataRootPath;
 use holochain_p2p::actor::MockHcP2p;
 use holochain_p2p::HolochainP2pDna;
-use holochain_sqlite::error::DatabaseResult;
-use holochain_state::mutations::insert_op_dht;
-use holochain_state::prelude::{from_blob, insert_op_cache, StateQueryResult};
+use holochain_state::dht_store::{DhtStore, SysOutcome};
 use holochain_state::test_utils::test_db_dir;
-use holochain_state::validation_db::ValidationStage;
-use holochain_types::dht_op::DhtOpHashed;
 use holochain_types::inline_zome::InlineZomeSet;
 use holochain_types::prelude::*;
 use holochain_wasm_test_utils::{TestWasm, TestWasmPair, TestZomes};
-use holochain_zome_types::fixt::{CreateFixturator, DeleteFixturator, SignatureFixturator};
+use holochain_zome_types::fixt::{
+    ActionFixturator, CreateAction, DeleteAction, SignatureFixturator,
+};
 use holochain_zome_types::timestamp::Timestamp;
-use holochain_zome_types::Action;
 use matches::assert_matches;
-use rusqlite::{named_params, Transaction};
 use std::convert::{TryFrom, TryInto};
 use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Duration;
-use {
-    crate::test_utils::conditional_consistency::*,
-    holochain_state::query::{CascadeTxnWrapper, Store},
-};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn main_workflow() {
@@ -50,19 +41,19 @@ async fn main_workflow() {
 
     let zomes =
         SweetInlineZomes::new(vec![], 0).integrity_function("validate", move |api, op: Op| {
-            if let Op::RegisterDelete(RegisterDelete { delete }) = op {
-                let result = api.must_get_action(MustGetActionInput::new(
-                    delete.hashed.deletes_address.clone(),
-                ));
+            if let Op::Delete(Delete { delete }) = op {
+                let deletes_address = match &delete.hashed.content.data {
+                    ActionData::Delete(DeleteData {
+                        deletes_address, ..
+                    }) => deletes_address.clone(),
+                    _ => unreachable!(),
+                };
+                let result = api.must_get_action(MustGetActionInput::new(deletes_address.clone()));
                 if result.is_ok() {
                     Ok(ValidateCallbackResult::Valid)
                 } else {
                     Ok(ValidateCallbackResult::UnresolvedDependencies(
-                        UnresolvedDependencies::Hashes(vec![delete
-                            .hashed
-                            .deletes_address
-                            .clone()
-                            .into()]),
+                        UnresolvedDependencies::Hashes(vec![deletes_address.into()]),
                     ))
                 }
             } else {
@@ -74,61 +65,70 @@ async fn main_workflow() {
     let dna_hash = dna_file.dna_hash().clone();
 
     let mut conductor = SweetConductor::standard().await;
-    let app = conductor
+    conductor
         .setup_app("", std::slice::from_ref(&dna_file))
         .await
         .unwrap();
-    let cell_id = app.cells()[0].cell_id().clone();
 
     let app_validation_workspace = Arc::new(AppValidationWorkspace::new(
-        conductor
-            .get_or_create_authored_db(&dna_hash, cell_id.agent_pubkey().clone())
-            .unwrap(),
-        conductor.get_dht_db(&dna_hash).unwrap(),
-        conductor.get_cache_db(&cell_id).await.unwrap(),
+        conductor.get_dht_store(&dna_hash).unwrap(),
         conductor.keystore(),
     ));
 
     // check there are no ops to app validate
     // genesis entries have already been validated at this stage
-    let ops_to_validate =
-        validation_query::get_ops_to_app_validate(&app_validation_workspace.dht_db)
-            .await
-            .unwrap()
-            .len();
+    let ops_to_validate = app_validation_workspace
+        .dht_store
+        .as_read()
+        .ops_pending_app_validation(10_000)
+        .await
+        .unwrap()
+        .len();
     assert_eq!(ops_to_validate, 0);
 
     // create op that following delete op depends on
-    let mut create = fixt!(Create);
-    create.entry_type = EntryType::App(AppEntryDef {
+    let mut create_action = fixt!(Action, CreateAction);
+    *create_action.entry_type_mut().unwrap() = EntryType::App(AppEntryDef {
         entry_index: 0.into(),
         zome_index: 0.into(),
         visibility: Default::default(),
     });
-    let create_action = Action::Create(create);
-    let dht_create_op = ChainOp::RegisterAgentActivity(fixt!(Signature), create_action.clone());
-    let dht_create_op_hashed = DhtOpHashed::from_content_sync(dht_create_op);
+    let dht_create_op_hashed = DhtOpHashed::from_content_sync(DhtOp::from(ChainOp::AgentActivity(
+        SignedAction::new(create_action.clone(), fixt!(Signature)),
+    )));
 
     // create op that depends on previous create
-    let mut delete = fixt!(Delete);
-    delete.author = create_action.author().clone();
-    delete.deletes_address = create_action.clone().to_hash();
-    let dht_delete_op = ChainOp::RegisterDeletedEntryAction(fixt!(Signature), delete);
-    let dht_delete_op_hash = DhtOpHash::with_data_sync(&dht_delete_op);
-    let dht_delete_op_hashed = DhtOpHashed::from_content_sync(dht_delete_op);
+    let mut delete = fixt!(Action, DeleteAction);
+    delete.header.author = create_action.author().clone();
+    if let ActionData::Delete(d) = &mut delete.data {
+        d.deletes_address = create_action.to_hash();
+    }
+    let dht_delete_op_hashed = DhtOpHashed::from_content_sync(DhtOp::from(ChainOp::DeleteEntry(
+        SignedAction::new(delete, fixt!(Signature)),
+    )));
+    let dht_delete_op_hash = dht_delete_op_hashed.as_hash().clone();
 
-    // insert op to validate in dht db and mark ready for app validation
-    app_validation_workspace.dht_db.test_write(move |txn| {
-        insert_op_dht(txn, &dht_delete_op_hashed, 0, None).unwrap();
-        put_validation_limbo(txn, &dht_delete_op_hash, ValidationStage::SysValidated).unwrap();
-    });
+    // Record the op into the DhtStore as sys-validated and ready for app
+    // validation; the workflow reads ops to validate from the new store.
+    app_validation_workspace
+        .dht_store
+        .record_incoming_ops(vec![(dht_delete_op_hashed, false)])
+        .await
+        .unwrap();
+    app_validation_workspace
+        .dht_store
+        .record_chain_op_sys_validation_outcomes(vec![(dht_delete_op_hash, SysOutcome::Accepted)])
+        .await
+        .unwrap();
 
     // check delete op is now counted as op to validate
-    let ops_to_validate =
-        validation_query::get_ops_to_app_validate(&app_validation_workspace.dht_db)
-            .await
-            .unwrap()
-            .len();
+    let ops_to_validate = app_validation_workspace
+        .dht_store
+        .as_read()
+        .ops_pending_app_validation(10_000)
+        .await
+        .unwrap()
+        .len();
     assert_eq!(ops_to_validate, 1);
 
     let mut hc_p2p = MockHcP2p::new();
@@ -166,18 +166,23 @@ async fn main_workflow() {
         } if empty_set == HashSet::<DhtOpHash>::new()
     );
 
-    // insert dependent create op in dht cache db
-    // as cascade would do with fetched dependent ops
-    app_validation_workspace.cache.test_write(move |txn| {
-        insert_op_cache(txn, &dht_create_op_hashed).unwrap();
-    });
+    // Record the dependent create op into the DhtStore, as the cascade
+    // does when it fetches a dependency from the network (the cascade's local
+    // read comes from the DhtStore, so the dependency must live there).
+    app_validation_workspace
+        .dht_store
+        .record_incoming_ops(vec![(dht_create_op_hashed, false)])
+        .await
+        .unwrap();
 
     // there is still the 1 delete op to be validated
-    let ops_to_validate =
-        validation_query::get_ops_to_app_validate(&app_validation_workspace.dht_db)
-            .await
-            .unwrap()
-            .len();
+    let ops_to_validate = app_validation_workspace
+        .dht_store
+        .as_read()
+        .ops_pending_app_validation(10_000)
+        .await
+        .unwrap()
+        .len();
     assert_eq!(ops_to_validate, 1);
 
     // run validation workflow
@@ -208,11 +213,13 @@ async fn main_workflow() {
     );
 
     // check ops to validate is 0 now after having been validated
-    let ops_to_validate =
-        validation_query::get_ops_to_app_validate(&app_validation_workspace.dht_db)
-            .await
-            .unwrap()
-            .len();
+    let ops_to_validate = app_validation_workspace
+        .dht_store
+        .as_read()
+        .ops_pending_app_validation(10_000)
+        .await
+        .unwrap()
+        .len();
     assert_eq!(ops_to_validate, 0);
 }
 
@@ -225,47 +232,53 @@ async fn validate_ops_in_sequence_must_get_agent_activity() {
     let agent = fixt!(AgentPubKey);
 
     // create op that following delete op depends on
-    let create = Create {
-        action_seq: 3,
-        prev_action: fixt!(ActionHash),
-        author: agent.clone(),
-        entry_type: EntryType::App(AppEntryDef {
-            entry_index: 0.into(),
-            zome_index: 0.into(),
-            visibility: EntryVisibility::Public,
-        }),
-        entry_hash: fixt!(EntryHash),
-        timestamp: Timestamp::now(),
-        weight: Default::default(),
-    };
-    let create_action = Action::Create(create);
-    let dht_create_op = ChainOp::RegisterAgentActivity(fixt!(Signature), create_action.clone());
-    let dht_create_op_hashed = DhtOpHashed::from_content_sync(dht_create_op);
+    let mut create_action = fixt!(Action, CreateAction);
+    create_action.header.action_seq = 3;
+    create_action.header.prev_action = Some(fixt!(ActionHash));
+    create_action.header.author = agent.clone();
+    *create_action.entry_type_mut().unwrap() = EntryType::App(AppEntryDef {
+        entry_index: 0.into(),
+        zome_index: 0.into(),
+        visibility: EntryVisibility::Public,
+    });
+    *create_action.entry_hash_mut().unwrap() = fixt!(EntryHash);
+    create_action.header.timestamp = Timestamp::now();
+    let dht_create_op_hashed = DhtOpHashed::from_content_sync(DhtOp::from(ChainOp::AgentActivity(
+        SignedAction::new(create_action.clone(), fixt!(Signature)),
+    )));
     let create_action_hash = create_action.to_hash();
 
     // create op that depends on previous create
-    let delete = Delete {
-        action_seq: 4,
-        prev_action: create_action_hash.clone(),
-        author: agent.clone(),
-        deletes_address: create_action_hash.clone(),
-        deletes_entry_address: create_action.entry_hash().unwrap().clone(),
-        timestamp: Timestamp::now(),
-        weight: Default::default(),
-    };
-    let delete_action = Action::Delete(delete);
-    let dht_delete_op = ChainOp::RegisterAgentActivity(fixt!(Signature), delete_action.clone());
-    let dht_delete_op_hash = DhtOpHash::with_data_sync(&dht_delete_op);
-    let dht_delete_op_hashed = DhtOpHashed::from_content_sync(dht_delete_op);
+    let mut delete_action = fixt!(Action, DeleteAction);
+    delete_action.header.action_seq = 4;
+    delete_action.header.prev_action = Some(create_action_hash.clone());
+    delete_action.header.author = agent.clone();
+    if let ActionData::Delete(d) = &mut delete_action.data {
+        d.deletes_address = create_action_hash.clone();
+        d.deletes_entry_address = create_action.entry_hash().unwrap().clone();
+    }
+    delete_action.header.timestamp = Timestamp::now();
+    let dht_delete_op_hashed = DhtOpHashed::from_content_sync(DhtOp::from(ChainOp::AgentActivity(
+        SignedAction::new(delete_action.clone(), fixt!(Signature)),
+    )));
+    let dht_delete_op_hash = dht_delete_op_hashed.as_hash().clone();
 
     let entry_def = EntryDef::default_from_id("entry_def_id");
     let zomes = SweetInlineZomes::new(vec![entry_def.clone()], 0).integrity_function(
         "validate",
         move |api, op: Op| {
-            if let Op::RegisterDelete(RegisterDelete { delete }) = op {
+            if let Op::Delete(Delete { delete }) = op {
+                let deletes_address = match &delete.hashed.content.data {
+                    ActionData::Delete(DeleteData {
+                        deletes_address, ..
+                    }) => deletes_address.clone(),
+                    _ => unreachable!(),
+                };
                 // chain filter goes from delete action until create action
-                let chain_filter = ChainFilter::new(delete.hashed.content.clone().to_hash())
-                    .until_hash(delete.hashed.deletes_address.clone());
+                let chain_filter = ChainFilter::until_hash(
+                    delete.hashed.content.clone().to_hash(),
+                    deletes_address,
+                );
                 let result = api.must_get_agent_activity(MustGetAgentActivityInput {
                     author: agent.clone(),
                     chain_filter: chain_filter.clone(),
@@ -287,49 +300,55 @@ async fn validate_ops_in_sequence_must_get_agent_activity() {
     let dna_hash = dna_file.dna_hash().clone();
 
     let mut conductor = SweetConductor::standard().await;
-    let app = conductor
+    conductor
         .setup_app("", std::slice::from_ref(&dna_file))
         .await
         .unwrap();
-    let cell_id = app.cells()[0].cell_id().clone();
 
     let app_validation_workspace = Arc::new(AppValidationWorkspace::new(
-        conductor
-            .get_or_create_authored_db(&dna_hash, cell_id.agent_pubkey().clone())
-            .unwrap(),
-        conductor.get_dht_db(&dna_hash).unwrap(),
-        conductor.get_cache_db(&cell_id).await.unwrap(),
+        conductor.get_dht_store(&dna_hash).unwrap(),
         conductor.keystore(),
     ));
 
     // check there are no ops to app validate
     // genesis entries have already been validated at this stage
-    let ops_to_validate =
-        validation_query::get_ops_to_app_validate(&app_validation_workspace.dht_db)
-            .await
-            .unwrap()
-            .len();
+    let ops_to_validate = app_validation_workspace
+        .dht_store
+        .as_read()
+        .ops_pending_app_validation(10_000)
+        .await
+        .unwrap()
+        .len();
     assert_eq!(ops_to_validate, 0);
 
-    // insert create and delete op in dht db and mark ready for app validation
-    app_validation_workspace.dht_db.test_write(move |txn| {
-        insert_op_dht(txn, &dht_delete_op_hashed, 0, None).unwrap();
-        put_validation_limbo(txn, &dht_delete_op_hash, ValidationStage::SysValidated).unwrap();
-        insert_op_dht(txn, &dht_create_op_hashed, 0, None).unwrap();
-        put_validation_limbo(
-            txn,
-            &dht_create_op_hashed.hash,
-            ValidationStage::SysValidated,
-        )
+    // Record both ops into the DhtStore as sys-validated.
+    let dht_create_op_hashed_for_store = dht_create_op_hashed.clone();
+    let dht_create_op_hash_for_store = dht_create_op_hashed.as_hash().clone();
+    app_validation_workspace
+        .dht_store
+        .record_incoming_ops(vec![
+            (dht_delete_op_hashed, false),
+            (dht_create_op_hashed_for_store, false),
+        ])
+        .await
         .unwrap();
-    });
+    app_validation_workspace
+        .dht_store
+        .record_chain_op_sys_validation_outcomes(vec![
+            (dht_delete_op_hash, SysOutcome::Accepted),
+            (dht_create_op_hash_for_store, SysOutcome::Accepted),
+        ])
+        .await
+        .unwrap();
 
     // check create and delete op are now counted as ops to validate
-    let ops_to_validate =
-        validation_query::get_ops_to_app_validate(&app_validation_workspace.dht_db)
-            .await
-            .unwrap()
-            .len();
+    let ops_to_validate = app_validation_workspace
+        .dht_store
+        .as_read()
+        .ops_pending_app_validation(10_000)
+        .await
+        .unwrap()
+        .len();
     assert_eq!(ops_to_validate, 2);
 
     // run validation workflow
@@ -360,11 +379,13 @@ async fn validate_ops_in_sequence_must_get_agent_activity() {
     );
 
     // check ops to validate is also 0
-    let ops_to_validate =
-        validation_query::get_ops_to_app_validate(&app_validation_workspace.dht_db)
-            .await
-            .unwrap()
-            .len();
+    let ops_to_validate = app_validation_workspace
+        .dht_store
+        .as_read()
+        .ops_pending_app_validation(10_000)
+        .await
+        .unwrap()
+        .len();
     assert_eq!(ops_to_validate, 0);
 }
 
@@ -382,19 +403,19 @@ async fn validate_ops_in_sequence_must_get_action() {
     let zomes = SweetInlineZomes::new(vec![entry_def.clone()], 0).integrity_function(
         "validate",
         move |api, op: Op| {
-            if let Op::RegisterDelete(RegisterDelete { delete }) = op {
-                let result = api.must_get_action(MustGetActionInput::new(
-                    delete.hashed.deletes_address.clone(),
-                ));
+            if let Op::Delete(Delete { delete }) = op {
+                let deletes_address = match &delete.hashed.content.data {
+                    ActionData::Delete(DeleteData {
+                        deletes_address, ..
+                    }) => deletes_address.clone(),
+                    _ => unreachable!(),
+                };
+                let result = api.must_get_action(MustGetActionInput::new(deletes_address.clone()));
                 if result.is_ok() {
                     Ok(ValidateCallbackResult::Valid)
                 } else {
                     Ok(ValidateCallbackResult::UnresolvedDependencies(
-                        UnresolvedDependencies::Hashes(vec![delete
-                            .hashed
-                            .deletes_address
-                            .clone()
-                            .into()]),
+                        UnresolvedDependencies::Hashes(vec![deletes_address.into()]),
                     ))
                 }
             } else {
@@ -407,69 +428,78 @@ async fn validate_ops_in_sequence_must_get_action() {
     let dna_hash = dna_file.dna_hash().clone();
 
     let mut conductor = SweetConductor::standard().await;
-    let app = conductor
+    conductor
         .setup_app("", std::slice::from_ref(&dna_file))
         .await
         .unwrap();
-    let cell_id = app.cells()[0].cell_id().clone();
 
     let app_validation_workspace = Arc::new(AppValidationWorkspace::new(
-        conductor
-            .get_or_create_authored_db(&dna_hash, cell_id.agent_pubkey().clone())
-            .unwrap(),
-        conductor.get_dht_db(&dna_hash).unwrap(),
-        conductor.get_cache_db(&cell_id).await.unwrap(),
+        conductor.get_dht_store(&dna_hash).unwrap(),
         conductor.keystore(),
     ));
 
     // check there are no ops to app validate
     // genesis entries have already been validated at this stage
-    let ops_to_validate =
-        validation_query::get_ops_to_app_validate(&app_validation_workspace.dht_db)
-            .await
-            .unwrap()
-            .len();
+    let ops_to_validate = app_validation_workspace
+        .dht_store
+        .as_read()
+        .ops_pending_app_validation(10_000)
+        .await
+        .unwrap()
+        .len();
     assert_eq!(ops_to_validate, 0);
 
     // create op that following delete op depends on
-    let mut create = fixt!(Create);
-    create.entry_type = EntryType::App(AppEntryDef {
+    let mut create_op = fixt!(Action, CreateAction);
+    *create_op.entry_type_mut().unwrap() = EntryType::App(AppEntryDef {
         entry_index: 0.into(),
         zome_index: 0.into(),
         visibility: EntryVisibility::Public,
     });
-    let create_op = Action::Create(create);
-    let dht_create_op = ChainOp::RegisterAgentActivity(fixt!(Signature), create_op.clone());
-    let dht_create_op_hashed = DhtOpHashed::from_content_sync(dht_create_op);
+    let dht_create_op_hashed = DhtOpHashed::from_content_sync(DhtOp::from(ChainOp::AgentActivity(
+        SignedAction::new(create_op.clone(), fixt!(Signature)),
+    )));
 
     // create op that depends on previous create
-    let mut delete = fixt!(Delete);
-    delete.author = create_op.author().clone();
-    delete.deletes_address = create_op.clone().to_hash();
-    delete.deletes_entry_address = create_op.entry_hash().unwrap().clone();
-    let dht_delete_op = ChainOp::RegisterDeletedEntryAction(fixt!(Signature), delete);
-    let dht_delete_op_hash = DhtOpHash::with_data_sync(&dht_delete_op);
-    let dht_delete_op_hashed = DhtOpHashed::from_content_sync(dht_delete_op);
+    let mut delete = fixt!(Action, DeleteAction);
+    delete.header.author = create_op.author().clone();
+    if let ActionData::Delete(d) = &mut delete.data {
+        d.deletes_address = create_op.to_hash();
+        d.deletes_entry_address = create_op.entry_hash().unwrap().clone();
+    }
+    let dht_delete_op_hashed = DhtOpHashed::from_content_sync(DhtOp::from(ChainOp::DeleteEntry(
+        SignedAction::new(delete, fixt!(Signature)),
+    )));
+    let dht_delete_op_hash = dht_delete_op_hashed.as_hash().clone();
 
-    // insert create and delete op in dht db and mark ready for app validation
-    app_validation_workspace.dht_db.test_write(move |txn| {
-        insert_op_dht(txn, &dht_delete_op_hashed, 0, None).unwrap();
-        put_validation_limbo(txn, &dht_delete_op_hash, ValidationStage::SysValidated).unwrap();
-        insert_op_dht(txn, &dht_create_op_hashed, 0, None).unwrap();
-        put_validation_limbo(
-            txn,
-            &dht_create_op_hashed.hash,
-            ValidationStage::SysValidated,
-        )
+    // Record both ops into the DhtStore as sys-validated.
+    let dht_create_op_hashed_for_store = dht_create_op_hashed.clone();
+    let dht_create_op_hash_for_store = dht_create_op_hashed.as_hash().clone();
+    app_validation_workspace
+        .dht_store
+        .record_incoming_ops(vec![
+            (dht_delete_op_hashed, false),
+            (dht_create_op_hashed_for_store, false),
+        ])
+        .await
         .unwrap();
-    });
+    app_validation_workspace
+        .dht_store
+        .record_chain_op_sys_validation_outcomes(vec![
+            (dht_delete_op_hash, SysOutcome::Accepted),
+            (dht_create_op_hash_for_store, SysOutcome::Accepted),
+        ])
+        .await
+        .unwrap();
 
     // check create and delete op are now counted as ops to validate
-    let ops_to_validate =
-        validation_query::get_ops_to_app_validate(&app_validation_workspace.dht_db)
-            .await
-            .unwrap()
-            .len();
+    let ops_to_validate = app_validation_workspace
+        .dht_store
+        .as_read()
+        .ops_pending_app_validation(10_000)
+        .await
+        .unwrap()
+        .len();
     assert_eq!(ops_to_validate, 2);
 
     // run validation workflow
@@ -500,15 +530,21 @@ async fn validate_ops_in_sequence_must_get_action() {
     );
 
     // check ops to validate is also 0
-    let ops_to_validate =
-        validation_query::get_ops_to_app_validate(&app_validation_workspace.dht_db)
-            .await
-            .unwrap()
-            .len();
+    let ops_to_validate = app_validation_workspace
+        .dht_store
+        .as_read()
+        .ops_pending_app_validation(10_000)
+        .await
+        .unwrap()
+        .len();
     assert_eq!(ops_to_validate, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    feature = "wasmer-wasmi",
+    ignore = "Waiting for a fix https://github.com/wasmerio/wasmer/issues/6397"
+)]
 async fn multi_create_link_validation() {
     holochain_trace::test_run();
 
@@ -566,7 +602,7 @@ async fn handle_error_in_op_validation() {
     let zomes = SweetInlineZomes::new(vec![entry_def], 0).integrity_function(
         "validate",
         move |_, op: Op| match op {
-            Op::RegisterAgentActivity(_) => Err(InlineZomeError::TestError("kaputt".to_string())),
+            Op::AgentActivity(_) => Err(InlineZomeError::TestError("kaputt".to_string())),
             _ => Ok(ValidateCallbackResult::Valid),
         },
     );
@@ -575,61 +611,71 @@ async fn handle_error_in_op_validation() {
     let dna_hash = dna_file.dna_hash().clone();
 
     let mut conductor = SweetConductor::standard().await;
-    let app = conductor
+    conductor
         .setup_app("", std::slice::from_ref(&dna_file))
         .await
         .unwrap();
-    let cell_id = app.cells()[0].cell_id().clone();
 
     let app_validation_workspace = Arc::new(AppValidationWorkspace::new(
-        conductor
-            .get_or_create_authored_db(&dna_hash, cell_id.agent_pubkey().clone())
-            .unwrap(),
-        conductor.get_dht_db(&dna_hash).unwrap(),
-        conductor.get_cache_db(&cell_id).await.unwrap(),
+        conductor.get_dht_store(&dna_hash).unwrap(),
         conductor.keystore(),
     ));
 
     // create register agent activity op that will return an error during validation
-    let mut create = fixt!(Create);
-    create.entry_type = EntryType::App(AppEntryDef {
+    let mut create_action = fixt!(Action, CreateAction);
+    *create_action.entry_type_mut().unwrap() = EntryType::App(AppEntryDef {
         entry_index: 0.into(),
         zome_index: 0.into(),
         visibility: Default::default(),
     });
-    let create_action = Action::Create(create);
-    let dht_create_op = ChainOp::RegisterAgentActivity(fixt!(Signature), create_action.clone());
-    let dht_create_op_hash = DhtOpHash::with_data_sync(&dht_create_op);
-    let dht_create_op_hashed = DhtOpHashed::from_content_sync(dht_create_op);
+    let dht_create_op_hashed = DhtOpHashed::from_content_sync(DhtOp::from(ChainOp::AgentActivity(
+        SignedAction::new(create_action.clone(), fixt!(Signature)),
+    )));
+    let dht_create_op_hash = dht_create_op_hashed.as_hash().clone();
 
     // create another op that will be validated successfully
-    let mut create = fixt!(Create);
-    create.entry_type = EntryType::App(AppEntryDef {
+    let mut create = fixt!(Action, CreateAction);
+    *create.entry_type_mut().unwrap() = EntryType::App(AppEntryDef {
         entry_index: 0.into(),
         zome_index: 0.into(),
         visibility: Default::default(),
     });
     let entry = fixt!(Entry);
-    let dht_store_entry_op =
-        ChainOp::StoreEntry(fixt!(Signature), NewEntryAction::Create(create), entry);
-    let dht_store_entry_op_hash = DhtOpHash::with_data_sync(&dht_store_entry_op);
-    let dht_store_entry_op_hashed = DhtOpHashed::from_content_sync(dht_store_entry_op);
+    let dht_store_entry_op_hashed =
+        DhtOpHashed::from_content_sync(DhtOp::from(ChainOp::CreateEntry(
+            SignedAction::new(create, fixt!(Signature)),
+            OpEntry::Present(entry),
+        )));
+    let dht_store_entry_op_hash = dht_store_entry_op_hashed.as_hash().clone();
 
-    // insert both ops in dht db and mark ready for app validation
+    // Record both ops into the DhtStore as sys-validated and ready for app
+    // validation.
     let expected_failed_dht_op_hash = dht_create_op_hash.clone();
-    app_validation_workspace.dht_db.test_write(move |txn| {
-        insert_op_dht(txn, &dht_create_op_hashed, 0, None).unwrap();
-        put_validation_limbo(txn, &dht_create_op_hash, ValidationStage::SysValidated).unwrap();
-        insert_op_dht(txn, &dht_store_entry_op_hashed, 0, None).unwrap();
-        put_validation_limbo(txn, &dht_store_entry_op_hash, ValidationStage::SysValidated).unwrap();
-    });
+    app_validation_workspace
+        .dht_store
+        .record_incoming_ops(vec![
+            (dht_create_op_hashed, false),
+            (dht_store_entry_op_hashed, false),
+        ])
+        .await
+        .unwrap();
+    app_validation_workspace
+        .dht_store
+        .record_chain_op_sys_validation_outcomes(vec![
+            (dht_create_op_hash, SysOutcome::Accepted),
+            (dht_store_entry_op_hash, SysOutcome::Accepted),
+        ])
+        .await
+        .unwrap();
 
     // check ops are now counted as ops to validate
-    let ops_to_validate =
-        validation_query::get_ops_to_app_validate(&app_validation_workspace.dht_db)
-            .await
-            .unwrap()
-            .len();
+    let ops_to_validate = app_validation_workspace
+        .dht_store
+        .as_read()
+        .ops_pending_app_validation(10_000)
+        .await
+        .unwrap()
+        .len();
     assert_eq!(ops_to_validate, 2);
 
     // running validation workflow should finish without errors
@@ -662,11 +708,13 @@ async fn handle_error_in_op_validation() {
         } if actual_failed == expected_failed
     );
 
-    let ops_to_validate =
-        validation_query::get_ops_to_app_validate(&app_validation_workspace.dht_db)
-            .await
-            .unwrap()
-            .len();
+    let ops_to_validate = app_validation_workspace
+        .dht_store
+        .as_read()
+        .ops_pending_app_validation(10_000)
+        .await
+        .unwrap()
+        .len();
     assert_eq!(ops_to_validate, 1);
 }
 
@@ -812,12 +860,14 @@ async fn test_private_entries_are_passed_to_validation_only_when_authored_with_f
 
     for op in validation_ops.lock().iter() {
         match op {
-            Op::StoreEntry(StoreEntry { action, entry: _ }) => {
-                if *action.hashed.entry_type().visibility() == EntryVisibility::Private {
+            Op::CreateEntry(CreateEntry { action, entry: _ }) => {
+                // `CreateEntry`'s action data is always `Create` or `Update`, so
+                // it always has an entry type.
+                if *action.hashed.entry_type().unwrap().visibility() == EntryVisibility::Private {
                     num_store_entry_private += 1
                 }
             }
-            Op::StoreRecord(StoreRecord { record }) => {
+            Op::CreateRecord(CreateRecord { record }) => {
                 if record
                     .action()
                     .entry_type()
@@ -829,7 +879,7 @@ async fn test_private_entries_are_passed_to_validation_only_when_authored_with_f
                 let (privatized, _) = record.clone().privatized();
                 assert_eq!(record, &privatized);
             }
-            Op::RegisterAgentActivity(RegisterAgentActivity {
+            Op::AgentActivity(AgentActivity {
                 action,
                 cached_entry: _,
             }) => {
@@ -846,8 +896,8 @@ async fn test_private_entries_are_passed_to_validation_only_when_authored_with_f
         }
     }
 
-    // - Of the two private entries alice committed, only alice should validate these as a StoreEntry.
-    // - However, both Alice and Bob should validate and integrate the StoreRecord and RegisterAgentActivity,
+    // - Of the two private entries alice committed, only alice should validate these as a CreateEntry.
+    // - However, both Alice and Bob should validate and integrate the CreateRecord and AgentActivity,
     //     even though the entries are private.
     assert_eq!(
         (
@@ -891,7 +941,7 @@ async fn check_app_entry_def_test() {
     let data_root_dir: DataRootPath = db_dir.path().to_path_buf().into();
     let conductor_handle = Conductor::builder()
         .with_data_root_path(data_root_dir)
-        .test(&[])
+        .test()
         .await
         .unwrap();
 
@@ -963,61 +1013,69 @@ async fn app_validation_workflow_correctly_sets_state_and_status() {
     let dna_hash = dna_file.dna_hash().clone();
 
     let mut conductor = SweetConductor::standard().await;
-    let app = conductor
+    conductor
         .setup_app("", std::slice::from_ref(&dna_file))
         .await
         .unwrap();
-    let cell_id = app.cells()[0].cell_id().clone();
 
     let app_validation_workspace = Arc::new(AppValidationWorkspace::new(
-        conductor
-            .get_or_create_authored_db(&dna_hash, cell_id.agent_pubkey().clone())
-            .unwrap(),
-        conductor.get_dht_db(&dna_hash).unwrap(),
-        conductor.get_cache_db(&cell_id).await.unwrap(),
+        conductor.get_dht_store(&dna_hash).unwrap(),
         conductor.keystore(),
     ));
 
     // Check there are no ops to app validate as genesis entries should have already been validated
-    let ops_to_validate =
-        validation_query::get_ops_to_app_validate(&app_validation_workspace.dht_db)
-            .await
-            .unwrap()
-            .len();
+    let ops_to_validate = app_validation_workspace
+        .dht_store
+        .as_read()
+        .ops_pending_app_validation(10_000)
+        .await
+        .unwrap()
+        .len();
     assert_eq!(ops_to_validate, 0);
 
     // Create op to validate
-    let mut create = fixt!(Create);
-    create.entry_type = EntryType::App(AppEntryDef {
+    let mut create = fixt!(Action, CreateAction);
+    *create.entry_type_mut().unwrap() = EntryType::App(AppEntryDef {
         entry_index: 0.into(),
         zome_index: 0.into(),
         visibility: Default::default(),
     });
-    let dht_create_op = ChainOp::StoreEntry(
-        fixt!(Signature),
-        NewEntryAction::Create(create),
-        fixt!(Entry),
-    );
-    let dht_create_op_hash = DhtOpHash::with_data_sync(&dht_create_op);
-    let dht_create_op_hashed = DhtOpHashed::from_content_sync(dht_create_op);
+    let dht_create_op_hashed = DhtOpHashed::from_content_sync(DhtOp::from(ChainOp::CreateEntry(
+        SignedAction::new(create, fixt!(Signature)),
+        OpEntry::Present(fixt!(Entry)),
+    )));
+    let dht_create_op_hash = dht_create_op_hashed.as_hash().clone();
 
-    // Insert op to validate in DHT DB and mark ready for app validation
-    app_validation_workspace.dht_db.test_write(move |txn| {
-        insert_op_dht(txn, &dht_create_op_hashed, 0, None).unwrap();
-        put_validation_limbo(txn, &dht_create_op_hash, ValidationStage::SysValidated).unwrap();
-    });
+    // Record the op into the DhtStore and mark it ready for app validation.
+    let dht_create_op_hashed_for_store = dht_create_op_hashed.clone();
+    let dht_create_op_hash_for_store = dht_create_op_hash.clone();
+    app_validation_workspace
+        .dht_store
+        .record_incoming_ops(vec![(dht_create_op_hashed_for_store, false)])
+        .await
+        .unwrap();
+    app_validation_workspace
+        .dht_store
+        .record_chain_op_sys_validation_outcomes(vec![(
+            dht_create_op_hash_for_store,
+            SysOutcome::Accepted,
+        )])
+        .await
+        .unwrap();
 
     // Check op is now counted as op to validate
-    let ops_to_validate =
-        validation_query::get_ops_to_app_validate(&app_validation_workspace.dht_db)
-            .await
-            .unwrap()
-            .len();
+    let ops_to_validate = app_validation_workspace
+        .dht_store
+        .as_read()
+        .ops_pending_app_validation(10_000)
+        .await
+        .unwrap()
+        .len();
     assert_eq!(ops_to_validate, 1);
 
     // Check that genesis ops are currently validated and integrated
     assert_eq!(
-        get_valid_and_integrated_count(&app_validation_workspace.dht_db).await,
+        get_valid_and_integrated_count(&app_validation_workspace.dht_store).await,
         7
     );
 
@@ -1050,22 +1108,24 @@ async fn app_validation_workflow_correctly_sets_state_and_status() {
     );
 
     // There should be no more ops to validate
-    let ops_to_validate =
-        validation_query::get_ops_to_app_validate(&app_validation_workspace.dht_db)
-            .await
-            .unwrap()
-            .len();
+    let ops_to_validate = app_validation_workspace
+        .dht_store
+        .as_read()
+        .ops_pending_app_validation(10_000)
+        .await
+        .unwrap()
+        .len();
     assert_eq!(ops_to_validate, 0);
 
     // The op should be marked as valid but not integrated.
     assert_eq!(
-        get_valid_and_not_integrated_count(&app_validation_workspace.dht_db).await,
+        get_valid_and_not_integrated_count(&app_validation_workspace.dht_store).await,
         1
     );
 
     // Check that the new op is not integrated yet
     assert_eq!(
-        get_valid_and_integrated_count(&app_validation_workspace.dht_db).await,
+        get_valid_and_integrated_count(&app_validation_workspace.dht_store).await,
         7
     );
 }
@@ -1183,17 +1243,19 @@ async fn app_validation_produces_warrants() {
     .unwrap();
 
     conductors[0].shutdown().await;
-    conductors[2].startup(false).await;
+    conductors[2].startup().await;
 
     //- Ensure that bob authored a warrant
-    let alice_pubkey = alice.agent_pubkey().clone();
-    conductors[1].spaces.get_all_authored_dbs(dna_hash).unwrap()[0].test_read(move |txn| {
-        let store = CascadeTxnWrapper::from(txn);
-
-        let warrants = store.get_warrants_for_agent(&alice_pubkey, false).unwrap();
-        // 3 warrants, one for each op
-        assert_eq!(warrants.len(), 1);
-    });
+    let warrants = conductors[1]
+        .spaces
+        .dht_store(dna_hash)
+        .unwrap()
+        .as_read()
+        .warrants_by_author(bob.agent_pubkey().clone())
+        .await
+        .unwrap();
+    // 3 warrants, one for each op
+    assert_eq!(warrants.len(), 1);
 
     // TODO: ensure that bob blocked alice
 
@@ -1211,19 +1273,18 @@ async fn app_validation_produces_warrants() {
         {
             let alice_pubkey = alice_pubkey.clone();
             conductors[2]
-                .spaces
-                .dht_db(dna_hash)
+                .get_dht_store(dna_hash)
                 .unwrap()
-                .test_read(move |txn| {
-                    let store = CascadeTxnWrapper::from(txn);
-                    store.get_warrants_for_agent(&alice_pubkey, true).unwrap()
-                })
+                .as_read()
+                .get_warrants_by_warrantee(alice_pubkey)
+                .await
+                .unwrap()
                 .len()
         },
         1
     );
 
-    let activity: AgentActivity = conductors[2]
+    let activity: holochain_zome_types::query::AgentActivityStatus = conductors[2]
         .call(
             &carol.zome(SweetInlineZomes::COORDINATOR),
             "get_agent_activity",
@@ -1237,7 +1298,7 @@ async fn app_validation_produces_warrants() {
         WarrantProof::ChainIntegrity(ChainIntegrityWarrant::InvalidChainOp {
             action_author,
             action: (hash, _),
-            chain_op_type: _,
+            ..
         }) => {
             assert_eq!(action_author, alice.agent_pubkey());
             assert_eq!(*hash, invalid_action_hash);
@@ -1276,7 +1337,7 @@ async fn skip_issuing_warrant_if_one_found() {
             })?)
         })
         .integrity_function("validate", move |_api, op: Op| {
-            if matches!(op, Op::RegisterAgentActivity(_)) && op.action_seq() > 3 {
+            if matches!(op, Op::AgentActivity(_)) && op.action_seq() > 3 {
                 Ok(ValidateCallbackResult::Invalid("nope".to_string()))
             } else {
                 Ok(ValidateCallbackResult::Valid)
@@ -1327,15 +1388,14 @@ async fn skip_issuing_warrant_if_one_found() {
 
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let alice_pubkey = alice.agent_pubkey().clone();
             let warrants = conductors[1]
                 .get_spaces()
-                .get_all_authored_dbs(dna_file.dna_hash())
-                .unwrap()[0]
-                .test_read(move |txn| {
-                    let store = CascadeTxnWrapper::from(txn);
-                    store.get_warrants_for_agent(&alice_pubkey, false).unwrap()
-                });
+                .dht_store(dna_file.dna_hash())
+                .unwrap()
+                .as_read()
+                .warrants_by_author(_bob.agent_pubkey().clone())
+                .await
+                .unwrap();
 
             if !warrants.is_empty() {
                 break;
@@ -1353,7 +1413,7 @@ async fn skip_issuing_warrant_if_one_found() {
         .unwrap();
 
     // Now Carol should be able to get Alice's activity, including the warrant, from Bob.
-    let _activity: AgentActivity = conductors[2]
+    let _activity: holochain_zome_types::query::AgentActivityStatus = conductors[2]
         .call(
             &carol.zome(SweetInlineZomes::COORDINATOR),
             "get_agent_activity",
@@ -1366,16 +1426,15 @@ async fn skip_issuing_warrant_if_one_found() {
         || async {
             let alice_pubkey = alice.agent_pubkey().clone();
             let warrants = conductors[2]
-                .get_spaces()
-                .dht_db(dna_file.dna_hash())
+                .get_dht_store(dna_file.dna_hash())
                 .unwrap()
-                .test_read(move |txn| {
-                    let store = CascadeTxnWrapper::from(txn);
-                    store.get_warrants_for_agent(&alice_pubkey, true).unwrap()
-                });
+                .as_read()
+                .get_warrants_by_warrantee(alice_pubkey)
+                .await
+                .unwrap();
 
             // Check for any warrant against Alice
-            if !warrants.is_empty() && warrants[0].warrant().warrantee == *alice.agent_pubkey() {
+            if !warrants.is_empty() && warrants[0].data().warrantee == *alice.agent_pubkey() {
                 return true;
             }
 
@@ -1390,13 +1449,12 @@ async fn skip_issuing_warrant_if_one_found() {
     // Now there's at least one valid warrant, check that there's just one warrant.
     let alice_pubkey = alice.agent_pubkey().clone();
     let warrants = conductors[2]
-        .get_spaces()
-        .dht_db(dna_file.dna_hash())
+        .get_dht_store(dna_file.dna_hash())
         .unwrap()
-        .test_read(move |txn| {
-            let store = CascadeTxnWrapper::from(txn);
-            store.get_warrants_for_agent(&alice_pubkey, false).unwrap()
-        });
+        .as_read()
+        .get_warrants_by_warrantee(alice_pubkey)
+        .await
+        .unwrap();
 
     assert_eq!(
         1,
@@ -1406,116 +1464,60 @@ async fn skip_issuing_warrant_if_one_found() {
     );
 }
 
-// These are the expected invalid ops
-fn expected_invalid_entry(
-    txn: &Transaction,
+// The expected invalid ops, from the DHT store.
+async fn expected_invalid_store_entry_op(
+    dht_store: &DhtStore,
     invalid_action_hash: &ActionHash,
-    invalid_entry_hash: &AnyDhtHash,
 ) -> bool {
-    let sql = "
-        SELECT count(hash) FROM DhtOp WHERE
-        type = :store_entry AND action_hash = :invalid_action_hash
-            AND basis_hash = :invalid_entry_hash AND validation_status = :rejected
-    ";
-
-    let count: usize = txn
-        .query_row(
-            sql,
-            named_params! {
-                ":invalid_action_hash": invalid_action_hash,
-                ":invalid_entry_hash": invalid_entry_hash,
-                ":store_entry": ChainOpType::StoreEntry,
-                ":rejected": ValidationStatus::Rejected,
-            },
-            |row| row.get(0),
-        )
-        .unwrap();
-    count == 1
+    matches!(
+        dht_store
+            .as_read()
+            .op_validation_status(invalid_action_hash, ChainOpType::CreateEntry)
+            .await
+            .unwrap(),
+        Some(ValidationStatus::Rejected)
+    )
 }
 
 // Now we expect an invalid link
-fn expected_invalid_link(txn: &Transaction, invalid_link_hash: &ActionHash) -> bool {
-    let sql = "
-        SELECT count(hash) FROM DhtOp WHERE
-        type = :create_link AND action_hash = :invalid_link_hash
-            AND validation_status = :rejected
-    ";
-
-    let count: usize = txn
-        .query_row(
-            sql,
-            named_params! {
-                ":invalid_link_hash": invalid_link_hash,
-                ":create_link": ChainOpType::RegisterAddLink,
-                ":rejected": ValidationStatus::Rejected,
-            },
-            |row| row.get(0),
-        )
-        .unwrap();
-    count == 1
+async fn expected_invalid_register_add_link_op(
+    dht_store: &DhtStore,
+    invalid_link_hash: &ActionHash,
+) -> bool {
+    matches!(
+        dht_store
+            .as_read()
+            .op_validation_status(invalid_link_hash, ChainOpType::CreateLink)
+            .await
+            .unwrap(),
+        Some(ValidationStatus::Rejected)
+    )
 }
 
 // Now we're trying to remove an invalid link
-fn expected_invalid_remove_link(txn: &Transaction, invalid_remove_hash: &ActionHash) -> bool {
-    let sql = "
-        SELECT count(hash) FROM DhtOp WHERE
-        (type = :delete_link AND action_hash = :invalid_remove_hash
-            AND validation_status = :rejected)
-    ";
-
-    let count: usize = txn
-        .query_row(
-            sql,
-            named_params! {
-                ":invalid_remove_hash": invalid_remove_hash,
-                ":delete_link": ChainOpType::RegisterRemoveLink,
-                ":rejected": ValidationStatus::Rejected,
-            },
-            |row| row.get(0),
-        )
-        .unwrap();
-    count == 1
-}
-
-fn limbo_is_empty(txn: &Transaction) -> bool {
-    let not_empty: bool = txn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM DhtOp WHERE when_integrated IS NULL)",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    !not_empty
-}
-
-fn show_limbo(txn: &Transaction) -> Vec<DhtOpLite> {
-    txn.prepare(
-        "
-        SELECT DhtOp.type, Action.hash, Action.blob
-        FROM DhtOp
-        JOIN Action ON DhtOp.action_hash = Action.hash
-        WHERE
-        when_integrated IS NULL
-    ",
+async fn expected_invalid_remove_link_op(
+    dht_store: &DhtStore,
+    invalid_remove_hash: &ActionHash,
+) -> bool {
+    matches!(
+        dht_store
+            .as_read()
+            .op_validation_status(invalid_remove_hash, ChainOpType::DeleteLink)
+            .await
+            .unwrap(),
+        Some(ValidationStatus::Rejected)
     )
-    .unwrap()
-    .query_and_then([], |row| {
-        let op_type: DhtOpType = row.get("type")?;
-        match op_type {
-            DhtOpType::Chain(op_type) => {
-                let hash: ActionHash = row.get("hash")?;
-                let action: SignedAction = from_blob(row.get("blob")?)?;
-                Ok(ChainOpLite::from_type(op_type, hash, &action)?.into())
-            }
-            DhtOpType::Warrant(_) => {
-                let warrant: SignedWarrant = from_blob(row.get("blob")?)?;
-                Ok(warrant.into())
-            }
-        }
-    })
-    .unwrap()
-    .collect::<StateQueryResult<Vec<DhtOpLite>>>()
-    .unwrap()
+}
+
+// Assert nothing remains in validation or integration limbo in the DHT store.
+async fn assert_limbo_is_empty(dht_store: &DhtStore) {
+    let (validation_limbo, integration_limbo, _) =
+        dht_store.as_read().limbo_state_counts().await.unwrap();
+    assert_eq!(
+        (validation_limbo, integration_limbo),
+        (0, 0),
+        "limbo not empty: {validation_limbo} validating, {integration_limbo} awaiting integration"
+    );
 }
 
 async fn run_test(
@@ -1542,65 +1544,46 @@ async fn run_test(
     // Plus another 16 for genesis + init
     // Plus 2 for Cap Grant
     let expected_count = 3 + 16 + 2;
-    let alice_db = conductors[0].get_dht_db(alice_cell_id.dna_hash()).unwrap();
-    wait_for_integration(&alice_db, expected_count, num_attempts, delay_per_attempt)
-        .await
+    let alice_store = conductors[0]
+        .get_dht_store(alice_cell_id.dna_hash())
         .unwrap();
+    wait_for_integration(
+        &alice_store,
+        expected_count as u64,
+        num_attempts,
+        delay_per_attempt,
+    )
+    .await;
 
-    let alice_db = conductors[0].get_dht_db(alice_cell_id.dna_hash()).unwrap();
-
-    alice_db
-        .read_async(move |txn| -> DatabaseResult<()> {
-            // Validation should be empty
-            let limbo = show_limbo(txn);
-            assert!(limbo_is_empty(txn), "{limbo:?}");
-
-            Ok(())
-        })
-        .await
-        .unwrap();
+    assert_limbo_is_empty(&alice_store).await;
     assert_eq!(
-        get_valid_and_integrated_count(&alice_db).await,
+        get_valid_and_integrated_count(&alice_store).await,
         expected_count
     );
 
-    let (invalid_action_hash, invalid_entry_hash) =
+    let (invalid_action_hash, _invalid_entry_hash) =
         commit_invalid(&bob_cell_id, &conductors[1].raw_handle(), dna_file).await;
-    let invalid_entry_hash: AnyDhtHash = invalid_entry_hash.into();
 
     // Integration should have 3 ops in it
-    // StoreEntry should be invalid.
-    // RegisterAgentActivity will be valid.
+    // CreateEntry should be invalid.
+    // AgentActivity will be valid.
     let expected_count = 3 + expected_count;
-    let alice_db = conductors[0].get_dht_db(alice_cell_id.dna_hash()).unwrap();
-    wait_for_integration(&alice_db, expected_count, num_attempts, delay_per_attempt)
-        .await
+    let alice_store = conductors[0]
+        .get_dht_store(alice_cell_id.dna_hash())
         .unwrap();
+    wait_for_integration(
+        &alice_store,
+        expected_count as u64,
+        num_attempts,
+        delay_per_attempt,
+    )
+    .await;
 
-    alice_db
-        .read_async({
-            let check_invalid_action_hash = invalid_action_hash.clone();
-            let check_invalid_entry_hash = invalid_entry_hash.clone();
-
-            move |txn| -> DatabaseResult<()> {
-                // Validation should be empty
-                let limbo = show_limbo(txn);
-                assert!(limbo_is_empty(txn), "{limbo:?}");
-
-                assert!(expected_invalid_entry(
-                    txn,
-                    &check_invalid_action_hash,
-                    &check_invalid_entry_hash
-                ));
-
-                Ok(())
-            }
-        })
-        .await
-        .unwrap();
+    assert_limbo_is_empty(&alice_store).await;
+    assert!(expected_invalid_store_entry_op(&alice_store, &invalid_action_hash).await);
     // Expect having one invalid op for the store entry.
     assert_eq!(
-        get_valid_and_integrated_count(&alice_db).await,
+        get_valid_and_integrated_count(&alice_store).await,
         expected_count - 1
     );
 
@@ -1614,35 +1597,22 @@ async fn run_test(
 
     // Integration should have 6 ops in it
     let expected_count = 6 + expected_count;
-    let alice_db = conductors[0].get_dht_db(alice_cell_id.dna_hash()).unwrap();
-    wait_for_integration(&alice_db, expected_count, num_attempts, delay_per_attempt)
-        .await
+    let alice_store = conductors[0]
+        .get_dht_store(alice_cell_id.dna_hash())
         .unwrap();
+    wait_for_integration(
+        &alice_store,
+        expected_count as u64,
+        num_attempts,
+        delay_per_attempt,
+    )
+    .await;
 
-    alice_db
-        .read_async({
-            let check_invalid_action_hash = invalid_action_hash.clone();
-            let check_invalid_entry_hash = invalid_entry_hash.clone();
-
-            move |txn| -> DatabaseResult<()> {
-                // Validation should be empty
-                let limbo = show_limbo(txn);
-                assert!(limbo_is_empty(txn), "{limbo:?}");
-
-                assert!(expected_invalid_entry(
-                    txn,
-                    &check_invalid_action_hash,
-                    &check_invalid_entry_hash
-                ));
-
-                Ok(())
-            }
-        })
-        .await
-        .unwrap();
+    assert_limbo_is_empty(&alice_store).await;
+    assert!(expected_invalid_store_entry_op(&alice_store, &invalid_action_hash).await);
     // Expect having one invalid op for the store entry.
     assert_eq!(
-        get_valid_and_integrated_count(&alice_db).await,
+        get_valid_and_integrated_count(&alice_store).await,
         expected_count - 1
     );
 
@@ -1666,37 +1636,23 @@ async fn run_test(
 
     // Integration should have 9 ops in it
     let expected_count = 9 + expected_count;
-    let alice_db = conductors[0].get_dht_db(alice_cell_id.dna_hash()).unwrap();
-    wait_for_integration(&alice_db, expected_count, num_attempts, delay_per_attempt)
-        .await
+    let alice_store = conductors[0]
+        .get_dht_store(alice_cell_id.dna_hash())
         .unwrap();
+    wait_for_integration(
+        &alice_store,
+        expected_count as u64,
+        num_attempts,
+        delay_per_attempt,
+    )
+    .await;
 
-    alice_db
-        .read_async({
-            let check_invalid_action_hash = invalid_action_hash.clone();
-            let check_invalid_entry_hash = invalid_entry_hash.clone();
-            let check_invalid_link_hash = invalid_link_hash.clone();
-
-            move |txn| -> DatabaseResult<()> {
-                // Validation should be empty
-                let limbo = show_limbo(txn);
-                assert!(limbo_is_empty(txn), "{limbo:?}");
-
-                assert!(expected_invalid_entry(
-                    txn,
-                    &check_invalid_action_hash,
-                    &check_invalid_entry_hash
-                ));
-                assert!(expected_invalid_link(txn, &check_invalid_link_hash));
-
-                Ok(())
-            }
-        })
-        .await
-        .unwrap();
+    assert_limbo_is_empty(&alice_store).await;
+    assert!(expected_invalid_store_entry_op(&alice_store, &invalid_action_hash).await);
+    assert!(expected_invalid_register_add_link_op(&alice_store, &invalid_link_hash).await);
     // Expect having two invalid ops for the two store entries.
     assert_eq!(
-        get_valid_and_integrated_count(&alice_db).await,
+        get_valid_and_integrated_count(&alice_store).await,
         expected_count - 2
     );
 
@@ -1718,37 +1674,23 @@ async fn run_test(
 
     // Integration should have 9 ops in it
     let expected_count = 9 + expected_count;
-    let alice_db = conductors[0].get_dht_db(alice_cell_id.dna_hash()).unwrap();
-    wait_for_integration(&alice_db, expected_count, num_attempts, delay_per_attempt)
-        .await
+    let alice_store = conductors[0]
+        .get_dht_store(alice_cell_id.dna_hash())
         .unwrap();
+    wait_for_integration(
+        &alice_store,
+        expected_count as u64,
+        num_attempts,
+        delay_per_attempt,
+    )
+    .await;
 
-    alice_db
-        .read_async({
-            let check_invalid_action_hash = invalid_action_hash.clone();
-            let check_invalid_entry_hash = invalid_entry_hash.clone();
-            let check_invalid_link_hash = invalid_link_hash.clone();
-
-            move |txn| -> DatabaseResult<()> {
-                // Validation should be empty
-                let limbo = show_limbo(txn);
-                assert!(limbo_is_empty(txn), "{limbo:?}");
-
-                assert!(expected_invalid_entry(
-                    txn,
-                    &check_invalid_action_hash,
-                    &check_invalid_entry_hash
-                ));
-                assert!(expected_invalid_link(txn, &check_invalid_link_hash));
-
-                Ok(())
-            }
-        })
-        .await
-        .unwrap();
+    assert_limbo_is_empty(&alice_store).await;
+    assert!(expected_invalid_store_entry_op(&alice_store, &invalid_action_hash).await);
+    assert!(expected_invalid_register_add_link_op(&alice_store, &invalid_link_hash).await);
     // Expect having two invalid ops for the two store entries.
     assert_eq!(
-        get_valid_and_integrated_count(&alice_db).await,
+        get_valid_and_integrated_count(&alice_store).await,
         expected_count - 2
     );
 
@@ -1772,38 +1714,24 @@ async fn run_test(
 
     // Integration should have 12 ops in it
     let expected_count = 12 + expected_count;
-    let alice_db = conductors[0].get_dht_db(alice_cell_id.dna_hash()).unwrap();
-    wait_for_integration(&alice_db, expected_count, num_attempts, delay_per_attempt)
-        .await
+    let alice_store = conductors[0]
+        .get_dht_store(alice_cell_id.dna_hash())
         .unwrap();
+    wait_for_integration(
+        &alice_store,
+        expected_count as u64,
+        num_attempts,
+        delay_per_attempt,
+    )
+    .await;
 
-    alice_db
-        .read_async({
-            let check_invalid_action_hash = invalid_action_hash.clone();
-            let check_invalid_entry_hash = invalid_entry_hash.clone();
-            let check_invalid_link_hash = invalid_link_hash.clone();
-
-            move |txn| -> DatabaseResult<()> {
-                // Validation should be empty
-                let limbo = show_limbo(txn);
-                assert!(limbo_is_empty(txn), "{limbo:?}");
-
-                assert!(expected_invalid_entry(
-                    txn,
-                    &check_invalid_action_hash,
-                    &check_invalid_entry_hash
-                ));
-                assert!(expected_invalid_link(txn, &check_invalid_link_hash));
-                assert!(expected_invalid_remove_link(txn, &invalid_remove_hash));
-
-                Ok(())
-            }
-        })
-        .await
-        .unwrap();
+    assert_limbo_is_empty(&alice_store).await;
+    assert!(expected_invalid_store_entry_op(&alice_store, &invalid_action_hash).await);
+    assert!(expected_invalid_register_add_link_op(&alice_store, &invalid_link_hash).await);
+    assert!(expected_invalid_remove_link_op(&alice_store, &invalid_remove_hash).await);
     // 3 invalid ops above plus 1 extra invalid ops that `remove_invalid_link` commits.
     assert_eq!(
-        get_valid_and_integrated_count(&alice_db).await,
+        get_valid_and_integrated_count(&alice_store).await,
         expected_count - (3 + 1)
     );
     expected_count
@@ -1826,37 +1754,28 @@ async fn run_test_entry_def_id(
     let num_attempts = 100;
     let delay_per_attempt = Duration::from_millis(100);
 
-    let (invalid_action_hash, invalid_entry_hash) =
+    let (invalid_action_hash, _invalid_entry_hash) =
         commit_invalid_post(&bob_cell_id, &conductors[1].raw_handle(), dna_file).await;
-    let invalid_entry_hash: AnyDhtHash = invalid_entry_hash.into();
 
     // Integration should have 3 ops in it
-    // StoreEntry and StoreRecord should be invalid.
+    // CreateEntry and CreateRecord should be invalid.
     let expected_count = 3 + expected_count;
-    let alice_db = conductors[0].get_dht_db(alice_cell_id.dna_hash()).unwrap();
-    wait_for_integration(&alice_db, expected_count, num_attempts, delay_per_attempt)
-        .await
+    let alice_store = conductors[0]
+        .get_dht_store(alice_cell_id.dna_hash())
         .unwrap();
+    wait_for_integration(
+        &alice_store,
+        expected_count as u64,
+        num_attempts,
+        delay_per_attempt,
+    )
+    .await;
 
-    alice_db
-        .read_async(move |txn| -> DatabaseResult<()> {
-            // Validation should be empty
-            let limbo = show_limbo(txn);
-            assert!(limbo_is_empty(txn), "{limbo:?}");
-
-            assert!(expected_invalid_entry(
-                txn,
-                &invalid_action_hash,
-                &invalid_entry_hash
-            ));
-
-            Ok(())
-        })
-        .await
-        .unwrap();
+    assert_limbo_is_empty(&alice_store).await;
+    assert!(expected_invalid_store_entry_op(&alice_store, &invalid_action_hash).await);
     // Expect having two invalid ops for the two store entries plus the 3 from the previous test.
     assert_eq!(
-        get_valid_and_integrated_count(&alice_db).await,
+        get_valid_and_integrated_count(&alice_store).await,
         expected_count - 5
     );
 }

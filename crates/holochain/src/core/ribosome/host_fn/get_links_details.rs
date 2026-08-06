@@ -1,8 +1,7 @@
 use crate::core::ribosome::host_fn::cascade_from_call_context;
-use crate::core::ribosome::CallContext;
+use crate::core::ribosome::{CallContext, Ribosome};
 use crate::core::ribosome::HostFnAccess;
 use crate::core::ribosome::RibosomeError;
-use crate::core::ribosome::RibosomeT;
 use futures::future::join_all;
 use holochain_p2p::actor::GetLinksRequestOptions;
 use holochain_types::prelude::*;
@@ -11,7 +10,7 @@ use std::sync::Arc;
 use wasmer::RuntimeError;
 
 pub fn get_links_details(
-    _ribosome: Arc<impl RibosomeT>,
+    _ribosome: Arc<Ribosome>,
     call_context: Arc<CallContext>,
     inputs: Vec<GetLinksInput>,
 ) -> Result<Vec<LinkDetails>, RuntimeError> {
@@ -81,9 +80,7 @@ pub mod slow_tests {
     use crate::test_utils::RibosomeTestFixture;
     use holo_hash::ActionHash;
     use holochain_wasm_test_utils::TestWasm;
-    use holochain_zome_types::link::LinkDetails;
-    use holochain_zome_types::record::SignedActionHashed;
-    use holochain_zome_types::Action;
+    use holochain_zome_types::prelude::{ActionData, LinkDetails, SignedActionHashed};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn ribosome_entry_hash_path_children_details() {
@@ -145,7 +142,7 @@ pub mod slow_tests {
                 remove_happened = true;
 
                 let link_add_address = unwrap_to
-                    ::unwrap_to!(removes[0].action() => Action::DeleteLink)
+                    ::unwrap_to!(removes[0].hashed.content.data => ActionData::DeleteLink)
                 .link_add_address
                 .clone();
                 assert_eq!(link_add_address, to_remove_hash,);

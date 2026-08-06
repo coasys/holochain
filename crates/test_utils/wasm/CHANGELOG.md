@@ -1,11 +1,55 @@
 ---
-default_semver_increment_mode: !pre_minor dev
+default_semver_increment_mode: !pre_patch rc
 ---
 # Changelog
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## \[Unreleased\]
+
+## 0.7.0
+
+## 0.7.0-rc.4
+
+## 0.7.0-rc.3
+
+## 0.7.0-rc.2
+
+## 0.7.0-rc.1
+
+## 0.7.0-rc.0
+
+## 0.7.0-dev.32
+
+## 0.7.0-dev.31
+
+## 0.7.0-dev.30
+
+## 0.7.0-dev.29
+
+## 0.7.0-dev.28
+
+## 0.7.0-dev.27
+
+## 0.7.0-dev.26
+
+## 0.7.0-dev.25
+
+## 0.7.0-dev.24
+
+## 0.7.0-dev.23
+
+## 0.7.0-dev.22
+
+## 0.7.0-dev.21
+
+## 0.7.0-dev.20
+
+## 0.7.0-dev.19
+
+## 0.7.0-dev.18
+
+## 0.7.0-dev.17
 
 ## 0.7.0-dev.16
 

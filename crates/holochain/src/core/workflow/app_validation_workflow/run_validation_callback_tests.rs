@@ -1,48 +1,39 @@
+use crate::core::ribosome::inline_ribosome::{InlineRibosome, InlineZomeStore};
+use crate::core::ribosome::Ribosome;
 use crate::{
     conductor::space::TestSpace,
     core::{
-        ribosome::{
-            guest_callback::validate::ValidateInvocation, real_ribosome::RealRibosome,
-            ZomesToInvoke,
-        },
+        ribosome::{guest_callback::validate::ValidateInvocation, ZomesToInvoke},
         workflow::app_validation_workflow::{run_validation_callback, Outcome},
     },
     fixt::MetaLairClientFixturator,
     sweettest::{SweetDnaFile, SweetInlineZomes},
 };
 use fixt::fixt;
-use hdk::prelude::{CreateLinkFixturator, EntryFixturator, RecordEntry, RegisterCreateLink};
+use hdk::prelude::EntryFixturator;
 use holo_hash::fixt::AgentPubKeyFixturator;
 use holo_hash::{ActionHash, AgentPubKey, HashableContentExtSync};
+use holochain_keystore::MetaLairClient;
+use holochain_keystore::SignedActionHashedExt;
 use holochain_p2p::MockHolochainP2pDnaT;
-use holochain_sqlite::exports::FallibleIterator;
-use holochain_state::{
-    host_fn_workspace::HostFnWorkspaceRead,
-    prelude::{insert_op_cache, set_validation_status, set_when_integrated},
-};
-use holochain_timestamp::Timestamp;
+use holochain_state::host_fn_workspace::HostFnWorkspaceRead;
 use holochain_types::{
     chain::MustGetAgentActivityResponse,
-    db::{DbKindCache, DbWrite},
-    dht_op::{ChainOp, DhtOp, DhtOpHashed, WireOps},
+    op::{ChainOp, DhtOp, DhtOpHashed},
     record::WireRecordOps,
+    wire_ops::{RenderedOp, RenderedOps, WireOps},
 };
 use holochain_wasm_test_utils::TestWasm;
-use holochain_wasmer_host::module::ModuleCache;
-use holochain_zome_types::{
-    chain::{ChainFilter, LimitConditions, MustGetAgentActivityInput},
-    dependencies::holochain_integrity_types::{UnresolvedDependencies, ValidateCallbackResult},
-    entry::MustGetActionInput,
-    fixt::{CreateFixturator, DeleteFixturator, SignatureFixturator},
-    judged::Judged,
-    op::{Op, RegisterAgentActivity, RegisterDelete},
-    record::{SignedActionHashed, SignedHashed},
-    validate::ValidationStatus,
-    Action,
+use holochain_zome_types::fixt::{
+    ActionFixturator, CreateAction, CreateLinkAction, DeleteAction, SignatureFixturator,
+};
+use holochain_zome_types::prelude::{
+    ActionData, AgentActivity, ChainFilter, CreateLink, Delete, DeleteData, Judged,
+    MustGetActionInput, MustGetAgentActivityInput, Op, SignedAction, SignedActionHashed,
+    UnresolvedDependencies, ValidateCallbackResult, ValidationStatus,
 };
 use matches::assert_matches;
-use parking_lot::RwLock;
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 // test app validation with a must get action where the original action of
 // a delete is not in the cache db and then added to it
@@ -50,18 +41,23 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 async fn validation_callback_must_get_action() {
     let zomes = SweetInlineZomes::new(vec![], 0).integrity_function("validate", {
         move |api, op: Op| {
-            if let Op::RegisterDelete(RegisterDelete { delete }) = op {
-                let result =
-                    api.must_get_action(MustGetActionInput(delete.hashed.deletes_address.clone()));
+            if let Op::Delete(Delete { delete }) = op {
+                let deletes_address = match &delete.hashed.content.data {
+                    ActionData::Delete(DeleteData {
+                        deletes_address, ..
+                    }) => deletes_address.clone(),
+                    // App validation only runs on ops that have passed sys
+                    // validation, which rejects a delete op whose action is not
+                    // a `Delete` (`malformed` in the sys validation workflow), so
+                    // a `Delete` op always carries `ActionData::Delete`.
+                    _ => unreachable!(),
+                };
+                let result = api.must_get_action(MustGetActionInput(deletes_address.clone()));
                 if result.is_ok() {
                     Ok(ValidateCallbackResult::Valid)
                 } else {
                     Ok(ValidateCallbackResult::UnresolvedDependencies(
-                        UnresolvedDependencies::Hashes(vec![delete
-                            .hashed
-                            .deletes_address
-                            .clone()
-                            .into()]),
+                        UnresolvedDependencies::Hashes(vec![deletes_address.into()]),
                     ))
                 }
             } else {
@@ -83,15 +79,17 @@ async fn validation_callback_must_get_action() {
     let network = Arc::new(MockHolochainP2pDnaT::new());
 
     // a create by alice
-    let mut create = fixt!(Create);
-    create.author = alice.clone();
-    let create_action = Action::Create(create.clone());
+    let mut create_action = fixt!(Action, CreateAction);
+    create_action.header.author = alice.clone();
     // a delete by bob that references alice's create
-    let mut delete = fixt!(Delete);
-    delete.author = bob.clone();
-    delete.deletes_address = create_action.clone().to_hash();
-    let delete_action_signed_hashed = SignedHashed::new_unchecked(delete.clone(), fixt!(Signature));
-    let delete_action_op = Op::RegisterDelete(RegisterDelete {
+    let mut delete_action = fixt!(Action, DeleteAction);
+    delete_action.header.author = bob.clone();
+    if let ActionData::Delete(d) = &mut delete_action.data {
+        d.deletes_address = create_action.to_hash();
+    }
+    let delete_action_signed_hashed =
+        SignedActionHashed::new_unchecked(delete_action, fixt!(Signature));
+    let delete_action_op = Op::Delete(Delete {
         delete: delete_action_signed_hashed.clone(),
     });
     let invocation = ValidateInvocation::new(zomes_to_invoke, &delete_action_op).unwrap();
@@ -109,12 +107,17 @@ async fn validation_callback_must_get_action() {
     .unwrap();
     assert_matches!(outcome, Outcome::AwaitingDeps(hashes) if hashes == vec![create_action.to_hash().into()]);
 
-    // write action to be must got during validation to dht cache db
-    let dht_op = ChainOp::RegisterAgentActivity(fixt!(Signature), create_action.clone());
+    // Record the action to be must-got during validation into the DhtStore,
+    // which the cascade's local read consults.
+    let signed = SignedAction::new(create_action.clone(), fixt!(Signature));
+    let dht_op = DhtOp::from(ChainOp::AgentActivity(signed));
     let dht_op_hashed = DhtOpHashed::from_content_sync(dht_op);
-    test_space.space.cache_db.test_write(move |txn| {
-        insert_op_cache(txn, &dht_op_hashed).unwrap();
-    });
+    test_space
+        .space
+        .dht_store
+        .record_incoming_ops(vec![(dht_op_hashed, false)])
+        .await
+        .unwrap();
 
     // the same validation should now successfully validate the op
     let outcome = run_validation_callback(invocation, &ribosome, workspace, network, false)
@@ -132,18 +135,23 @@ async fn validation_callback_awaiting_deps_hashes() {
 
     let zomes = SweetInlineZomes::new(vec![], 0).integrity_function("validate", {
         move |api, op: Op| {
-            if let Op::RegisterDelete(RegisterDelete { delete }) = op {
-                let result =
-                    api.must_get_action(MustGetActionInput(delete.hashed.deletes_address.clone()));
+            if let Op::Delete(Delete { delete }) = op {
+                let deletes_address = match &delete.hashed.content.data {
+                    ActionData::Delete(DeleteData {
+                        deletes_address, ..
+                    }) => deletes_address.clone(),
+                    // App validation only runs on ops that have passed sys
+                    // validation, which rejects a delete op whose action is not
+                    // a `Delete` (`malformed` in the sys validation workflow), so
+                    // a `Delete` op always carries `ActionData::Delete`.
+                    _ => unreachable!(),
+                };
+                let result = api.must_get_action(MustGetActionInput(deletes_address.clone()));
                 if result.is_ok() {
                     Ok(ValidateCallbackResult::Valid)
                 } else {
                     Ok(ValidateCallbackResult::UnresolvedDependencies(
-                        UnresolvedDependencies::Hashes(vec![delete
-                            .hashed
-                            .deletes_address
-                            .clone()
-                            .into()]),
+                        UnresolvedDependencies::Hashes(vec![deletes_address.into()]),
                     ))
                 }
             } else {
@@ -155,24 +163,28 @@ async fn validation_callback_awaiting_deps_hashes() {
     let TestCase {
         zomes_to_invoke,
         ribosome,
+        keystore,
         alice,
         bob,
         workspace,
         test_space,
     } = TestCase::new(zomes).await;
 
-    // a create by alice
-    let mut create = fixt!(Create);
-    create.author = alice.clone();
-    let create_action = Action::Create(create.clone());
+    // a create by alice, signed with alice's real key
+    let mut create_action = fixt!(Action, CreateAction);
+    create_action.header.author = alice.clone();
     let create_action_signed_hashed =
-        SignedHashed::new_unchecked(create_action.clone(), fixt!(Signature));
+        SignedActionHashed::sign(&keystore, create_action.clone().into_hashed())
+            .await
+            .unwrap();
     // a delete by bob that references alice's create
-    let mut delete = fixt!(Delete);
-    delete.author = bob.clone();
-    delete.deletes_address = create_action.clone().to_hash();
-    let delete_action_signed_hashed = SignedHashed::new_unchecked(delete.clone(), fixt!(Signature));
-    let delete_action_op = Op::RegisterDelete(RegisterDelete {
+    let mut delete = fixt!(Action, DeleteAction);
+    delete.header.author = bob.clone();
+    if let ActionData::Delete(d) = &mut delete.data {
+        d.deletes_address = create_action.to_hash();
+    }
+    let delete_action_signed_hashed = SignedActionHashed::new_unchecked(delete, fixt!(Signature));
+    let delete_action_op = Op::Delete(Delete {
         delete: delete_action_signed_hashed.clone(),
     });
     let invocation = ValidateInvocation::new(zomes_to_invoke, &delete_action_op).unwrap();
@@ -184,12 +196,16 @@ async fn validation_callback_awaiting_deps_hashes() {
         assert_eq!(hash, action_to_return.as_hash().clone().into());
         Ok(vec![WireOps::Record(WireRecordOps {
             action: Some(Judged::new(
-                action_to_return.clone().into(),
+                SignedAction::new(
+                    action_to_return.hashed.content.clone(),
+                    action_to_return.signature().clone(),
+                ),
                 ValidationStatus::Valid,
             )),
             deletes: vec![],
             updates: vec![],
             entry: None,
+            warrants: vec![],
         })])
     });
 
@@ -207,12 +223,10 @@ async fn validation_callback_awaiting_deps_hashes() {
     .unwrap();
     assert_matches!(outcome, Outcome::AwaitingDeps(hashes) if hashes == vec![create_action.clone().to_hash().into()]);
 
-    // await while missing record is being fetched in background task
-    await_actions_in_cache(
-        &test_space.space.cache_db,
-        vec![create_action_signed_hashed.as_hash().clone()],
-    )
-    .await;
+    // The fetched create carries alice's real signature, so it passes the
+    // signature gate and lands in the DhtStore, which the cascade's local read
+    // consults. Wait for the background fetch to store it.
+    await_action_in_store(&test_space.space.dht_store, &create_action.to_hash()).await;
 
     // app validation outcome should be accepted, now that the missing record
     // has been fetched
@@ -229,27 +243,30 @@ async fn validation_callback_awaiting_deps_agent_activity() {
 
     let zomes = SweetInlineZomes::new(vec![], 0).integrity_function("validate", {
         move |api, op: Op| {
-            if let Op::RegisterDelete(RegisterDelete { delete }) = op {
-                // chain filter with delete as chain top and create as chain bottom
-                let mut filter_hashes = HashSet::new();
-                filter_hashes.insert(delete.hashed.deletes_address.clone().clone());
-                let chain_filter = ChainFilter {
-                    chain_top: delete.as_hash().clone(),
-                    limit_conditions: LimitConditions::UntilHash(filter_hashes),
-                    include_cached_entries: false,
+            if let Op::Delete(Delete { delete }) = op {
+                let deletes_address = match &delete.hashed.content.data {
+                    ActionData::Delete(DeleteData {
+                        deletes_address, ..
+                    }) => deletes_address.clone(),
+                    // App validation only runs on ops that have passed sys
+                    // validation, which rejects a delete op whose action is not
+                    // a `Delete` (`malformed` in the sys validation workflow), so
+                    // a `Delete` op always carries `ActionData::Delete`.
+                    _ => unreachable!(),
                 };
+                let author = delete.hashed.content.author().clone();
+                // chain filter with delete as chain top and create as chain bottom
+                let chain_filter =
+                    ChainFilter::until_hash(delete.as_hash().clone(), deletes_address);
                 let result = api.must_get_agent_activity(MustGetAgentActivityInput {
-                    author: delete.hashed.author.clone(),
+                    author: author.clone(),
                     chain_filter: chain_filter.clone(),
                 });
                 if result.is_ok() {
                     Ok(ValidateCallbackResult::Valid)
                 } else {
                     Ok(ValidateCallbackResult::UnresolvedDependencies(
-                        UnresolvedDependencies::AgentActivity(
-                            delete.hashed.author.clone(),
-                            chain_filter.clone(),
-                        ),
+                        UnresolvedDependencies::AgentActivity(author, chain_filter),
                     ))
                 }
             } else {
@@ -261,32 +278,37 @@ async fn validation_callback_awaiting_deps_agent_activity() {
     let TestCase {
         zomes_to_invoke,
         ribosome,
+        keystore,
         alice,
         workspace,
         test_space,
         ..
     } = TestCase::new(zomes).await;
 
-    // a create by alice
-    let mut create = fixt!(Create);
-    create.author = alice.clone();
-    create.action_seq = 0;
-    let create_action = Action::Create(create.clone());
+    // a create by alice, signed with alice's real key
+    let mut create_action = fixt!(Action, CreateAction);
+    create_action.header.author = alice.clone();
+    create_action.header.action_seq = 0;
     let create_action_signed_hashed =
-        SignedActionHashed::new_unchecked(create_action.clone(), fixt!(Signature));
+        SignedActionHashed::sign(&keystore, create_action.clone().into_hashed())
+            .await
+            .unwrap();
     // a delete by alice that references the create
-    let mut delete = fixt!(Delete);
-    delete.author = alice.clone();
-    delete.action_seq = 1;
+    let mut delete_action = fixt!(Action, DeleteAction);
+    delete_action.header.author = alice.clone();
+    delete_action.header.action_seq = 1;
     // prev_action must be set, otherwise it will be filtered from the chain
     // that must_get_agent_activity returns
-    delete.prev_action = create_action.clone().to_hash();
-    delete.deletes_address = create_action.clone().to_hash();
-    let delete_action = Action::Delete(delete.clone());
+    delete_action.header.prev_action = Some(create_action.to_hash());
+    if let ActionData::Delete(d) = &mut delete_action.data {
+        d.deletes_address = create_action.to_hash();
+    }
     let delete_action_signed_hashed =
-        SignedActionHashed::new_unchecked(delete_action.clone(), fixt!(Signature));
-    let delete_action_op = Op::RegisterDelete(RegisterDelete {
-        delete: SignedHashed::new_unchecked(delete.clone(), fixt!(Signature)),
+        SignedActionHashed::sign(&keystore, delete_action.clone().into_hashed())
+            .await
+            .unwrap();
+    let delete_action_op = Op::Delete(Delete {
+        delete: SignedActionHashed::new_unchecked(delete_action, fixt!(Signature)),
     });
     let invocation = ValidateInvocation::new(zomes_to_invoke, &delete_action_op).unwrap();
 
@@ -298,18 +320,20 @@ async fn validation_callback_awaiting_deps_agent_activity() {
     // return single action as requested chain
     network.expect_must_get_agent_activity().returning({
         let expected_chain_top = expected_chain_top.clone();
+        let expected_until_hash = create_action.to_hash();
         let create_action_signed_hashed = create_action_signed_hashed.clone();
         let delete_action_signed_hashed = delete_action_signed_hashed.clone();
         move |author, filter, _, _| {
             assert_eq!(author, alice);
             assert_eq!(&filter.chain_top, expected_chain_top.as_hash());
+            assert_eq!(filter.get_until_hash(), Some(&expected_until_hash));
 
             Ok(vec![MustGetAgentActivityResponse::activity(vec![
-                RegisterAgentActivity {
+                AgentActivity {
                     action: create_action_signed_hashed.clone(),
                     cached_entry: None,
                 },
-                RegisterAgentActivity {
+                AgentActivity {
                     action: delete_action_signed_hashed.clone(),
                     cached_entry: None,
                 },
@@ -330,18 +354,22 @@ async fn validation_callback_awaiting_deps_agent_activity() {
     .unwrap();
     assert_matches!(outcome, Outcome::AwaitingDeps(hashes) if hashes == vec![expected_chain_top.hashed.author().clone().into()]);
 
-    // await while bob's chain is being fetched in background task
-    await_actions_in_cache(
-        &test_space.space.cache_db,
-        vec![
-            create_action_signed_hashed.as_hash().clone(),
-            delete_action_signed_hashed.as_hash().clone(),
-        ],
+    // The fetched activity carries alice's real signatures, so it passes the
+    // signature gate and lands in the DhtStore. Wait for the background fetch to
+    // store the chain.
+    await_action_in_store(
+        &test_space.space.dht_store,
+        create_action_signed_hashed.as_hash(),
+    )
+    .await;
+    await_action_in_store(
+        &test_space.space.dht_store,
+        delete_action_signed_hashed.as_hash(),
     )
     .await;
 
     // app validation outcome should be accepted, now that bob's missing agent
-    // activity is available in alice's cache
+    // activity is available in the DhtStore
     let outcome = run_validation_callback(invocation, &ribosome, workspace, network, false)
         .await
         .unwrap();
@@ -350,28 +378,23 @@ async fn validation_callback_awaiting_deps_agent_activity() {
 
 // An op under validation that depends on an invalid op should be rejected.
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    feature = "wasmer-wasmi",
+    ignore = "Waiting for a fix https://github.com/wasmerio/wasmer/issues/6397"
+)]
 async fn validation_callback_rejects_op_depending_on_invalid_op() {
     holochain_trace::test_run();
     let (dna_file, integrity_zomes, _) =
         SweetDnaFile::unique_from_test_wasms(vec![TestWasm::Link]).await;
     let zomes_to_invoke = ZomesToInvoke::OneIntegrity(integrity_zomes[0].clone());
     let dna_hash = dna_file.dna_hash().clone();
-    let ribosome = RealRibosome::new(
-        dna_file.clone(),
-        Some(Arc::new(RwLock::new(ModuleCache::new(None)))),
-    )
-    .await
-    .unwrap();
+    let ribosome = Ribosome::new_with_test_wasms(vec![TestWasm::Link])
+        .await
+        .unwrap();
     let test_space = TestSpace::new(dna_hash.clone());
     let alice = fixt!(AgentPubKey);
     let workspace = HostFnWorkspaceRead::new(
-        test_space
-            .space
-            .get_or_create_authored_db(alice.clone())
-            .unwrap()
-            .into(),
-        test_space.space.dht_db.clone().into(),
-        test_space.space.cache_db.clone(),
+        test_space.space.dht_store.clone(),
         fixt!(MetaLairClient),
         None,
     )
@@ -379,38 +402,60 @@ async fn validation_callback_rejects_op_depending_on_invalid_op() {
     .unwrap();
 
     // An invalid Create action by Alice.
-    let mut create = fixt!(Create);
-    create.author = alice.clone();
-    create.action_seq = 0;
-    let create_action = Action::Create(create.clone());
-    let create_action_op =
-        DhtOpHashed::from_content_sync(DhtOp::ChainOp(Box::new(ChainOp::StoreRecord(
-            fixt!(Signature),
-            create_action.clone(),
-            RecordEntry::Present(fixt!(Entry)),
-        ))));
+    let mut create_action = fixt!(Action, CreateAction);
+    create_action.header.author = alice.clone();
+    create_action.header.action_seq = 0;
+    let create_entry = fixt!(Entry);
+    let create_entry_hash = create_action.entry_hash().unwrap().clone();
     // A CreateLink to be validated that does a must_get_valid_record to the invalid Create
     // in the validate callback.
-    let mut create_link = fixt!(CreateLink);
-    create_link.action_seq = 1;
-    create_link.zome_index = 0.into();
-    // This link type will lead to a must_get_valid_record in the validate callback.
-    create_link.link_type = 2.into();
-    create_link.base_address = create_action.to_hash().into();
+    let mut create_link_action = fixt!(Action, CreateLinkAction);
+    create_link_action.header.action_seq = 1;
+    if let ActionData::CreateLink(d) = &mut create_link_action.data {
+        d.zome_index = 0.into();
+        // This link type will lead to a must_get_valid_record in the validate callback.
+        d.link_type = 2.into();
+        d.base_address = create_action.to_hash().into();
+    }
     let create_link_signed_hashed =
-        SignedHashed::new_unchecked(create_link.clone(), fixt!(Signature));
-    let create_link_op = Op::RegisterCreateLink(RegisterCreateLink {
+        SignedActionHashed::new_unchecked(create_link_action, fixt!(Signature));
+    let create_link_op = Op::CreateLink(CreateLink {
         create_link: create_link_signed_hashed,
     });
     let invocation = ValidateInvocation::new(zomes_to_invoke, &create_link_op).unwrap();
     let network = Arc::new(MockHolochainP2pDnaT::new());
 
-    // Insert invalid Create op into the cache db.
-    test_space.space.cache_db.test_write(move |txn| {
-        insert_op_cache(txn, &create_action_op).unwrap();
-        set_validation_status(txn, &create_action_op.hash, ValidationStatus::Rejected).unwrap();
-        set_when_integrated(txn, &create_action_op.hash, Timestamp::now()).unwrap();
-    });
+    // Cache the invalid Create record into the DhtStore (integrated, as a
+    // fetched op would be) and mark it rejected, so the cascade's
+    // get_record_details resolves it as a rejected record.
+    let rendered = RenderedOp::new(
+        create_action.clone(),
+        fixt!(Signature),
+        None,
+        holochain_zome_types::op::ChainOpType::CreateRecord,
+    )
+    .unwrap();
+    let create_op_hash = rendered.op_hash.clone();
+    let rendered_ops = RenderedOps {
+        entry: Some(holochain_types::prelude::EntryHashed::with_pre_hashed(
+            create_entry,
+            create_entry_hash,
+        )),
+        ops: vec![rendered],
+        warrant: None,
+    };
+    test_space
+        .space
+        .dht_store
+        .cache_chain_ops(&rendered_ops)
+        .await
+        .unwrap();
+    test_space
+        .space
+        .dht_store
+        .reject_chain_ops(vec![create_op_hash])
+        .await
+        .unwrap();
 
     // App validation should reject the CreateLink op because the record at the base address of the link is invalid.
     let outcome = run_validation_callback(
@@ -430,7 +475,8 @@ async fn validation_callback_rejects_op_depending_on_invalid_op() {
 struct TestCase {
     zomes_to_invoke: ZomesToInvoke,
     test_space: TestSpace,
-    ribosome: RealRibosome,
+    ribosome: Ribosome,
+    keystore: MetaLairClient,
     alice: AgentPubKey,
     bob: AgentPubKey,
     workspace: HostFnWorkspaceRead,
@@ -439,34 +485,32 @@ struct TestCase {
 impl TestCase {
     async fn new(zomes: SweetInlineZomes) -> Self {
         let (dna_file, integrity_zomes, _) = SweetDnaFile::unique_from_inline_zomes(zomes).await;
+        let inline_zome_store = InlineZomeStore::default();
+        for z in dna_file.inline_zomes() {
+            inline_zome_store.insert(dna_file.dna_def_hashed().clone(), z.clone());
+        }
+
         let zomes_to_invoke = ZomesToInvoke::OneIntegrity(integrity_zomes[0].clone());
         let dna_hash = dna_file.dna_hash().clone();
-        let ribosome = RealRibosome::new(
-            dna_file.clone(),
-            Some(Arc::new(RwLock::new(ModuleCache::new(None)))),
-        )
-        .await
-        .unwrap();
+        let ribosome = InlineRibosome::new(dna_file.dna_def_hashed().clone(), inline_zome_store);
+        let ribosome = Ribosome::new(dna_file.dna_def_hashed().clone(), ribosome)
+            .await
+            .unwrap();
         let test_space = TestSpace::new(dna_hash.clone());
-        let alice = fixt!(AgentPubKey);
-        let bob = fixt!(AgentPubKey);
-        let workspace = HostFnWorkspaceRead::new(
-            test_space
-                .space
-                .get_or_create_authored_db(alice.clone())
-                .unwrap()
-                .into(),
-            test_space.space.dht_db.clone().into(),
-            test_space.space.cache_db.clone(),
-            fixt!(MetaLairClient),
-            None,
-        )
-        .await
-        .unwrap();
+        // Real keypairs so fetched ops carry verifiable signatures and land in
+        // the DhtStore, the source every cascade read resolves against.
+        let keystore = holochain_keystore::test_keystore();
+        let alice = keystore.new_sign_keypair_random().await.unwrap();
+        let bob = keystore.new_sign_keypair_random().await.unwrap();
+        let workspace =
+            HostFnWorkspaceRead::new(test_space.space.dht_store.clone(), keystore.clone(), None)
+                .await
+                .unwrap();
         Self {
             zomes_to_invoke,
             test_space,
             ribosome,
+            keystore,
             alice,
             bob,
             workspace,
@@ -474,21 +518,19 @@ impl TestCase {
     }
 }
 
-// wait for provided actions to arrive in cache db
-async fn await_actions_in_cache(cache_db: &DbWrite<DbKindCache>, hashes: Vec<ActionHash>) {
-    let hashes = Arc::new(hashes.clone());
+// Wait for the given action to be fetched into the DhtStore.
+async fn await_action_in_store(
+    dht_store: &holochain_state::dht_store::DhtStore,
+    hash: &ActionHash,
+) {
     loop {
-        let hashes = hashes.clone();
-        let all_actions_in_cache = cache_db.test_read(move |txn| {
-            let mut stmt = txn.prepare("SELECT hash FROM Action").unwrap();
-            let rows = stmt.query([]).unwrap();
-            let action_hashes_in_cache: Vec<ActionHash> =
-                rows.map(|row| row.get(0)).collect().unwrap();
-            hashes
-                .iter()
-                .all(|hash| action_hashes_in_cache.contains(hash))
-        });
-        if all_actions_in_cache {
+        if dht_store
+            .as_read()
+            .retrieve_action(hash)
+            .await
+            .unwrap()
+            .is_some()
+        {
             return;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;

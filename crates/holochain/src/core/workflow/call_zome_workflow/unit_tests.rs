@@ -2,7 +2,7 @@ use crate::{
     conductor::api::CellConductorApi,
     core::{
         queue_consumer::TriggerSender,
-        ribosome::{real_ribosome::RealRibosome, ZomeCallInvocation},
+        ribosome::ZomeCallInvocation,
         workflow::{call_zome_workflow, CallZomeWorkflowArgs},
     },
     sweettest::{SweetConductor, SweetDnaFile},
@@ -42,6 +42,7 @@ async fn trigger_integration_workflow_after_creating_ops() {
     } = TestCase::new(hc_p2p, "create", ()).await;
     let (trigger_validate_dht_ops, mut validate_dht_ops_rx) = TriggerSender::new();
     let (trigger_integrate_dht_ops, mut integrate_dht_ops_rx) = TriggerSender::new();
+    let (trigger_publish_dht_ops, mut publish_dht_ops_rx) = TriggerSender::new();
     let (trigger_countersigning, _) = TriggerSender::new();
 
     let _ = call_zome_workflow(
@@ -51,6 +52,7 @@ async fn trigger_integration_workflow_after_creating_ops() {
         args,
         trigger_validate_dht_ops,
         trigger_integrate_dht_ops,
+        trigger_publish_dht_ops,
         trigger_countersigning,
     )
     .await
@@ -58,6 +60,8 @@ async fn trigger_integration_workflow_after_creating_ops() {
     .unwrap();
     // Assert the integration workflow has been triggered.
     integrate_dht_ops_rx.try_recv().unwrap();
+    // Assert publishing has been triggered directly for the authored ops.
+    publish_dht_ops_rx.try_recv().unwrap();
     // Assert the validation workflow has not been triggered as no warrants have been authored.
     assert!(validate_dht_ops_rx.try_recv().is_none());
 }
@@ -82,6 +86,7 @@ async fn validation_and_integration_workflow_are_not_triggered_when_no_data_and_
     } = TestCase::new(hc_p2p, "reed", fixt!(ActionHash)).await;
     let (trigger_validate_dht_ops, mut validate_dht_ops_rx) = TriggerSender::new();
     let (trigger_integrate_dht_ops, mut integrate_dht_ops_rx) = TriggerSender::new();
+    let (trigger_publish_dht_ops, mut publish_dht_ops_rx) = TriggerSender::new();
     let (trigger_countersigning, _) = TriggerSender::new();
 
     let _ = call_zome_workflow(
@@ -91,6 +96,7 @@ async fn validation_and_integration_workflow_are_not_triggered_when_no_data_and_
         args,
         trigger_validate_dht_ops,
         trigger_integrate_dht_ops,
+        trigger_publish_dht_ops,
         trigger_countersigning,
     )
     .await
@@ -98,6 +104,8 @@ async fn validation_and_integration_workflow_are_not_triggered_when_no_data_and_
     .unwrap();
     // Fail the test if the integration workflow has been triggered.
     assert!(integrate_dht_ops_rx.try_recv().is_none());
+    // Fail the test if publishing has been triggered, as nothing was authored.
+    assert!(publish_dht_ops_rx.try_recv().is_none());
     // Fail the test if the validation workflow has been triggered.
     assert!(validate_dht_ops_rx.try_recv().is_none());
 }
@@ -117,6 +125,7 @@ async fn validation_workflow_triggered_after_inserting_warrants_and_actions() {
     } = TestCase::new(hc_p2p, "create", ()).await;
     let (trigger_validate_dht_ops, mut validate_dht_ops_rx) = TriggerSender::new();
     let (trigger_integrate_dht_ops, mut integrate_dht_ops_rx) = TriggerSender::new();
+    let (trigger_publish_dht_ops, mut publish_dht_ops_rx) = TriggerSender::new();
     let (trigger_countersigning, _) = TriggerSender::new();
 
     // Create a warrant and add it to the scratch space.
@@ -135,6 +144,7 @@ async fn validation_workflow_triggered_after_inserting_warrants_and_actions() {
         args,
         trigger_validate_dht_ops,
         trigger_integrate_dht_ops,
+        trigger_publish_dht_ops,
         trigger_countersigning,
     )
     .await
@@ -144,6 +154,8 @@ async fn validation_workflow_triggered_after_inserting_warrants_and_actions() {
     validate_dht_ops_rx.try_recv().unwrap();
     // Assert integration workflow has been triggered.
     integrate_dht_ops_rx.try_recv().unwrap();
+    // Assert publishing has been triggered directly for the authored ops.
+    publish_dht_ops_rx.try_recv().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -164,6 +176,7 @@ async fn trigger_validation_workflow_after_only_inserting_warrants() {
     } = TestCase::new(hc_p2p, "reed", fixt!(ActionHash)).await;
     let (trigger_validate_dht_ops, mut validate_dht_ops_rx) = TriggerSender::new();
     let (trigger_integrate_dht_ops, mut integrate_dht_ops_rx) = TriggerSender::new();
+    let (trigger_publish_dht_ops, mut publish_dht_ops_rx) = TriggerSender::new();
     let (trigger_countersigning, _) = TriggerSender::new();
 
     // Create a warrant and add it to the scratch space.
@@ -183,6 +196,7 @@ async fn trigger_validation_workflow_after_only_inserting_warrants() {
         args,
         trigger_validate_dht_ops,
         trigger_integrate_dht_ops,
+        trigger_publish_dht_ops,
         trigger_countersigning,
     )
     .await
@@ -192,13 +206,15 @@ async fn trigger_validation_workflow_after_only_inserting_warrants() {
     validate_dht_ops_rx.try_recv().unwrap();
     // Assert integration workflow has not been triggered, as no actions have been authored.
     assert!(integrate_dht_ops_rx.try_recv().is_none());
+    // Publishing is not triggered here either, as no actions were authored.
+    assert!(publish_dht_ops_rx.try_recv().is_none());
 }
 
 struct TestCase {
     workspace: SourceChainWorkspace,
     network: DynHolochainP2pDna,
     keystore: MetaLairClient,
-    args: CallZomeWorkflowArgs<RealRibosome>,
+    args: CallZomeWorkflowArgs,
     _conductor: SweetConductor,
 }
 
@@ -214,11 +230,7 @@ impl TestCase {
         let agent = app.agent().clone();
         let cell_id = CellId::new(dna_hash.clone(), agent.clone());
         let workspace = SourceChainWorkspace::new(
-            conductor
-                .get_or_create_authored_db(&dna_hash, agent.clone())
-                .unwrap(),
-            conductor.get_dht_db(&dna_hash).unwrap(),
-            conductor.get_cache_db(&cell_id).await.unwrap(),
+            conductor.get_dht_store(&dna_hash).unwrap(),
             conductor.keystore(),
             agent.clone(),
         )
@@ -265,7 +277,8 @@ async fn create_signed_warrant(author: &AgentPubKey, keystore: &MetaLairClient) 
         WarrantProof::ChainIntegrity(ChainIntegrityWarrant::InvalidChainOp {
             action_author: fixt!(AgentPubKey),
             action: (fixt!(ActionHash), fixt!(Signature)),
-            chain_op_type: ChainOpType::StoreEntry,
+            chain_op_type: ChainOpType::CreateEntry,
+            reason: "test warrant".into(),
         }),
         (*author).clone(),
         Timestamp::now(),

@@ -19,7 +19,7 @@ use std::time::Duration;
 // - hc.conductor.workflow.validation_attempts
 // - hc.conductor.post_commit.duration
 // - hc.conductor.uptime
-// - hc.ribosome.wasm.usage
+// - hc.ribosome.wasm.usage (only with the wasmer-sys backends; wasmi has no metering)
 // - hc.ribosome.zome_call.duration
 // - hc.ribosome.wasm_call.duration
 // - hc.ribosome.host_fn_call.duration
@@ -69,6 +69,27 @@ async fn metrics() {
         .await;
     conductors.exchange_peer_info().await;
 
+    // Wait until each conductor's peer store contains the other agent before
+    // making cross-conductor calls. Without this the test races
+    // peer-info propagation on slow runners (wasmer-wasmi, Windows CI) and
+    // the remote signal / network get never delivers the expected metric.
+    alice_conductor
+        .wait_for_peer_visible(
+            [bob_cell.agent_pubkey().clone()],
+            Some(bob_cell.cell_id().clone()),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    bob_conductor
+        .wait_for_peer_visible(
+            [alice_cell.agent_pubkey().clone()],
+            Some(alice_cell.cell_id().clone()),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+
     // Alice creates an entry to record zome call metrics.
     let create_entry_hash: ActionHash = alice_conductor
         .call(
@@ -103,6 +124,13 @@ async fn metrics() {
         .await;
 
     // Wait until the influx file contains enough exported records to satisfy every assertion below.
+    //
+    // Metering is only implemented for the wasmer-sys backends, so the wasmi
+    // interpreter never records `hc.ribosome.wasm.usage`.
+    let expect_wasm_usage = cfg!(any(
+        feature = "wasmer-sys-cranelift",
+        feature = "wasmer-sys-llvm"
+    ));
     let metrics = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let metrics = read_to_string(&influxive_file).unwrap();
@@ -115,7 +143,7 @@ async fn metrics() {
                 && metrics.contains("hc.conductor.workflow.validation_attempts")
                 && metrics.contains("hc.conductor.post_commit.duration")
                 && metrics.contains("hc.conductor.uptime")
-                && metrics.matches("hc.ribosome.wasm.usage").count() >= 4
+                && (!expect_wasm_usage || metrics.matches("hc.ribosome.wasm.usage").count() >= 4)
                 && metrics.contains("hc.ribosome.zome_call.duration")
                 && metrics.matches("hc.ribosome.wasm_call.duration").count() >= 4
                 && metrics.matches("hc.ribosome.host_fn_call.duration").count() >= 4

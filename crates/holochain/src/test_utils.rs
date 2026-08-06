@@ -5,7 +5,6 @@ use crate::conductor::config::ConductorConfig;
 use crate::conductor::config::InterfaceDriver;
 use crate::conductor::ConductorBuilder;
 use crate::conductor::ConductorHandle;
-use crate::core::queue_consumer::TriggerSender;
 use crate::core::ribosome::ZomeCallInvocation;
 use crate::sweettest::SweetConductorConfig;
 use crate::sweettest::SweetLocalRendezvous;
@@ -14,24 +13,18 @@ use hdk::prelude::ZomeName;
 use holo_hash::*;
 use holochain_conductor_api::conductor::paths::DataRootPath;
 use holochain_conductor_api::conductor::NetworkConfig;
-use holochain_conductor_api::IntegrationStateDump;
-use holochain_conductor_api::IntegrationStateDumps;
 use holochain_conductor_api::ZomeCallParamsSigned;
 use holochain_keystore::MetaLairClient;
 use holochain_nonce::fresh_nonce;
 use holochain_serialized_bytes::SerializedBytesError;
-use holochain_sqlite::prelude::DatabaseResult;
 use holochain_state::prelude::test_db_dir;
 use holochain_state::prelude::SourceChainResult;
-use holochain_state::prelude::StateQueryResult;
 use holochain_state::source_chain;
 use holochain_types::prelude::*;
-use holochain_types::test_utils::fake_dna_file;
 use holochain_types::test_utils::fake_dna_zomes;
 use holochain_wasm_test_utils::TestWasm;
 pub use itertools;
-use rusqlite::named_params;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::error::Elapsed;
@@ -143,7 +136,7 @@ pub async fn setup_app_in_new_conductor(
     let db_dir = test_db_dir();
     let conductor_handle = ConductorBuilder::new()
         .with_data_root_path(db_dir.path().to_path_buf().into())
-        .test(&[])
+        .test()
         .await
         .unwrap();
 
@@ -236,11 +229,7 @@ pub async fn setup_app_inner(
         }]),
         ..Default::default()
     };
-    let conductor_handle = ConductorBuilder::new()
-        .config(config)
-        .test(&[])
-        .await
-        .unwrap();
+    let conductor_handle = ConductorBuilder::new().config(config).test().await.unwrap();
 
     for (app_name, cell_data) in apps_data {
         install_app(
@@ -257,159 +246,126 @@ pub async fn setup_app_inner(
     (AppInterfaceApi::new(conductor_handle), handle)
 }
 
-/// If HC_WASM_CACHE_PATH is set warm the cache
-pub fn warm_wasm_tests() {
-    if let Some(_path) = std::env::var_os("HC_WASM_CACHE_PATH") {
-        let wasms: Vec<_> = TestWasm::iter().collect();
-        crate::fixt::RealRibosomeFixturator::new(crate::fixt::Zomes(wasms))
-            .next()
-            .unwrap();
-    }
-}
-
-/// Wait for num_attempts * delay, or until all published ops have been integrated.
-#[cfg_attr(feature = "instrument", tracing::instrument(skip(db)))]
-pub async fn wait_for_integration<Db: ReadAccess<DbKindDht>>(
-    db: &Db,
-    num_published: usize,
+/// Poll the DHT store until at least `expected` ops are integrated, or
+/// panic after `num_attempts`. On failure the ops still awaiting validation are
+/// listed so a failing test shows what did not progress.
+pub async fn wait_for_integration(
+    dht_store: &holochain_state::dht_store::DhtStore,
+    expected: u64,
     num_attempts: usize,
     delay: Duration,
-) -> Result<(), String> {
-    let mut num_integrated = 0;
-    for i in 0..num_attempts {
-        num_integrated = get_integrated_count(db).await;
-        if num_integrated >= num_published {
-            if num_integrated > num_published {
-                tracing::warn!("num integrated ops > num published ops, meaning you may not be accounting for all nodes in this test.
-                Consistency may not be complete.")
-            }
-            return Ok(());
-        } else {
-            let total_time_waited = delay * i as u32;
-            tracing::debug!(?num_integrated, ?total_time_waited, counts = ?query_integration(db).await, "consistency-status");
+) {
+    for _ in 0..num_attempts {
+        let integrated = dht_store.as_read().count_integrated_ops().await.unwrap();
+        if integrated >= expected {
+            return;
         }
         tokio::time::sleep(delay).await;
     }
-
-    Err(format!(
-        "Consistency not achieved after {num_attempts} attempts. Expected {num_published} ops, but only {num_integrated} integrated.",
-    ))
+    let integrated = dht_store.as_read().count_integrated_ops().await.unwrap();
+    panic!(
+        "integration not reached: expected {expected}, integrated {integrated}\n{}",
+        pending_summary(dht_store).await
+    );
 }
 
-/// Show authored data for each cell environment
-#[cfg_attr(feature = "instrument", tracing::instrument(skip(envs)))]
-pub async fn show_authored<Db: ReadAccess<DbKindAuthored>>(envs: &[&Db]) {
-    for (i, &db) in envs.iter().enumerate() {
-        db.read_async(move |txn| -> DatabaseResult<()> {
-            txn.prepare("SELECT DISTINCT Action.seq, Action.type, Action.entry_hash FROM Action JOIN DhtOp ON Action.hash = DhtOp.hash")
-            .unwrap()
-            .query_map([], |row| {
-                let action_type: String = row.get("type")?;
-                let seq: u32 = row.get("seq")?;
-                let entry: Option<EntryHash> = row.get("entry_hash")?;
-                Ok((action_type, seq, entry))
-            })
-            .unwrap()
-            .for_each(|r|{
-                let (action_type, seq, entry) = r.unwrap();
-                tracing::debug!(chain = %i, %seq, ?action_type, ?entry);
-            });
-
-            Ok(())
-        }).await.unwrap();
-    }
-}
-
-/// Get multiple db states with compact Display representation
-pub async fn get_integration_dumps<Db: ReadAccess<DbKindDht>>(
-    dbs: &[&Db],
-) -> IntegrationStateDumps {
-    let mut output = Vec::new();
-    for db in dbs {
-        let db = *db;
-        output.push(query_integration(db).await);
-    }
-    IntegrationStateDumps(output)
-}
-
-/// Show the current db state.
-pub async fn query_integration<Db: ReadAccess<DbKindDht>>(db: &Db) -> IntegrationStateDump {
-    crate::conductor::integration_dump(&db.clone().into())
+/// Assert that nothing is awaiting validation in the DHT store. On failure
+/// the still-pending ops are listed so the cause is visible.
+pub async fn assert_limbo_empty(dht_store: &holochain_state::dht_store::DhtStore) {
+    let pending_sys = dht_store
+        .as_read()
+        .ops_pending_sys_validation(10_000)
         .await
-        .unwrap()
+        .unwrap();
+    let pending_app = dht_store
+        .as_read()
+        .ops_pending_app_validation(10_000)
+        .await
+        .unwrap();
+    assert!(
+        pending_sys.is_empty() && pending_app.is_empty(),
+        "limbo not empty: {} pending sys validation, {} pending app validation\n{}{}",
+        pending_sys.len(),
+        pending_app.len(),
+        format_pending_ops("sys", &pending_sys),
+        format_pending_ops("app", &pending_app),
+    );
 }
 
-async fn get_integrated_count<Db: ReadAccess<DbKindDht>>(db: &Db) -> usize {
-    db.read_async(move |txn| -> DatabaseResult<usize> {
-        Ok(txn.query_row(
-            "SELECT COUNT(hash) FROM DhtOp WHERE DhtOp.when_integrated IS NOT NULL",
-            [],
-            |row| row.get(0),
-        )?)
-    })
-    .await
-    .unwrap()
+/// Summarise the ops still awaiting validation in the DHT store.
+async fn pending_summary(dht_store: &holochain_state::dht_store::DhtStore) -> String {
+    let pending_sys = dht_store
+        .as_read()
+        .ops_pending_sys_validation(10_000)
+        .await
+        .unwrap_or_default();
+    let pending_app = dht_store
+        .as_read()
+        .ops_pending_app_validation(10_000)
+        .await
+        .unwrap_or_default();
+    format!(
+        "{}{}",
+        format_pending_ops("sys", &pending_sys),
+        format_pending_ops("app", &pending_app)
+    )
 }
 
-/// Get count of ops that have been successfully validated but not integrated
-pub async fn get_valid_and_not_integrated_count<Db: ReadAccess<DbKindDht>>(db: &Db) -> usize {
-    db.read_async(move |txn| -> DatabaseResult<usize> {
-        Ok(txn.query_row(
-            "SELECT COUNT(hash) FROM DhtOp WHERE when_integrated IS NULL AND validation_status = :status",
-            named_params!{
-                ":status": ValidationStatus::Valid,
-            },
-            |row| row.get(0),
-        )?)
-    })
-    .await
-    .unwrap()
+/// Render a stage's pending ops, listing each op hash, so a failing test shows
+/// exactly which ops did not progress.
+fn format_pending_ops(stage: &str, ops: &[holochain_types::op::DhtOpHashed]) -> String {
+    if ops.is_empty() {
+        return format!("  pending {stage}-validation: none\n");
+    }
+    let mut out = format!("  pending {stage}-validation ({}):\n", ops.len());
+    for op in ops {
+        out += &format!("    {}\n", op.as_hash());
+    }
+    out
 }
 
-/// Get count of ops that have been successfully validated and integrated
-pub async fn get_valid_and_integrated_count<Db: ReadAccess<DbKindDht>>(db: &Db) -> usize {
-    db.read_async(move |txn| -> DatabaseResult<usize> {
-        Ok(txn.query_row(
-            "SELECT COUNT(hash) FROM DhtOp WHERE when_integrated IS NOT NULL AND validation_status = :status",
-            named_params!{
-                ":status": ValidationStatus::Valid,
-            },
-            |row| row.get(0),
-        )?)
-    })
-    .await
-    .unwrap()
+/// Show an agent's authored chain for each (agent, store) pair.
+///
+/// Intended for debugging in tests.
+#[cfg_attr(feature = "instrument", tracing::instrument(skip(envs)))]
+pub async fn show_authored(envs: &[(AgentPubKey, &holochain_state::dht_store::DhtStore)]) {
+    for (i, (author, store)) in envs.iter().enumerate() {
+        let actions = store
+            .as_read()
+            .dump_source_chain(author)
+            .await
+            .expect("show_authored: dump_source_chain failed");
+        for rec in &actions.records {
+            let action_type = rec.action.action_type().to_string();
+            let seq = rec.action.action_seq();
+            let entry = rec.action.entry_hash().cloned();
+            tracing::debug!(chain = %i, %seq, ?action_type, ?entry);
+        }
+    }
 }
 
-/// Get all [`DhtOps`](holochain_types::prelude::DhtOp) integrated by this node
-pub async fn get_integrated_ops<Db: ReadAccess<DbKindDht>>(db: &Db) -> Vec<DhtOp> {
-    db.read_async(move |txn| -> StateQueryResult<Vec<DhtOp>> {
-        txn.prepare(
-            "
-            SELECT
-            DhtOp.type,
-            Action.author as author,
-            Action.blob as action_blob,
-            Entry.blob as entry_blob
-            FROM DhtOp
-            JOIN
-            Action ON DhtOp.action_hash = Action.hash
-            LEFT JOIN
-            Entry ON Action.entry_hash = Entry.hash
-            WHERE
-            DhtOp.when_integrated IS NOT NULL
-            ORDER BY DhtOp.rowid ASC
-        ",
-        )
-        .unwrap()
-        .query_and_then(named_params! {}, |row| {
-            Ok(holochain_state::query::map_sql_dht_op(true, "type", row).unwrap())
-        })
-        .unwrap()
-        .collect::<StateQueryResult<_>>()
-    })
-    .await
-    .unwrap()
+/// Count ops that passed validation but are not yet integrated, read from the
+/// DHT store.
+pub async fn get_valid_and_not_integrated_count(
+    dht_store: &holochain_state::dht_store::DhtStore,
+) -> usize {
+    dht_store
+        .as_read()
+        .count_valid_not_integrated_ops()
+        .await
+        .unwrap() as usize
+}
+
+/// Count ops that passed validation and have been integrated, read from the
+/// DHT store.
+pub async fn get_valid_and_integrated_count(
+    dht_store: &holochain_state::dht_store::DhtStore,
+) -> usize {
+    dht_store
+        .as_read()
+        .count_valid_integrated_ops()
+        .await
+        .unwrap() as usize
 }
 
 /// Helper for displaying agent infos stored on a conductor
@@ -499,7 +455,7 @@ where
         zome: zome.into(),
         cap_secret,
         fn_name,
-        payload,
+        payload: Arc::new(Mutex::new(Some(payload))),
         provenance,
         nonce,
         expires_at,
@@ -515,42 +471,53 @@ pub fn fake_valid_dna_file(network_seed: &str) -> DnaFile {
 }
 
 /// Run genesis on the source chain for testing.
-pub async fn fake_genesis(
-    vault: DbWrite<DbKindAuthored>,
-    dht_db: DbWrite<DbKindDht>,
-    keystore: MetaLairClient,
-) -> SourceChainResult<()> {
-    fake_genesis_for_agent(vault, dht_db, fake_agent_pubkey_1(), keystore).await
+///
+/// Creates a fresh, self-contained `DhtStore` for `dna_hash` and writes the
+/// genesis records directly into its source chain. Use `fake_genesis_with_store`
+/// if the resulting store needs to be shared with a workspace.
+pub async fn fake_genesis(dna_hash: DnaHash, keystore: MetaLairClient) -> SourceChainResult<()> {
+    fake_genesis_for_agent(dna_hash, fake_agent_pubkey_1(), keystore).await
 }
 
 /// Run genesis on the source chain for a specific agent for testing.
+///
+/// Creates a fresh, self-contained `DhtStore` for `dna_hash` and writes
+/// `agent`'s genesis records directly into its source chain. Use
+/// `fake_genesis_for_agent_with_store` if the resulting store needs to be
+/// shared with a workspace.
 pub async fn fake_genesis_for_agent(
-    vault: DbWrite<DbKindAuthored>,
-    dht_db: DbWrite<DbKindDht>,
+    dna_hash: DnaHash,
     agent: AgentPubKey,
     keystore: MetaLairClient,
 ) -> SourceChainResult<()> {
-    let dna = fake_dna_file("cool dna");
-    let dna_hash = dna.dna_hash().clone();
+    let dht_store = holochain_state::test_utils::test_dht_store(dna_hash.clone()).await;
 
-    source_chain::genesis(vault, dht_db.clone(), keystore, dna_hash, agent, None).await
+    source_chain::genesis(dht_store, keystore, dna_hash, agent, None).await
 }
 
-/// Force all dht ops without enough validation receipts to be published.
-pub async fn force_publish_dht_ops(
-    vault: &DbWrite<DbKindAuthored>,
-    publish_trigger: &mut TriggerSender,
-) -> DatabaseResult<()> {
-    vault
-        .write_async(|txn| {
-            DatabaseResult::Ok(txn.execute(
-                "UPDATE DhtOp SET last_publish_time = NULL WHERE receipts_complete IS NULL",
-                [],
-            )?)
-        })
-        .await?;
-    publish_trigger.trigger(&"force_publish_dht_ops");
-    Ok(())
+/// Run genesis using a caller-supplied `DhtStore`.
+///
+/// Use this when you need the same store for both genesis and a workspace so
+/// that the workspace can read the chain head written during genesis.
+pub async fn fake_genesis_with_store(
+    dna_hash: DnaHash,
+    keystore: MetaLairClient,
+    dht_store: holochain_state::DhtStore,
+) -> SourceChainResult<()> {
+    fake_genesis_for_agent_with_store(dna_hash, fake_agent_pubkey_1(), keystore, dht_store).await
+}
+
+/// Run genesis for a specific agent using a caller-supplied `DhtStore`.
+///
+/// Use this when you need the same store for both genesis and a workspace so
+/// that the workspace can read the chain head written during genesis.
+pub async fn fake_genesis_for_agent_with_store(
+    dna_hash: DnaHash,
+    agent: AgentPubKey,
+    keystore: MetaLairClient,
+    dht_store: holochain_state::DhtStore,
+) -> SourceChainResult<()> {
+    source_chain::genesis(dht_store, keystore, dna_hash, agent, None).await
 }
 
 /// Fixture of two cells running a given TestWasm

@@ -1,13 +1,19 @@
 //! The Cascade is a multi-tiered accessor for Holochain DHT data.
 //!
-//! Note that the docs for this crate are admittedly a bit *loose and imprecise*,
-//! but they are not expected to be *incorrect*.
+//! It is named "the cascade" because it performs cascading lookups across multiple sources.
+//! In general, the flow is:
+//! - Search in local storage, including the [`DhtStore`] and [`SyncScratch`].
+//! - If the data are not found locally, request the data from the network. Network responses are
+//!   cached into the [`DhtStore`]
 //!
-//! It is named "the Cascade" because it performs "cascading" gets across multiple sources.
-//! In general (but not in all cases), the flow is something like:
-//! - First attempts to read the local storage
-//! - If that fails, attempt to read data from the network cache
-//! - If that fails, do a network request for the data, caching it if found
+//! Not all lookups follow this pattern, namely links are treated differently. Where a lookup
+//! doesn't follow this pattern, it is documented in the method documentation.
+//!
+//! In order to support apps that want to be able to operate offline, a [`GetStrategy`] can be
+//! provided. Making a [`GetStrategy::Local`] request will avoid the network entirely. Making a
+//! [`GetStrategy::Network`] request will allow the cascade to go to the network, but not force it
+//! to. That means that if the requested data is available locally, the cascade won't attempt to
+//! fetch it again.
 //!
 //! ## Retrieve vs Get
 //!
@@ -20,8 +26,7 @@
 //!   "refined" form of fetching data.
 //! - "retrieve" only fetches the data if it exists, without regard to validation status.
 //!   This is a more "raw" form of fetching data.
-//!
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 
 use crate::error::CascadeError;
 use crate::get_options_ext::GetOptionsExt;
@@ -31,43 +36,22 @@ use holo_hash::AgentPubKey;
 use holo_hash::AnyDhtHash;
 use holo_hash::EntryHash;
 use holochain_p2p::actor::GetLinksRequestOptions;
-use holochain_p2p::actor::{GetActivityOptions, NetworkRequestOptions};
+use holochain_p2p::actor::{GetActivityMultiOptions, GetActivityOptions, NetworkRequestOptions};
 use holochain_p2p::{DynHolochainP2pDna, HolochainP2pError};
+use holochain_state::dht_store::DhtStore;
 use holochain_state::host_fn_workspace::HostFnStores;
 use holochain_state::host_fn_workspace::HostFnWorkspace;
-use holochain_state::mutations::insert_action;
-use holochain_state::mutations::insert_entry;
-use holochain_state::mutations::insert_op_lite;
-use holochain_state::mutations::set_validation_status;
 use holochain_state::prelude::*;
-use holochain_state::query::entry_details::GetEntryDetailsQuery;
-use holochain_state::query::link::{GetLinksFilter, GetLinksQuery};
-use holochain_state::query::link_details::GetLinkDetailsQuery;
-use holochain_state::query::live_entry::GetLiveEntryQuery;
-use holochain_state::query::live_record::GetLiveRecordQuery;
-use holochain_state::query::record_details::GetRecordDetailsQuery;
-use holochain_state::query::DbScratch;
-use holochain_state::query::PrivateDataQuery;
+use holochain_state::query::link::GetLinksFilter;
 use holochain_state::scratch::SyncScratch;
 use holochain_zome_types::prelude::{FunctionName, ZomeName};
-use metrics::cascade_fetch_error_metric;
-use metrics::create_cascade_duration_metric;
-use metrics::CascadeDurationMetric;
+use metrics::{cascade_duration_metric, cascade_fetch_error_metric};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::*;
-
-pub mod authority;
-pub mod error;
-
-mod agent_activity;
-pub mod get_options_ext;
-mod metrics;
-
-#[cfg(feature = "test_utils")]
-pub mod test_utils;
+use verify::{rejected_without_warrant, verify_activity_signatures, verify_rendered_ops_batch};
 
 /// Get an item from an option
 /// or return early from the function
@@ -85,6 +69,18 @@ macro_rules! some_or_return {
         }
     };
 }
+
+pub mod authority;
+pub mod error;
+pub mod get_options_ext;
+
+mod agent_activity;
+mod fetch;
+mod metrics;
+mod verify;
+
+#[cfg(feature = "test_utils")]
+mod mock;
 
 /// Marks whether data came from a local store or another node on the network
 #[derive(Debug, Clone)]
@@ -105,31 +101,54 @@ pub struct CascadeOptions {
     pub get_options: GetOptions,
 }
 
-/// The Cascade is a multi-tiered accessor for Holochain DHT data.
-///
-/// See the module-level docs for more info.
+/// The cascade is a multi-tiered accessor for Holochain DHT data.
 #[derive(Clone)]
 pub struct CascadeImpl {
-    authored: Option<DbRead<DbKindAuthored>>,
-    dht: Option<DbRead<DbKindDht>>,
-    cache: Option<DbWrite<DbKindCache>>,
-    scratch: Option<SyncScratch>,
+    /// The [`DhtStore`] to read data from, and write cached responses to.
+    dht_store: DhtStore,
+    /// A network handle, for requesting data from other peers.
     network: Option<DynHolochainP2pDna>,
+    /// A scratch space, for content that is has been authored but not yet written to the agent's
+    /// source chain.
+    ///
+    /// This will only be available when the cascade is used from a zome invocation that may be
+    /// authoring new records.
+    scratch: Option<SyncScratch>,
+    /// Identify the agent making the request for data, to permit looking up private data for that
+    /// agent.
     private_data: Option<Arc<AgentPubKey>>,
-    duration_metric: &'static CascadeDurationMetric,
     /// Optional zome call origin for metrics attribution.
     zome_call_origin: Option<(ZomeName, FunctionName)>,
 }
 
-impl CascadeImpl {
-    /// Add the authored env to the cascade.
-    pub fn with_authored(self, authored: DbRead<DbKindAuthored>) -> Self {
-        Self {
-            authored: Some(authored),
-            ..self
-        }
-    }
+/// Times a cascade query and records `hc.cascade.duration` on drop, so every
+/// return path of a query method (including `?` early returns) is covered.
+///
+/// Only queries with a `zome_call_origin` are recorded: the metric is
+/// attributed by `zome`/`fn`, and the origin-less cascades built by validation
+/// and the `must_get_*` host fns would otherwise emit unattributed samples.
+struct CascadeDurationGuard {
+    start: Instant,
+    /// Cloned from the cascade's `zome_call_origin`. Owned (not a `&self`
+    /// borrow) so the guard can be held across the query's `.await` points
+    /// without constraining the future's `Send`-ness.
+    zome_call_origin: Option<(ZomeName, FunctionName)>,
+}
 
+impl Drop for CascadeDurationGuard {
+    fn drop(&mut self) {
+        let Some((zome, fn_name)) = &self.zome_call_origin else {
+            return;
+        };
+        let attrs = [
+            opentelemetry::KeyValue::new("zome", zome.to_string()),
+            opentelemetry::KeyValue::new("fn", fn_name.to_string()),
+        ];
+        cascade_duration_metric().record(self.start.elapsed().as_secs_f64(), &attrs);
+    }
+}
+
+impl CascadeImpl {
     /// Set the zome call origin for metrics attribution.
     pub fn with_zome_call_origin(self, zome_name: &ZomeName, fn_name: &FunctionName) -> Self {
         Self {
@@ -146,23 +165,7 @@ impl CascadeImpl {
         }
     }
 
-    /// Add the dht env to the cascade.
-    pub fn with_dht(self, dht: DbRead<DbKindDht>) -> Self {
-        Self {
-            dht: Some(dht),
-            ..self
-        }
-    }
-
-    /// Add the cache to the cascade.
-    pub fn with_cache(self, cache: DbWrite<DbKindCache>) -> Self {
-        Self {
-            cache: Some(cache),
-            ..self
-        }
-    }
-
-    /// Add the cache to the cascade.
+    /// Add the scratch to the cascade.
     pub fn with_scratch(self, scratch: SyncScratch) -> Self {
         Self {
             scratch: Some(scratch),
@@ -170,524 +173,162 @@ impl CascadeImpl {
         }
     }
 
-    /// Add the network and cache to the cascade.
-    pub fn with_network(
-        self,
-        network: DynHolochainP2pDna,
-        cache_db: DbWrite<DbKindCache>,
-    ) -> CascadeImpl {
+    /// Add the network to the cascade.
+    pub fn with_network(self, network: DynHolochainP2pDna) -> CascadeImpl {
         CascadeImpl {
-            authored: self.authored,
-            dht: self.dht,
             scratch: self.scratch,
             private_data: self.private_data,
-            cache: Some(cache_db),
             network: Some(network),
-            duration_metric: create_cascade_duration_metric(),
+            dht_store: self.dht_store,
+
             zome_call_origin: self.zome_call_origin,
         }
     }
 
-    /// Constructs an empty [Cascade].
-    pub fn empty() -> Self {
+    /// Constructs a [Cascade] backed by the given [DhtStore].
+    pub fn empty(dht_store: DhtStore) -> Self {
         Self {
-            authored: None,
-            dht: None,
             network: None,
-            cache: None,
             scratch: None,
             private_data: None,
-            duration_metric: create_cascade_duration_metric(),
+            dht_store,
+
             zome_call_origin: None,
         }
     }
 
     /// Construct a [Cascade] with network access
-    pub fn from_workspace_and_network<AuthorDb, DhtDb>(
-        workspace: &HostFnWorkspace<AuthorDb, DhtDb>,
+    ///
+    /// Accepts a writable or read-only workspace; the cascade only reads from
+    /// the store it takes.
+    pub fn from_workspace_and_network<Db>(
+        workspace: &HostFnWorkspace<Db>,
         network: DynHolochainP2pDna,
     ) -> CascadeImpl
     where
-        AuthorDb: ReadAccess<DbKindAuthored>,
-        DhtDb: ReadAccess<DbKindDht>,
+        Db: AsRef<holochain_state::data::DbRead<holochain_state::data::Dht>>,
     {
-        let HostFnStores {
-            authored,
-            dht,
-            cache,
-            scratch,
-        } = workspace.stores();
+        let HostFnStores { scratch, dht_store } = workspace.stores();
+        let dht_store =
+            dht_store.expect("HostFnWorkspace always populates dht_store; this is a bug");
         let private_data = workspace.author();
         CascadeImpl {
-            authored: Some(authored),
-            dht: Some(dht),
-            cache: Some(cache),
             private_data,
             scratch,
             network: Some(network),
-            duration_metric: create_cascade_duration_metric(),
+            dht_store,
             zome_call_origin: None,
         }
     }
 
     /// Construct a [Cascade] with local-only access to the provided stores
     pub fn from_workspace_stores(stores: HostFnStores, author: Option<Arc<AgentPubKey>>) -> Self {
-        let HostFnStores {
-            authored,
-            dht,
-            cache,
-            scratch,
-        } = stores;
+        let HostFnStores { scratch, dht_store } = stores;
+        let dht_store =
+            dht_store.expect("HostFnWorkspace always populates dht_store; this is a bug");
         Self {
-            authored: Some(authored),
-            dht: Some(dht),
-            cache: Some(cache),
             scratch,
             network: None,
             private_data: author,
-            duration_metric: create_cascade_duration_metric(),
+            dht_store,
             zome_call_origin: None,
         }
     }
 
-    /// Getter
-    pub fn cache(&self) -> Option<&DbWrite<DbKindCache>> {
-        self.cache.as_ref()
-    }
-
-    #[allow(clippy::result_large_err)] // TODO - investigate this lint
-    fn insert_rendered_op(txn: &mut Txn<DbKindCache>, op: &RenderedOp) -> CascadeResult<()> {
-        let RenderedOp {
-            op_light,
-            op_hash,
-            action,
-            validation_status,
-        } = op;
-        let op_order = OpOrder::new(op_light.get_type(), action.action().timestamp());
-        let timestamp = action.action().timestamp();
-        insert_action(txn, action)?;
-        insert_op_lite(
-            txn,
-            op_light,
-            op_hash,
-            &op_order,
-            &timestamp,
-            // Using 0 value because this is the cache database and we only need sizes for gossip
-            // in the DHT database.
-            0,
-            todo_no_cache_transfer_data(),
-        )?;
-        if let Some(status) = validation_status {
-            set_validation_status(txn, op_hash, *status)?;
-        }
-        // We set the integrated to for the cache so it can match the
-        // same query as the vault. This can also be used for garbage collection.
-        set_when_integrated(txn, op_hash, Timestamp::now())?;
-        Ok(())
-    }
-
-    #[allow(clippy::result_large_err)] // TODO - investigate this lint
-    fn insert_rendered_ops(txn: &mut Txn<DbKindCache>, ops: &RenderedOps) -> CascadeResult<()> {
-        let RenderedOps {
-            ops,
-            entry,
-            warrant,
-        } = ops;
-
-        if let Some(warrant) = warrant {
-            let op = DhtOpHashed::from_content_sync(warrant.clone());
-            insert_op_cache(txn, &op)?;
-        }
-        if let Some(entry) = entry {
-            insert_entry(txn, entry.as_hash(), entry.as_content())?;
-        }
-        for op in ops {
-            Self::insert_rendered_op(txn, op)?;
-        }
-        Ok(())
-    }
-
-    /// Insert a set of agent activity into the Cache.
-    #[allow(clippy::result_large_err)] // TODO - investigate this lint
-    fn insert_activity(
-        txn: &mut Txn<DbKindCache>,
-        ops: Vec<RegisterAgentActivity>,
-    ) -> CascadeResult<()> {
-        for op in ops {
-            let RegisterAgentActivity {
-                action:
-                    SignedHashed {
-                        hashed: HoloHashed { content, .. },
-                        signature,
-                    },
-                ..
-            } = op;
-            let op =
-                DhtOpHashed::from_content_sync(ChainOp::RegisterAgentActivity(signature, content));
-            insert_op_cache(txn, &op)?;
-            // We set the integrated to for the cache so it can match the
-            // same query as the vault. This can also be used for garbage collection.
-            set_when_integrated(txn, op.as_hash(), Timestamp::now())?;
-        }
-        Ok(())
-    }
-
-    #[cfg_attr(feature = "instrument", tracing::instrument(skip_all))]
-    async fn merge_ops_into_cache(&self, responses: Vec<WireOps>) -> CascadeResult<()> {
-        let cache = some_or_return!(self.cache.as_ref());
-        cache
-            .write_async(|txn| {
-                for response in responses {
-                    let ops = response.render()?;
-                    Self::insert_rendered_ops(txn, &ops)?;
-                }
-                CascadeResult::Ok(())
-            })
-            .await?;
-        Ok(())
-    }
-
-    #[cfg_attr(feature = "instrument", tracing::instrument(skip_all))]
-    async fn merge_link_ops_into_cache(
-        &self,
-        responses: Vec<WireLinkOps>,
-        key: WireLinkKey,
-    ) -> CascadeResult<()> {
-        let cache = some_or_return!(self.cache.as_ref());
-        cache
-            .write_async(move |txn| {
-                for response in responses {
-                    let ops = response.render(&key)?;
-                    Self::insert_rendered_ops(txn, &ops)?;
-                }
-                CascadeResult::Ok(())
-            })
-            .await?;
-        Ok(())
-    }
-
-    /// Add new activity to the Cache.
-    #[cfg_attr(feature = "instrument", tracing::instrument(skip_all))]
-    async fn add_activity_into_cache(
-        &self,
-        responses: Vec<MustGetAgentActivityResponse>,
-    ) -> CascadeResult<MustGetAgentActivityResponse> {
-        // Choose a response from all the responses.
-        let response = if responses
-            .iter()
-            .zip(responses.iter().skip(1))
-            .all(|(a, b)| a == b)
-        {
-            // All responses are the same so we can just use the first one.
-            responses.into_iter().next()
-        } else {
-            tracing::info!(
-                "Got different must_get_agent_activity responses from different authorities"
-            );
-            // TODO: Handle conflict.
-            // For now try to find one that has got the activity
-            responses
-                .iter()
-                .find(|a| matches!(a, MustGetAgentActivityResponse::Activity { .. }))
-                .cloned()
-        };
-
-        let cache = some_or_return!(
-            self.cache.as_ref(),
-            response.unwrap_or(MustGetAgentActivityResponse::IncompleteChain)
-        );
-
-        // Commit the activity to the chain.
-        match response {
-            Some(MustGetAgentActivityResponse::Activity { activity, warrants }) => {
-                // TODO: Avoid this clone by committing the ops as references to the db.
-                cache
-                    .write_async({
-                        let activity = activity.clone();
-                        let warrants = warrants.clone();
-                        move |txn| {
-                            Self::insert_activity(txn, activity)?;
-                            for warrant in warrants {
-                                let op = DhtOpHashed::from_content_sync(warrant);
-                                insert_op_cache(txn, &op)?;
-                            }
-
-                            CascadeResult::Ok(())
-                        }
-                    })
-                    .await?;
-                Ok(MustGetAgentActivityResponse::Activity { activity, warrants })
-            }
-            Some(response) => Ok(response),
-            // Got no responses so the chain is incomplete.
-            None => Ok(MustGetAgentActivityResponse::IncompleteChain),
-        }
-    }
-
-    fn record_fetch_error(&self, fetch_type: &'static str) {
-        let mut attrs = vec![opentelemetry::KeyValue::new("fetch_type", fetch_type)];
-        if let Some((zome, fn_name)) = &self.zome_call_origin {
-            attrs.push(opentelemetry::KeyValue::new("zome", zome.to_string()));
-            attrs.push(opentelemetry::KeyValue::new("fn", fn_name.to_string()));
-        }
-        cascade_fetch_error_metric().add(1, &attrs);
-    }
-
-    /// Fetch a Record from the network, caching and returning the results
-    #[cfg_attr(feature = "instrument", tracing::instrument(skip(self, options)))]
-    pub async fn fetch_record(
-        &self,
-        hash: AnyDhtHash,
-        options: NetworkRequestOptions,
-    ) -> CascadeResult<()> {
-        let network = some_or_return!(self.network.as_ref());
-        let results = match network
-            .get(hash, options, self.zome_call_origin.clone())
-            .instrument(debug_span!("fetch_record::network_get"))
-            .await
-        {
-            Ok(ops) => ops,
-            Err(e @ HolochainP2pError::NoPeersForLocation(_, _)) => {
-                tracing::info!(?e, "No peers to fetch record from");
-                vec![]
-            }
-            Err(e) => {
-                self.record_fetch_error("record");
-                return Err(e.into());
-            }
-        };
-
-        self.merge_ops_into_cache(results).await?;
-        Ok(())
-    }
-
-    #[cfg_attr(feature = "instrument", tracing::instrument(skip(self, options)))]
-    async fn fetch_links(
-        &self,
-        link_key: WireLinkKey,
-        options: GetLinksRequestOptions,
-    ) -> CascadeResult<()> {
-        let network = some_or_return!(self.network.as_ref());
-        let results = match network
-            .get_links(link_key.clone(), options, self.zome_call_origin.clone())
-            .await
-        {
-            Ok(link_ops) => link_ops,
-            Err(e @ HolochainP2pError::NoPeersForLocation(_, _)) => {
-                tracing::debug!(?e, "No peers to fetch links from");
-                vec![]
-            }
-            Err(e) => {
-                self.record_fetch_error("links");
-                return Err(e.into());
-            }
-        };
-
-        self.merge_link_ops_into_cache(results, link_key.clone())
-            .await?;
-        Ok(())
-    }
-
-    #[cfg_attr(feature = "instrument", tracing::instrument(skip(self, options)))]
-    async fn fetch_agent_activity(
-        &self,
-        agent: AgentPubKey,
-        query: ChainQueryFilter,
-        options: GetActivityOptions,
-    ) -> CascadeResult<Vec<AgentActivityResponse>> {
-        let network = some_or_return!(self.network.as_ref(), Vec::with_capacity(0));
-        let results = match network
-            .get_agent_activity(agent, query, options, self.zome_call_origin.clone())
-            .await
-        {
-            Ok(response) => response,
-            Err(e @ HolochainP2pError::NoPeersForLocation(_, _)) => {
-                tracing::debug!(?e, "No peers to fetch agent activity from");
-                vec![]
-            }
-            Err(e) => {
-                self.record_fetch_error("agent_activity");
-                return Err(e.into());
-            }
-        };
-        Ok(results)
-    }
-
-    /// Fetch hash bounded agent activity from the network.
-    #[cfg_attr(feature = "instrument", tracing::instrument(skip(self)))]
-    async fn fetch_must_get_agent_activity(
-        &self,
-        author: AgentPubKey,
-        filter: ChainFilter,
-        options: NetworkRequestOptions,
-    ) -> CascadeResult<MustGetAgentActivityResponse> {
-        let network = some_or_return!(
-            self.network.as_ref(),
-            MustGetAgentActivityResponse::IncompleteChain
-        );
-        let results = match network
-            .must_get_agent_activity(author, filter, options, self.zome_call_origin.clone())
-            .await
-        {
-            Ok(response) => response,
-            Err(e @ HolochainP2pError::NoPeersForLocation(_, _)) => {
-                tracing::debug!(?e, "No peers to fetch agent activity from");
-                vec![]
-            }
-            Err(e) => {
-                self.record_fetch_error("must_get_agent_activity");
-                return Err(e.into());
-            }
-        };
-
-        self.add_activity_into_cache(results).await
-    }
-
-    /// Get transactions for available databases.
-    async fn get_txn_guards(&self) -> CascadeResult<Vec<PTxnGuard>> {
-        let mut conns: Vec<_> = Vec::with_capacity(3);
-        if let Some(cache) = &self.cache {
-            conns.push(cache.get_read_txn().await?);
-        }
-        if let Some(dht) = &self.dht {
-            conns.push(dht.get_read_txn().await?);
-        }
-        if let Some(authored) = &self.authored {
-            conns.push(authored.get_read_txn().await?);
-        }
-        Ok(conns)
-    }
-
-    async fn cascading<Q>(&self, query: Q) -> CascadeResult<Q::Output>
-    where
-        Q: Query<Item = Judged<SignedActionHashed>> + Send + 'static,
-        <Q as Query>::Output: Send + 'static,
-    {
-        let start = Instant::now();
-        let mut txn_guards = self.get_txn_guards().await?;
-        let scratch = self.scratch.clone();
-        // TODO We may already be on a blocking thread here because this is accessible from a zome call. Ideally we'd have
-        //      a way to check this situation and avoid spawning a new thread if we're already on an appropriate thread.
-        let results = tokio::task::spawn_blocking(move || {
-            let mut txns = Vec::with_capacity(txn_guards.len());
-            for conn in &mut txn_guards {
-                // TODO The transaction does not actually start here. We're asking for a deferred transaction which is the
-                //      right thing to do, but SQLite won't launch that until we do a read operation. If we want a stricter
-                //      'point in time' view across databases it might make sense to issue a lightweight read op to each txn here?
-                let txn = conn.transaction()?;
-                txns.push(txn);
-            }
-            let txns_ref: Vec<_> = txns.iter().collect();
-            let results = match scratch {
-                Some(scratch) => scratch
-                    .apply_and_then(|scratch| query.run(DbScratch::new(&txns_ref, scratch)))?,
-                None => query.run(Txns::from(&txns_ref[..]))?,
-            };
-            CascadeResult::Ok(results)
-        })
-        .await??;
-
-        let mut attributes = Vec::new();
-        if let Some((zome_name, fn_name)) = &self.zome_call_origin {
-            attributes.push(opentelemetry::KeyValue::new("zome", zome_name.to_string()));
-            attributes.push(opentelemetry::KeyValue::new("fn", fn_name.to_string()));
-        }
-        self.duration_metric
-            .record(start.elapsed().as_secs_f64(), &attributes);
-
-        Ok(results)
-    }
-
-    /// Search through the stores and return the first non-none result.
-    async fn find_map<F, T>(&self, mut f: F) -> CascadeResult<Option<T>>
-    where
-        T: Send + 'static,
-        F: FnMut(&dyn Store) -> CascadeResult<Option<T>> + Send + Clone + 'static,
-    {
-        if let Some(cache) = self.cache.clone() {
-            let r = cache
-                .read_async({
-                    let mut f = f.clone();
-                    move |raw_txn| f(&CascadeTxnWrapper::from(raw_txn))
-                })
-                .await?;
-
-            if r.is_some() {
-                return Ok(r);
-            }
-        }
-
-        if let Some(dht) = self.dht.clone() {
-            let r = dht
-                .read_async({
-                    let mut f = f.clone();
-                    move |raw_txn| f(&CascadeTxnWrapper::from(raw_txn))
-                })
-                .await?;
-
-            if r.is_some() {
-                return Ok(r);
-            }
-        }
-
-        if let Some(authored) = self.authored.clone() {
-            let r = authored
-                .read_async({
-                    let mut f = f.clone();
-                    move |raw_txn| f(&CascadeTxnWrapper::from(raw_txn))
-                })
-                .await?;
-
-            if r.is_some() {
-                return Ok(r);
-            }
-        }
-
-        if let Some(scratch) = &self.scratch {
-            let r = scratch.apply_and_then(|scratch| f(scratch))?;
-
-            if r.is_some() {
-                return Ok(r);
-            }
-        }
-
-        Ok(None)
-    }
-
-    /// Get Entry data along with all CRUD actions associated with it.
+    /// Get an [`EntryDetails`], by its [`EntryHash`], which contains entry data along with all CRUD
+    /// actions associated with it.
     ///
-    /// Also returns Rejected actions, which may affect the interpreted validity status of this Entry.
+    /// Also returns rejected actions, which may affect the interpreted validity status of this
+    /// [`Entry`].
     #[cfg_attr(feature = "instrument", tracing::instrument(skip(self, options)))]
     pub async fn get_entry_details(
         &self,
         entry_hash: EntryHash,
         options: CascadeOptions,
     ) -> CascadeResult<Option<EntryDetails>> {
-        let query: GetEntryDetailsQuery = self.construct_query_with_data_access(entry_hash.clone());
+        let _guard = self.time_cascade();
+        let author = self.private_data.as_ref().map(|a| a.as_ref());
+        let scratch = self.local_scratch();
+        let read = self.dht_store.as_read();
 
-        self.get_latest_with_query(query, entry_hash.into(), options)
-            .await
+        if options.get_options.strategy() == GetStrategy::Network {
+            let authoring = self.am_i_authoring(&entry_hash.clone().into())?;
+            let authority = self.am_i_an_authority(entry_hash.clone().into()).await?;
+            if !(authoring || authority) {
+                match self
+                    .fetch_record(entry_hash.clone().into(), options.network_request_options)
+                    .await
+                {
+                    Ok(_) => (),
+                    Err(CascadeError::NetworkError(
+                        e @ HolochainP2pError::NoPeersForLocation(_, _),
+                    )) => {
+                        tracing::debug!(?e, "No peers to fetch record from");
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        Ok(read
+            .get_entry_details_with_scratch(&entry_hash, author, &scratch)
+            .await?)
     }
 
-    /// Get the specified Record along with all Updates and Deletes associated with it.
+    /// Get a [`RecordDetails`], by its [`ActionHash`], which contains a [`Record`] along with all
+    /// updates and deletes associated with it.
     ///
-    /// Can return a Rejected Record.
+    /// Can return a rejected record.
     #[cfg_attr(feature = "instrument", tracing::instrument(skip(self, options)))]
     pub async fn get_record_details(
         &self,
         action_hash: ActionHash,
         options: CascadeOptions,
     ) -> CascadeResult<Option<RecordDetails>> {
-        let query: GetRecordDetailsQuery =
-            self.construct_query_with_data_access(action_hash.clone());
+        let _guard = self.time_cascade();
+        let author = self.private_data.as_ref().map(|a| a.as_ref());
+        let scratch = self.local_scratch();
+        let read = self.dht_store.as_read();
 
-        self.get_latest_with_query(query, action_hash.into(), options)
-            .await
+        if options.get_options.strategy() == GetStrategy::Network {
+            let authoring = self.am_i_authoring(&action_hash.clone().into())?;
+            let authority = self.am_i_an_authority(action_hash.clone().into()).await?;
+            if !(authoring || authority) {
+                match self
+                    .fetch_record(action_hash.clone().into(), options.network_request_options)
+                    .await
+                {
+                    Ok(_) => (),
+                    Err(CascadeError::NetworkError(
+                        e @ HolochainP2pError::NoPeersForLocation(_, _),
+                    )) => {
+                        tracing::debug!(?e, "No peers to fetch record from");
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        Ok(read
+            .get_record_details_with_scratch(&action_hash, author, &scratch)
+            .await?)
+    }
+
+    /// Return a `SyncScratch` for use in DhtStore overlay reads.
+    ///
+    /// When the cascade has a scratch attached, that scratch is returned.
+    /// Otherwise an empty scratch is returned so that the `*_with_scratch`
+    /// methods on `DhtStoreRead` can be called unconditionally.
+    fn local_scratch(&self) -> SyncScratch {
+        self.scratch
+            .clone()
+            .unwrap_or_else(|| Scratch::new().into_sync())
     }
 
     /// Returns the [Record] for this [ActionHash] if it is live
     /// by getting the latest available metadata from authorities
     /// combined with this agents authored data.
+    ///
     /// _Note: Deleted actions are a tombstone set_
     #[cfg_attr(feature = "instrument", tracing::instrument(skip(self, options)))]
     pub async fn dht_get_action(
@@ -695,14 +336,46 @@ impl CascadeImpl {
         action_hash: ActionHash,
         options: GetOptions,
     ) -> CascadeResult<Option<Record>> {
-        let query: GetLiveRecordQuery = self.construct_query_with_data_access(action_hash.clone());
-
+        let _guard = self.time_cascade();
         // DESIGN: we can short circuit if we have any local deletes on an action.
         // Is this bad because we will not go back to the network until our
         // cache is cleared. Could someone create an attack based on this fact?
+        let author = self.private_data.as_ref().map(|a| a.as_ref());
+        let scratch = self.local_scratch();
+        let read = self.dht_store.as_read();
 
-        self.get_local_first_with_query(query, action_hash.into(), options)
-            .await
+        // Local read via DhtStore overlay.
+        if let Some(record) = read
+            .get_live_record_with_scratch(&action_hash, author, &scratch)
+            .await?
+        {
+            return Ok(Some(record));
+        }
+
+        if options.strategy() == GetStrategy::Network {
+            let authoring = self.am_i_authoring(&action_hash.clone().into())?;
+            let authority = self.am_i_an_authority(action_hash.clone().into()).await?;
+            if !(authoring || authority) {
+                match self
+                    .fetch_record(action_hash.clone().into(), options.to_network_options())
+                    .await
+                {
+                    Ok(_) => (),
+                    Err(CascadeError::NetworkError(
+                        e @ HolochainP2pError::NoPeersForLocation(_, _),
+                    )) => {
+                        tracing::debug!(?e, "No peers to fetch record from");
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            // Re-read after network fetch.
+            return Ok(read
+                .get_live_record_with_scratch(&action_hash, author, &scratch)
+                .await?);
+        }
+
+        Ok(None)
     }
 
     /// Returns the oldest live [Record] for this [EntryHash] by getting the
@@ -713,65 +386,25 @@ impl CascadeImpl {
         entry_hash: EntryHash,
         options: GetOptions,
     ) -> CascadeResult<Option<Record>> {
-        let query: GetLiveEntryQuery = self.construct_query_with_data_access(entry_hash.clone());
+        let _guard = self.time_cascade();
+        let author = self.private_data.as_ref().map(|a| a.as_ref());
+        let scratch = self.local_scratch();
+        let read = self.dht_store.as_read();
 
-        self.get_local_first_with_query(query, entry_hash.into(), options)
-            .await
-    }
-
-    async fn get_local_first_with_query<Q, O>(
-        &self,
-        query: Q,
-        get_target: AnyDhtHash,
-        options: GetOptions,
-    ) -> CascadeResult<Q::Output>
-    where
-        Q: Query<Item = Judged<SignedActionHashed>, Output = Option<O>> + Send + 'static,
-        O: Send + 'static,
-    {
-        // Try to get the record from our databases first.
-        if let Some(record) = self.cascading(query.clone()).await? {
+        // Local read via DhtStore overlay.
+        if let Some(record) = read
+            .get_live_entry_with_scratch(&entry_hash, author, &scratch)
+            .await?
+        {
             return Ok(Some(record));
         }
 
         if options.strategy() == GetStrategy::Network {
-            // If we are allowed to get the data from the network then try to retrieve the missing data.
-            self.get_latest_with_query(
-                query,
-                get_target,
-                CascadeOptions {
-                    network_request_options: options.to_network_options(),
-                    get_options: options,
-                },
-            )
-            .await
-        } else {
-            // We're not allowed to get the data from the network, and it's not stored locally so
-            // just return None.
-            Ok(None)
-        }
-    }
-
-    async fn get_latest_with_query<Q, O>(
-        &self,
-        query: Q,
-        get_target: AnyDhtHash,
-        options: CascadeOptions,
-    ) -> CascadeResult<Q::Output>
-    where
-        Q: Query<Item = Judged<SignedActionHashed>, Output = Option<O>> + Send + 'static,
-        O: Send + 'static,
-    {
-        // If we are allowed to get the data from the network then try to retrieve the latest data.
-        if options.get_options.strategy() == GetStrategy::Network {
-            // If we are not in the process of authoring this hash or its
-            // authority we need a network call.
-            let authoring = self.am_i_authoring(&get_target)?;
-            let authority = self.am_i_an_authority(get_target.clone().into()).await?;
+            let authoring = self.am_i_authoring(&entry_hash.clone().into())?;
+            let authority = self.am_i_an_authority(entry_hash.clone().into()).await?;
             if !(authoring || authority) {
-                // Fetch the data if there is anyone to fetch it from.
                 match self
-                    .fetch_record(get_target, options.network_request_options)
+                    .fetch_record(entry_hash.clone().into(), options.to_network_options())
                     .await
                 {
                     Ok(_) => (),
@@ -780,16 +413,16 @@ impl CascadeImpl {
                     )) => {
                         tracing::debug!(?e, "No peers to fetch record from");
                     }
-                    Err(e) => {
-                        return Err(e);
-                    }
+                    Err(e) => return Err(e),
                 }
             }
+            // Re-read after network fetch.
+            return Ok(read
+                .get_live_entry_with_scratch(&entry_hash, author, &scratch)
+                .await?);
         }
 
-        // Either the cache was updated by the network fetch, or just get what was already
-        // available from the cache.
-        self.cascading(query).await
+        Ok(None)
     }
 
     /// Perform a concurrent `get` on multiple hashes simultaneously, returning
@@ -870,6 +503,7 @@ impl CascadeImpl {
         key: WireLinkKey,
         options: GetLinksRequestOptions,
     ) -> CascadeResult<Vec<Link>> {
+        let _guard = self.time_cascade();
         // only fetch links from the network if I am not an authority and
         // GetStrategy is Network
         if let GetStrategy::Network = options.get_options.strategy() {
@@ -889,18 +523,24 @@ impl CascadeImpl {
             }
         }
 
-        let query = GetLinksQuery::new(
-            key.base,
-            key.type_query,
-            key.tag,
-            GetLinksFilter {
-                after: key.after,
-                before: key.before,
-                author: key.author,
-            },
-        );
+        let filter = GetLinksFilter {
+            after: key.after,
+            before: key.before,
+            author: key.author,
+        };
 
-        self.cascading(query).await
+        let scratch = self.local_scratch();
+        Ok(self
+            .dht_store
+            .as_read()
+            .get_links_with_scratch(
+                &key.base,
+                &key.type_query,
+                key.tag.as_ref(),
+                &filter,
+                &scratch,
+            )
+            .await?)
     }
 
     /// Return all CreateLink actions and DeleteLink actions ordered by time.
@@ -910,6 +550,7 @@ impl CascadeImpl {
         key: WireLinkKey,
         options: GetLinksRequestOptions,
     ) -> CascadeResult<Vec<(SignedActionHashed, Vec<SignedActionHashed>)>> {
+        let _guard = self.time_cascade();
         // only fetch link details from network if i am not an authority and
         // GetStrategy is Network
         if let GetStrategy::Network = options.get_options.strategy() {
@@ -928,13 +569,18 @@ impl CascadeImpl {
                 }
             }
         }
-        let query = GetLinkDetailsQuery::new(key.base, key.type_query, key.tag);
-        self.cascading(query).await
+        let scratch = self.local_scratch();
+        Ok(self
+            .dht_store
+            .as_read()
+            .get_link_details_with_scratch(&key.base, &key.type_query, key.tag.as_ref(), &scratch)
+            .await?)
     }
 
     /// Count the number of links matching the `query`.
     #[cfg_attr(feature = "instrument", tracing::instrument(skip(self, query)))]
     pub async fn dht_count_links(&self, query: WireLinkQuery) -> CascadeResult<usize> {
+        let _guard = self.time_cascade();
         let mut links = HashSet::<ActionHash>::new();
         if !self.am_i_an_authority(query.base.clone()).await? {
             if let Some(network) = &self.network {
@@ -961,15 +607,19 @@ impl CascadeImpl {
             }
         }
 
-        let get_links_query = GetLinksQuery::new(
-            query.base.clone(),
-            query.link_type.clone(),
-            query.tag_prefix.clone(),
-            query.into(),
-        );
+        let filter = GetLinksFilter::from(query.clone());
 
+        let scratch = self.local_scratch();
         links.extend(
-            self.cascading(get_links_query)
+            self.dht_store
+                .as_read()
+                .get_links_with_scratch(
+                    &query.base,
+                    &query.link_type,
+                    query.tag_prefix.as_ref(),
+                    &filter,
+                    &scratch,
+                )
                 .await?
                 .into_iter()
                 .map(|l| l.create_link_hash),
@@ -978,83 +628,57 @@ impl CascadeImpl {
         Ok(links.len())
     }
 
-    /// Request a hash bounded chain query.
+    /// Request the chain of agent activity for an author, bounded by a given [`ChainFilter`]
     pub async fn must_get_agent_activity(
         &self,
         author: AgentPubKey,
         filter: ChainFilter,
         options: NetworkRequestOptions,
     ) -> CascadeResult<MustGetAgentActivityResponse> {
-        // Get the available databases.
-        let mut txn_guards = self.get_txn_guards().await?;
-        let scratch = self.scratch.clone();
-
-        // For each store try to get the bounded activity.
-        let results = tokio::task::spawn_blocking({
-            let author = author.clone();
-            let filter = filter.clone();
-            let scratch = scratch.clone();
-            move || {
-                let mut results = Vec::with_capacity(txn_guards.len() + 1);
-                for txn_guard in &mut txn_guards {
-                    let txn = txn_guard.transaction()?;
-                    let r = match &scratch {
-                        Some(scratch) => {
-                            scratch.apply_and_then(|scratch| {
-                                authority::get_agent_activity_query::must_get_agent_activity::get_bounded_activity(&txn, Some(scratch), &author, filter.clone())
-                            })?
-                        }
-                        None => authority::get_agent_activity_query::must_get_agent_activity::get_bounded_activity(&txn, None, &author, filter.clone())?
-                    };
-                    results.push(r);
-                }
-                CascadeResult::Ok(results)
-            }
-        })
-            .await??;
-
-        let merged_response =
-            holochain_types::chain::merge_bounded_agent_activity_responses(results);
-        let result =
-            authority::get_agent_activity_query::must_get_agent_activity::filter_then_check(
-                merged_response,
-            );
-
-        // Short circuit if we have a result.
-        if matches!(result, MustGetAgentActivityResponse::Activity { .. }) {
-            return Ok(result);
+        let _guard = self.time_cascade();
+        // Validate ChainFilter take is not zero.
+        if filter.get_take() == Some(0) {
+            return Err(CascadeError::InvalidInput(
+                "ChainFilter take must be greater than 0".to_string(),
+            ));
         }
 
-        // If we are the authority then don't go to the network.
-        let i_am_authority = self.am_i_an_authority(author.clone().into()).await?;
-        if i_am_authority {
-            // If I am an authority and I didn't get a result before
-            // this point then the chain is incomplete for this request.
-            Ok(MustGetAgentActivityResponse::IncompleteChain)
-        } else {
-            let result = self
-                .fetch_must_get_agent_activity(author.clone(), filter, options)
-                .await?;
-            // Add warrants received from the network to the scratch space to be written
-            // to the DHT database.
-            if let MustGetAgentActivityResponse::Activity { warrants, .. } = &result {
-                if let Some(scratch) = scratch {
-                    if let Err(err) = scratch.apply(|scratch| {
-                        for warrant in warrants.iter() {
-                            scratch.add_warrant(SignedWarrant::new(
-                                warrant.data().clone(),
-                                warrant.signature().clone(),
-                            ));
-                        }
-                    }) {
-                        tracing::warn!(
-                            ?err,
-                            "Failed to add warrants from network response to scratch"
-                        );
-                    }
-                }
+        // DhtStore path: local read with scratch overlay.
+        let local_scratch = self.local_scratch();
+        let local_result = self
+            .dht_store
+            .as_read()
+            .must_get_agent_activity_with_scratch(&author, &filter, &local_scratch)
+            .await?;
+
+        // If complete, return immediately.
+        if matches!(local_result, MustGetAgentActivityResponse::Activity { .. }) {
+            return Ok(local_result);
+        }
+
+        // If no network or we are an authority, return the local (incomplete) result.
+        if self.network.is_none() || self.am_i_an_authority(author.clone().into()).await? {
+            return Ok(local_result);
+        }
+
+        // Not complete and not an authority: try the network.
+        // `fetch_must_get_agent_activity` writes the network response into the
+        // DhtStore cache via `add_activity_into_cache`; we then re-read so the
+        // freshly cached data is merged into the result.
+        match self
+            .fetch_must_get_agent_activity(author.clone(), filter.clone(), options)
+            .await
+        {
+            Ok(_) => Ok(self
+                .dht_store
+                .as_read()
+                .must_get_agent_activity_with_scratch(&author, &filter, &local_scratch)
+                .await?),
+            Err(CascadeError::NetworkError(e @ HolochainP2pError::NoPeersForLocation(_, _))) => {
+                tracing::debug!(?e, "No peers to fetch must_get_agent_activity from");
+                Ok(local_result)
             }
-            Ok(result)
+            Err(e) => Err(e),
         }
     }
 
@@ -1084,6 +708,7 @@ impl CascadeImpl {
         query: ChainQueryFilter,
         options: GetActivityOptions,
     ) -> CascadeResult<AgentActivityResponse> {
+        let _guard = self.time_cascade();
         let status_only = !(options.include_valid_activity || options.include_rejected_activity);
 
         // If we're an authority then we allow local queries. This means we consider ourselves an authority
@@ -1092,31 +717,28 @@ impl CascadeImpl {
         // regardless of authority status.
         let authority = self.am_i_an_authority(agent.clone().into()).await?;
 
-        let merged_response = if authority && options.get_options.strategy() == GetStrategy::Local {
-            match self.dht.clone() {
-                Some(vault) => {
-                    authority::handle_get_agent_activity(
-                        vault,
-                        agent.clone(),
-                        query.clone(),
-                        (&options).into(),
-                    )
-                    .await?
-                }
-                None => {
-                    info!("Unable to get agent activity because this cascade does not have DHT access");
-                    agent_activity::merge_activities(
-                        agent.clone(),
-                        &options,
-                        Vec::with_capacity(0),
-                    )?
-                }
-            }
+        let merged_response = if options.get_options.strategy() == GetStrategy::Local {
+            // Local read via the DhtStore scratch overlay (no network needed).
+            // This path is taken whether or not we're an authority for the
+            // agent, so a self-read during a zome call returns the same result
+            // either way — including authored-but-uncommitted activity held in
+            // the scratch, which the authority serving path does not overlay.
+            let dht_options = holochain_state::dht_store::GetAgentActivityOptions {
+                include_valid_activity: options.include_valid_activity,
+                include_rejected_activity: options.include_rejected_activity,
+                include_warrants: options.include_warrants,
+                include_full_records: options.include_full_records,
+            };
+            let scratch = self.local_scratch();
+            self.dht_store
+                .as_read()
+                .get_agent_activity_with_scratch(&agent, &query, &dht_options, &scratch)
+                .await?
         } else {
+            // Network path: fetch from peers and merge.
             let results = self
                 .fetch_agent_activity(agent.clone(), query.clone(), options.clone())
                 .await?;
-
             let merged_response: AgentActivityResponse =
                 agent_activity::merge_activities(agent.clone(), &options, results)?;
 
@@ -1185,6 +807,29 @@ impl CascadeImpl {
         Ok(r)
     }
 
+    /// Get agent activity from multiple authorities, returning each
+    /// peer's response independently, paired with the responding peer.
+    ///
+    /// This is a network-only call: responses are not merged, not
+    /// overlaid with local state, and not written to any store, leaving
+    /// callers free to apply their own cross-peer agreement rules. Fails
+    /// with [`CascadeError::NetworkNotInitialized`] when the cascade has
+    /// no network, and with an insufficient-responses error when fewer
+    /// than `options.required_responses` peers answer with data in time.
+    #[cfg_attr(
+        feature = "instrument",
+        tracing::instrument(skip(self, agent, query, options))
+    )]
+    pub async fn get_agent_activity_multi(
+        &self,
+        agent: AgentPubKey,
+        query: ChainQueryFilter,
+        options: GetActivityMultiOptions,
+    ) -> CascadeResult<Vec<(AgentPubKey, AgentActivityResponse)>> {
+        let _guard = self.time_cascade();
+        self.fetch_agent_activity_multi(agent, query, options).await
+    }
+
     /// Looks through a [ChainItems] object and fills in any missing entry data.
     ///
     /// For any [RecordEntry::NotStored] entries, this function will attempt to fetch the entry data
@@ -1202,7 +847,9 @@ impl CascadeImpl {
             ChainItems::Full(records) => records
                 .iter()
                 .filter_map(|r| match r.entry {
-                    RecordEntry::NotStored => r.action().entry_hash().map(|h| h.clone().into()),
+                    RecordEntry::NotStored => {
+                        r.action().data.entry_hash().map(|h| h.clone().into())
+                    }
                     _ => None,
                 })
                 .collect(),
@@ -1225,8 +872,8 @@ impl CascadeImpl {
                 .iter()
                 .filter_map(|r| match r {
                     Some(r) => r
-                        .signed_action()
                         .action()
+                        .data
                         .entry_hash()
                         .map(|entry_hash| (entry_hash, &r.entry)),
                     None => None,
@@ -1237,7 +884,7 @@ impl CascadeImpl {
                 ChainItems::Full(records) => {
                     for record in records.iter_mut() {
                         if let RecordEntry::NotStored = record.entry {
-                            if let Some(entry_hash) = record.action().entry_hash() {
+                            if let Some(entry_hash) = record.action().data.entry_hash() {
                                 if let Some(entry) = entry_lookup.get(entry_hash) {
                                     record.entry = (*entry).clone();
                                 }
@@ -1255,7 +902,6 @@ impl CascadeImpl {
         Ok(chain_items)
     }
 
-    #[allow(clippy::result_large_err)] // TODO - investigate this lint
     fn am_i_authoring(&self, hash: &AnyDhtHash) -> CascadeResult<bool> {
         let scratch = some_or_return!(self.scratch.as_ref(), false);
         Ok(scratch.apply_and_then(|scratch| scratch.contains_hash(hash))?)
@@ -1265,18 +911,9 @@ impl CascadeImpl {
         let network = some_or_return!(self.network.as_ref(), false);
         Ok(network.authority_for_hash(hash).await?)
     }
-
-    /// Construct a query with private data access if this cascade has been
-    /// constructed with private data access.
-    fn construct_query_with_data_access<H, Q: PrivateDataQuery<Hash = H>>(&self, hash: H) -> Q {
-        match self.private_data.clone() {
-            Some(author) => Q::with_private_data_access(hash, author),
-            None => Q::without_private_data_access(hash),
-        }
-    }
 }
 
-/// TODO
+/// A trait for accessing the cascade which can be mocked.
 #[async_trait::async_trait]
 #[cfg_attr(feature = "test_utils", mockall::automock)]
 pub trait Cascade {
@@ -1319,35 +956,24 @@ impl Cascade for CascadeImpl {
         hash: EntryHash,
         options: NetworkRequestOptions,
     ) -> CascadeResult<Option<(EntryHashed, CascadeSource)>> {
-        let private_data = self.private_data.clone();
-        let result = self
-            .find_map({
-                let hash = hash.clone();
-                move |store| {
-                    Ok(store.get_public_or_authored_entry(
-                        &hash,
-                        private_data.as_ref().map(|a| a.as_ref()),
-                    )?)
-                }
-            })
-            .await?;
-        if result.is_some() {
-            return Ok(result.map(|e| (EntryHashed::from_content_sync(e), CascadeSource::Local)));
+        let author = self.private_data.as_ref().map(|a| a.as_ref());
+        let scratch = self.local_scratch();
+        let read = self.dht_store.as_read();
+
+        if let Some(entry) = read
+            .retrieve_entry_with_scratch(&hash, author, &scratch)
+            .await?
+        {
+            return Ok(Some((
+                EntryHashed::from_content_sync(entry),
+                CascadeSource::Local,
+            )));
         }
         self.fetch_record(hash.clone().into(), options).await?;
 
         // Check if we have the data now after the network call.
-        let private_data = self.private_data.clone();
-        let result = self
-            .find_map({
-                let hash = hash.clone();
-                move |store| {
-                    Ok(store.get_public_or_authored_entry(
-                        &hash,
-                        private_data.as_ref().map(|a| a.as_ref()),
-                    )?)
-                }
-            })
+        let result = read
+            .retrieve_entry_with_scratch(&hash, author, &scratch)
             .await?;
         Ok(result.map(|e| (EntryHashed::from_content_sync(e), CascadeSource::Network)))
     }
@@ -1357,26 +983,17 @@ impl Cascade for CascadeImpl {
         hash: ActionHash,
         options: NetworkRequestOptions,
     ) -> CascadeResult<Option<(SignedActionHashed, CascadeSource)>> {
-        let result = self
-            .find_map({
-                let hash = hash.clone();
-                move |store| Ok(store.get_action(&hash)?)
-            })
-            .await?;
-        if result.is_some() {
-            return Ok(result.map(|a| (a, CascadeSource::Local)));
+        let scratch = self.local_scratch();
+        let read = self.dht_store.as_read();
+
+        if let Some(sah) = read.retrieve_action_with_scratch(&hash, &scratch).await? {
+            return Ok(Some((sah, CascadeSource::Local)));
         }
         self.fetch_record(hash.clone().into(), options).await?;
 
         // Check if we have the data now after the network call.
-        let result = self
-            .find_map(move |store| {
-                Ok(store
-                    .get_action(&hash)?
-                    .map(|a| (a, CascadeSource::Network)))
-            })
-            .await?;
-        Ok(result)
+        let result = read.retrieve_action_with_scratch(&hash, &scratch).await?;
+        Ok(result.map(|a| (a, CascadeSource::Network)))
     }
 
     async fn retrieve_public_record(
@@ -1384,98 +1001,40 @@ impl Cascade for CascadeImpl {
         hash: AnyDhtHash,
         options: NetworkRequestOptions,
     ) -> CascadeResult<Option<(Record, CascadeSource)>> {
-        let result = self
-            .find_map({
-                let hash = hash.clone();
-                move |store| Ok(store.get_public_record(&hash)?)
-            })
-            .await?;
-        if result.is_some() {
-            return Ok(result.map(|r| (r, CascadeSource::Local)));
+        // The DhtStore retrieve_record_with_scratch takes &ActionHash; dispatch on
+        // hash type.  In practice all callers pass an ActionHash, but the trait
+        // signature accepts AnyDhtHash so we must handle both.
+        if let holo_hash::AnyDhtHashPrimitive::Action(action_hash) = hash.clone().into_primitive() {
+            let author = self.private_data.as_ref().map(|a| a.as_ref());
+            let scratch = self.local_scratch();
+            let read = self.dht_store.as_read();
+
+            if let Some(record) = read
+                .retrieve_record_with_scratch(&action_hash, author, &scratch)
+                .await?
+            {
+                return Ok(Some((record, CascadeSource::Local)));
+            }
+            self.fetch_record(hash.clone(), options).await?;
+
+            // Check if we have the data now after the network call.
+            let result = read
+                .retrieve_record_with_scratch(&action_hash, author, &scratch)
+                .await?;
+            return Ok(result.map(|r| (r, CascadeSource::Network)));
         }
+
+        // EntryHash variant: no DhtStore path available, fetch from network.
         self.fetch_record(hash.clone(), options).await?;
-
-        // Check if we have the data now after the network call.
-        let result = self
-            .find_map(move |store| Ok(store.get_public_record(&hash)?))
-            .await?;
-        Ok(result.map(|r| (r, CascadeSource::Network)))
+        Ok(None)
     }
 }
 
-#[cfg(feature = "test_utils")]
-impl MockCascade {
-    /// Construct a mock which acts as if the given records were part of local storage
-    pub fn with_records(records: Vec<Record>) -> Self {
-        let mut cascade = Self::default();
+/// Tests that wiring `CascadeImpl` onto a `DhtStore` + scratch correctly exposes
+/// scratch-only content through the requester-read methods.
+#[cfg(all(test, feature = "test_utils"))]
+mod dht_store_scratch_overlay_tests;
 
-        let map: HashMap<AnyDhtHash, Record> = records
-            .into_iter()
-            .flat_map(|r| {
-                let mut items = vec![(r.action_address().clone().into(), r.clone())];
-                if let Some(eh) = r.action().entry_hash() {
-                    items.push((eh.clone().into(), r))
-                }
-                items
-            })
-            .collect();
-
-        let map0 = Arc::new(parking_lot::Mutex::new(map));
-
-        let map = map0.clone();
-        cascade
-            .expect_retrieve_public_record()
-            .returning(move |hash, _| {
-                let m = map.lock();
-                let result = m.get(&hash).map(|r| (r.clone(), CascadeSource::Local));
-                Box::pin(async move { Ok(result) })
-            });
-
-        let map = map0.clone();
-        cascade.expect_retrieve_action().returning(move |hash, _| {
-            let m = map.lock();
-            let result = m
-                .get(&hash.into())
-                .map(|r| (r.signed_action().clone(), CascadeSource::Local));
-            Box::pin(async move { Ok(result) })
-        });
-
-        let map = map0;
-        cascade.expect_retrieve_entry().returning(move |hash, _| {
-            let m = map.lock();
-            let result = m.get(&hash.into()).map(|r| {
-                (
-                    EntryHashed::from_content_sync(r.entry().as_option().unwrap().clone()),
-                    CascadeSource::Local,
-                )
-            });
-            Box::pin(async move { Ok(result) })
-        });
-
-        cascade
-    }
-}
-
-#[tokio::test]
-async fn test_mock_cascade_with_records() {
-    use ::fixt::fixt;
-    let records = vec![fixt!(Record), fixt!(Record), fixt!(Record)];
-    let cascade = MockCascade::with_records(records.clone());
-    let opts = NetworkRequestOptions::default();
-    let (r0, _) = cascade
-        .retrieve_public_record(records[0].action_address().clone().into(), opts.clone())
-        .await
-        .unwrap()
-        .unwrap();
-    let (r1, _) = cascade
-        .retrieve_public_record(records[1].action_address().clone().into(), opts.clone())
-        .await
-        .unwrap()
-        .unwrap();
-    let (r2, _) = cascade
-        .retrieve_public_record(records[2].action_address().clone().into(), opts)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(records, vec![r0, r1, r2]);
-}
+/// Tests for the `get_agent_activity_multi` network passthrough.
+#[cfg(all(test, feature = "test_utils"))]
+mod agent_activity_multi_tests;

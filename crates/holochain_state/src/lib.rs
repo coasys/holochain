@@ -1,9 +1,9 @@
 //! The Holochain state crate provides helpers and abstractions for working
-//! with the `holochain_sqlite` crate.
+//! with Holochain's persistent data stores.
 //!
 //! ## Reads
-//! The main abstraction for creating data read queries is the [`Query`](crate::query::Query) trait.
-//! This can be implemented to make constructing complex queries easier.
+//! The [`DhtStore`] and [`DhtStoreRead`] types are the main abstractions for
+//! reading data, combining database access with the in-memory scratch space.
 //!
 //! The [`source_chain`] module provides the [`SourceChain`](crate::source_chain::SourceChain) type,
 //! which is the abstraction for working with chains of actions.
@@ -11,8 +11,7 @@
 //! The [`host_fn_workspace`] module provides abstractions for reading data during workflows.
 //!
 //! ## Writes
-//! The [`mutations`] module is the complete set of functions
-//! for writing data to sqlite in holochain.
+//! The [`mutations`] module provides error types for state write operations.
 //!
 //! ## In-memory
 //! The [`scratch`] module provides the [`Scratch`](crate::scratch::Scratch) type for
@@ -20,19 +19,29 @@
 //!
 //! The SourceChain type uses the Scratch for in-memory operations which
 //! can be flushed to the database.
-//!
-//! The Query trait allows combining arbitrary database SQL queries with
-//! the scratch space so reads can union across the database and in-memory data.
 
-pub mod block;
+pub use dht_store::{DhtStore, DhtStoreRead};
+
+/// Re-exports from the `holochain_data` crate.
+pub mod data {
+    pub use holochain_data::{
+        conductor::AppInterfaceModel, kind::*, open_db, DatabaseIdentifier, DbKey, DbRead,
+        DbSyncLevel, DbWrite, HolochainDataConfig,
+    };
+
+    #[cfg(feature = "test_utils")]
+    pub use holochain_data::test_open_db;
+}
+
 pub mod chain_lock;
+pub mod conductor;
+pub mod dht_store;
 #[allow(missing_docs)]
 pub mod dna_def;
 pub mod entry_def;
 pub mod host_fn_workspace;
-pub mod integrate;
 pub mod mutations;
-pub mod nonce;
+pub mod peer_metadata_store;
 #[allow(missing_docs)]
 pub mod prelude;
 pub mod query;
@@ -41,8 +50,6 @@ pub mod scratch;
 #[allow(missing_docs)]
 pub mod source_chain;
 pub mod validation_db;
-pub mod validation_receipts;
-pub mod warrant;
 #[allow(missing_docs)]
 pub mod wasm;
 

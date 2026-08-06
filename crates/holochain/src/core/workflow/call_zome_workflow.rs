@@ -2,6 +2,7 @@ use super::app_validation_workflow;
 use super::app_validation_workflow::AppValidationError;
 use super::app_validation_workflow::Outcome;
 use super::error::WorkflowResult;
+use super::sys_validation_workflow::counterfeit_check_authored_record;
 use super::sys_validation_workflow::sys_validate_record;
 use crate::conductor::api::CellConductorApi;
 use crate::conductor::api::CellConductorApiT;
@@ -9,7 +10,7 @@ use crate::conductor::ConductorHandle;
 use crate::core::queue_consumer::TriggerSender;
 use crate::core::ribosome::error::RibosomeResult;
 use crate::core::ribosome::guest_callback::post_commit::send_post_commit;
-use crate::core::ribosome::RibosomeT;
+use crate::core::ribosome::Ribosome;
 use crate::core::ribosome::ZomeCallHostAccess;
 use crate::core::ribosome::ZomeCallInvocation;
 use crate::core::workflow::WorkflowError;
@@ -19,7 +20,7 @@ use holochain_state::host_fn_workspace::SourceChainWorkspace;
 use holochain_state::prelude::IncompleteCommitReason;
 use holochain_state::source_chain::SourceChainError;
 use holochain_types::prelude::*;
-use holochain_zome_types::record::Record;
+use holochain_zome_types::prelude::Record;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -31,8 +32,8 @@ mod validation_test;
 /// Placeholder for the return value of a zome invocation
 pub type ZomeCallResult = RibosomeResult<ZomeCallResponse>;
 
-pub struct CallZomeWorkflowArgs<RibosomeT> {
-    pub ribosome: RibosomeT,
+pub struct CallZomeWorkflowArgs {
+    pub ribosome: Ribosome,
     pub invocation: ZomeCallInvocation,
     pub signal_tx: broadcast::Sender<Signal>,
     pub conductor_handle: ConductorHandle,
@@ -42,25 +43,23 @@ pub struct CallZomeWorkflowArgs<RibosomeT> {
 
 #[cfg_attr(feature = "instrument", tracing::instrument(skip_all))]
 #[allow(clippy::too_many_arguments)]
-pub async fn call_zome_workflow<Ribosome>(
+pub async fn call_zome_workflow(
     workspace: SourceChainWorkspace,
     network: DynHolochainP2pDna,
     keystore: MetaLairClient,
-    args: CallZomeWorkflowArgs<Ribosome>,
+    args: CallZomeWorkflowArgs,
     trigger_validate_dht_ops: TriggerSender,
     trigger_integrate_dht_ops: TriggerSender,
+    trigger_publish_dht_ops: TriggerSender,
     trigger_countersigning: TriggerSender,
-) -> WorkflowResult<ZomeCallResult>
-where
-    Ribosome: RibosomeT + 'static,
-{
+) -> WorkflowResult<ZomeCallResult> {
     let coordinator_zome = args
         .ribosome
-        .dna_def_hashed()
+        .dna_def()
         .get_coordinator_zome(args.invocation.zome.zome_name())
         .or_else(|_| {
             args.ribosome
-                .dna_def_hashed()
+                .dna_def()
                 .get_integrity_zome(args.invocation.zome.zome_name())
                 .map(CoordinatorZome::from)
         })
@@ -106,9 +105,18 @@ where
                             }
                         }
                         None => {
-                            // Newly created data must be integrated.
-                            // Publishing will be triggered after integration completes.
+                            // Newly authored data is integrated directly at
+                            // flush, so it is ready to publish immediately.
+                            // Trigger integration (for any dependent ops) and
+                            // publish directly.
                             trigger_integrate_dht_ops.trigger(&"call_zome_workflow");
+                            trigger_publish_dht_ops.trigger(&"call_zome_workflow");
+                            // Authored ops integrate at flush, bypassing the
+                            // integration workflow, so record their integration
+                            // metrics here.
+                            crate::core::metrics::record_authored_op_integration(
+                                &network.dna_hash(),
+                            );
                         }
                     }
 
@@ -140,16 +148,13 @@ where
     Ok(result)
 }
 
-async fn call_zome_workflow_inner<Ribosome>(
+async fn call_zome_workflow_inner(
     workspace: SourceChainWorkspace,
     network: DynHolochainP2pDna,
     keystore: MetaLairClient,
-    args: CallZomeWorkflowArgs<Ribosome>,
+    args: CallZomeWorkflowArgs,
     trigger_countersigning: TriggerSender,
-) -> WorkflowResult<ZomeCallResult>
-where
-    Ribosome: RibosomeT + 'static,
-{
+) -> WorkflowResult<ZomeCallResult> {
     let CallZomeWorkflowArgs {
         ribosome,
         invocation,
@@ -238,14 +243,11 @@ where
 /// the zome function.
 /// Then send to a background thread and
 /// call the zome function.
-pub async fn call_zome_function_authorized<R>(
-    ribosome: R,
+pub async fn call_zome_function_authorized(
+    ribosome: Ribosome,
     host_access: ZomeCallHostAccess,
     invocation: ZomeCallInvocation,
-) -> WorkflowResult<(R, RibosomeResult<ZomeCallResponse>)>
-where
-    R: RibosomeT + 'static,
-{
+) -> WorkflowResult<(Ribosome, RibosomeResult<ZomeCallResponse>)> {
     match invocation
         .is_authorized(&host_access)
         .await
@@ -268,15 +270,12 @@ where
 }
 
 /// Run validation inline and wait for the result.
-pub async fn inline_validation<Ribosome>(
+pub async fn inline_validation(
     workspace: SourceChainWorkspace,
     network: DynHolochainP2pDna,
     conductor_handle: ConductorHandle,
     ribosome: Ribosome,
-) -> WorkflowResult<()>
-where
-    Ribosome: RibosomeT + 'static,
-{
+) -> WorkflowResult<()> {
     let cascade = Arc::new(holochain_cascade::CascadeImpl::from_workspace_and_network(
         &workspace,
         network.clone(),
@@ -289,6 +288,11 @@ where
         let mut to_app_validate: Vec<Record> = Vec::with_capacity(scratch_records.len());
         // Loop forwards through all the new records
         for record in scratch_records {
+            // Verifies the signature over the record's action content.
+            counterfeit_check_authored_record(&record)
+                .await
+                .or_else(|outcome_or_err| outcome_or_err.into_workflow_error())?;
+
             sys_validate_record(&record, cascade.clone())
                 .await
                 // If the was en error exit
@@ -332,7 +336,7 @@ where
 
 fn op_to_record(op: Op, omitted_entry: Option<Entry>) -> Record {
     match op {
-        Op::StoreRecord(StoreRecord { mut record }) => {
+        Op::CreateRecord(CreateRecord { mut record }) => {
             if let Some(e) = omitted_entry {
                 // NOTE: this is only possible in this situation because we already removed
                 // this exact entry from this Record earlier. DON'T set entries on records
@@ -341,29 +345,30 @@ fn op_to_record(op: Op, omitted_entry: Option<Entry>) -> Record {
             }
             record
         }
-        Op::StoreEntry(StoreEntry { action, entry }) => {
-            Record::new(SignedActionHashed::raw_from_same_hash(action), Some(entry))
+        Op::CreateEntry(CreateEntry { action, entry }) => {
+            record_from_signed_action(action, Some(entry))
         }
-        Op::RegisterUpdate(RegisterUpdate {
+        Op::Update(Update {
             update, new_entry, ..
-        }) => Record::new(SignedActionHashed::raw_from_same_hash(update), new_entry),
-        Op::RegisterDelete(RegisterDelete { delete, .. }) => Record::new(
-            SignedActionHashed::raw_from_same_hash(delete),
-            omitted_entry,
-        ),
-        Op::RegisterAgentActivity(RegisterAgentActivity { action, .. }) => Record::new(
-            SignedActionHashed::raw_from_same_hash(action),
-            omitted_entry,
-        ),
-        Op::RegisterCreateLink(RegisterCreateLink { create_link, .. }) => Record::new(
-            SignedActionHashed::raw_from_same_hash(create_link),
-            omitted_entry,
-        ),
-        Op::RegisterDeleteLink(RegisterDeleteLink { delete_link, .. }) => Record::new(
-            SignedActionHashed::raw_from_same_hash(delete_link),
-            omitted_entry,
-        ),
+        }) => record_from_signed_action(update, new_entry),
+        Op::Delete(Delete { delete, .. }) => record_from_signed_action(delete, omitted_entry),
+        Op::AgentActivity(AgentActivity { action, .. }) => {
+            record_from_signed_action(action, omitted_entry)
+        }
+        Op::CreateLink(CreateLink { create_link, .. }) => {
+            record_from_signed_action(create_link, omitted_entry)
+        }
+        Op::DeleteLink(DeleteLink { delete_link, .. }) => {
+            record_from_signed_action(delete_link, omitted_entry)
+        }
     }
+}
+
+/// Builds a [`Record`] from a signed action, deriving the [`RecordEntry`]
+/// classification from the action's entry visibility.
+fn record_from_signed_action(signed_action: SignedActionHashed, entry: Option<Entry>) -> Record {
+    let visibility = signed_action.hashed.content.entry_visibility().copied();
+    Record::new(signed_action, RecordEntry::new(visibility.as_ref(), entry))
 }
 
 fn map_outcome(outcome: Result<Outcome, AppValidationError>) -> WorkflowResult<()> {

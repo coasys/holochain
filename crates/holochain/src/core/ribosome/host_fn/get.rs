@@ -1,8 +1,7 @@
 use crate::core::ribosome::host_fn::cascade_from_call_context;
-use crate::core::ribosome::CallContext;
+use crate::core::ribosome::{CallContext, Ribosome};
 use crate::core::ribosome::HostFnAccess;
 use crate::core::ribosome::RibosomeError;
-use crate::core::ribosome::RibosomeT;
 use futures::StreamExt;
 use holochain_types::prelude::*;
 use holochain_wasmer_host::prelude::*;
@@ -11,7 +10,7 @@ use wasmer::RuntimeError;
 
 #[cfg_attr(feature = "instrument", tracing::instrument(skip(_ribosome, call_context), fields(?call_context.zome, function = ?call_context.function_name)))]
 pub fn get(
-    _ribosome: Arc<impl RibosomeT>,
+    _ribosome: Arc<Ribosome>,
     call_context: Arc<CallContext>,
     inputs: Vec<GetInput>,
 ) -> Result<Vec<Option<Record>>, RuntimeError> {
@@ -78,7 +77,7 @@ pub mod slow_tests {
     use crate::sweettest::{SweetConductorBatch, SweetConductorConfig, SweetDnaFile};
     use holo_hash::ActionHash;
     use holochain_wasm_test_utils::TestWasm;
-    use holochain_zome_types::record::Record;
+    use holochain_zome_types::prelude::Record;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn get_action_entry_local_only() {

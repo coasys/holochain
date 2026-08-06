@@ -1,8 +1,7 @@
 use crate::core::ribosome::error::RibosomeError;
 use crate::core::ribosome::host_fn::cascade_from_call_context;
-use crate::core::ribosome::CallContext;
 use crate::core::ribosome::HostFnAccess;
-use crate::core::ribosome::RibosomeT;
+use crate::core::ribosome::{CallContext, Ribosome};
 use holochain_cascade::error::CascadeResult;
 use holochain_types::prelude::*;
 use holochain_wasmer_host::prelude::*;
@@ -11,7 +10,7 @@ use wasmer::RuntimeError;
 
 #[allow(clippy::extra_unused_lifetimes)]
 pub fn delete_link<'a>(
-    _ribosome: Arc<impl RibosomeT>,
+    _ribosome: Arc<Ribosome>,
     call_context: Arc<CallContext>,
     input: DeleteLinkInput,
 ) -> Result<ActionHash, RuntimeError> {
@@ -49,9 +48,9 @@ pub fn delete_link<'a>(
 
             let base_address = match maybe_add_link {
                 Some(add_link_signed_action_hash) => {
-                    match add_link_signed_action_hash.action() {
-                        Action::CreateLink(link_add_action) => {
-                            Ok(link_add_action.base_address.clone())
+                    match &add_link_signed_action_hash.hashed.content.data {
+                        ActionData::CreateLink(CreateLinkData { base_address, .. }) => {
+                            Ok(base_address.clone())
                         }
                         // the add link action hash provided was found but didn't point to an AddLink
                         // action (it is something else) so we cannot proceed
@@ -80,12 +79,12 @@ pub fn delete_link<'a>(
 
             // add a DeleteLink to the source chain
             tokio_helper::block_forever_on(async move {
-                let action_builder = builder::DeleteLink {
-                    link_add_address: address,
+                let action_data = ActionData::DeleteLink(DeleteLinkData {
                     base_address,
-                };
+                    link_add_address: address,
+                });
                 let action_hash = source_chain
-                    .put(action_builder, None, chain_top_ordering)
+                    .put(action_data, None, chain_top_ordering)
                     .await
                     .map_err(|source_chain_error| -> RuntimeError {
                         wasm_error!(WasmErrorInner::Host(source_chain_error.to_string())).into()

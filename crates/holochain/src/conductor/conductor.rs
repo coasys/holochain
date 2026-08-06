@@ -26,14 +26,11 @@
 //! // conductors are cloneable
 //! let conductor2 = conductor.clone();
 //!
-//! assert_eq!(conductor.list_dna_hashes(), vec![]);
+//! assert!(conductor.list_dna_hashes().await.unwrap().is_empty());
 //! conductor.shutdown();
 //!
 //! }
 //! ```
-
-/// Name of the wasm cache folder within the data root directory.
-pub const WASM_CACHE: &str = "wasm-cache";
 
 pub use self::share::RwShare;
 use super::api::error::ConductorApiError;
@@ -50,9 +47,6 @@ use super::manager::TaskManagerResult;
 use super::ribosome_store::RibosomeStore;
 use super::space::Space;
 use super::space::Spaces;
-use super::state::AppInterfaceConfig;
-use super::state::AppInterfaceId;
-use super::state::ConductorState;
 use super::CellError;
 use super::{api::AdminInterfaceApi, manager::TaskManagerClient};
 use crate::conductor::cell::Cell;
@@ -67,8 +61,8 @@ use crate::core::queue_consumer::QueueTriggers;
 use crate::core::ribosome::guest_callback::post_commit::PostCommitArgs;
 use crate::core::ribosome::guest_callback::post_commit::POST_COMMIT_CHANNEL_BOUND;
 use crate::core::ribosome::guest_callback::post_commit::POST_COMMIT_CONCURRENT_LIMIT;
-use crate::core::ribosome::real_ribosome::ModuleCacheLock;
-use crate::core::ribosome::RibosomeT;
+use crate::core::ribosome::real_ribosome::module_cache::ModuleCache;
+use crate::core::ribosome::real_ribosome::WasmBackend;
 use crate::core::workflow::ZomeCallResult;
 use crate::{
     conductor::api::error::ConductorApiResult, core::ribosome::real_ribosome::RealRibosome,
@@ -80,30 +74,29 @@ use futures::future::TryFutureExt;
 use futures::stream::StreamExt;
 use holo_hash::{DnaHash, DnaHashB64};
 use holochain_conductor_api::conductor::KeystoreConfig;
+use holochain_conductor_api::state::AppInterfaceConfig;
+use holochain_conductor_api::state::AppInterfaceId;
+use holochain_conductor_api::state::ConductorState;
 use holochain_conductor_api::AppInfo;
 use holochain_conductor_api::AppStatusFilter;
-use holochain_conductor_api::FullIntegrationStateDump;
 use holochain_conductor_api::FullStateDump;
 use holochain_conductor_api::IntegrationStateDump;
 use holochain_conductor_api::PeerMetaInfo;
+use holochain_conductor_api::{
+    DhtOpsCursor, FullIntegrationStateDump, OpTimingsCursor, OpTimingsDump, SourceChainCursor,
+};
 use holochain_keystore::lair_keystore::spawn_lair_keystore;
 use holochain_keystore::lair_keystore::spawn_lair_keystore_in_proc;
 use holochain_keystore::MetaLairClient;
 use holochain_p2p::HolochainP2pDnaT;
-use holochain_sqlite::sql::sql_cell::state_dump;
 use holochain_state::host_fn_workspace::SourceChainWorkspace;
-use holochain_state::nonce::witness_nonce;
-use holochain_state::nonce::WitnessNonceResult;
 use holochain_state::prelude::*;
 use holochain_state::source_chain;
 pub use holochain_types::share;
-#[cfg(feature = "wasmer_sys")]
-use holochain_wasmer_host::module::ModuleCache;
 use holochain_zome_types::prelude::{AppCapGrantInfo, ClonedCell, Signature, Timestamp};
 use indexmap::IndexMap;
 use itertools::Itertools;
 use kitsune2_api::AgentInfoSigned;
-use rusqlite::Transaction;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -173,6 +166,13 @@ pub struct Conductor {
     /// Placeholder for what will be the real DNA/Wasm cache
     ribosome_store: RwShare<RibosomeStore>,
 
+    /// Store for inline zomes.
+    ///
+    // TOOD ideally this would live on the sweet conductor and the Ribosome implementation would
+    //      be injected.
+    #[cfg(feature = "test_utils")]
+    pub(crate) inline_zome_store: crate::core::ribosome::inline_ribosome::InlineZomeStore,
+
     /// Access to private keys for signing and encryption.
     keystore: MetaLairClient,
 
@@ -183,16 +183,14 @@ pub struct Conductor {
 
     scheduler: Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 
-    /// Cache for wasmer modules, both on disk and in memory.
+    /// The WASM backend that is in use for this conductor.
+    wasm_backend: WasmBackend,
+
+    /// Cache for wasmer modules, both in the database and in memory.
     ///
     /// This cache serves as a central storage location for wasmer modules,
-    /// shared across all ribosomes. The cache is optional and can be disabled by
-    /// setting it to `None`.
-    ///
-    /// Note: When using the `wasmer_wamr` feature, it's recommended to disable
-    /// this cache since modules are interpreted at runtime rather than compiled,
-    /// making caching unnecessary.
-    pub(crate) wasmer_module_cache: Option<Arc<ModuleCacheLock>>,
+    /// shared across all ribosomes
+    pub(crate) wasmer_module_cache: Arc<ModuleCache>,
 
     app_auth_token_store: RwShare<AppAuthTokenStore>,
 
@@ -228,6 +226,8 @@ mod startup_shutdown_impls {
     use super::*;
     use crate::conductor::manager::{spawn_task_outcome_handler, OutcomeReceiver, OutcomeSender};
     use crate::conductor::metrics::register_uptime_metric;
+    use crate::core::ribosome::real_ribosome::module_cache::make_module_cache;
+    use crate::core::ribosome::real_ribosome::WasmBackend;
 
     //-----------------------------------------------------------------------------
     /// Methods used by the [ConductorHandle]
@@ -242,17 +242,47 @@ mod startup_shutdown_impls {
             spaces: Spaces,
             post_commit: tokio::sync::mpsc::Sender<PostCommitArgs>,
             outcome_sender: OutcomeSender,
+            #[cfg(feature = "test_utils")]
+            inline_zome_store: crate::core::ribosome::inline_ribosome::InlineZomeStore,
         ) -> Self {
             let tracing_scope = config.tracing_scope().unwrap_or_default();
-            let maybe_data_root_path = config.data_root_path.clone().map(|path| (*path).clone());
 
-            if let Some(path) = &maybe_data_root_path {
-                let mut path = path.clone();
-                path.push(WASM_CACHE);
+            let wasm_backend = match &config.wasm_backend {
+                Some(wasm_backend) => match wasm_backend {
+                    holochain_conductor_api::conductor::WasmBackend::Cranelift => {
+                        #[cfg(not(feature = "wasmer-sys-cranelift"))]
+                        panic!("Conductor is configured to use the Cranelift WASM backend but this binary does not support it");
 
-                // best effort to ensure the cache dir exists if configured
-                let _ = std::fs::create_dir_all(&path);
-            }
+                        #[cfg(feature = "wasmer-sys-cranelift")]
+                        WasmBackend::Cranelift
+                    }
+                    holochain_conductor_api::conductor::WasmBackend::Llvm => {
+                        #[cfg(not(feature = "wasmer-sys-llvm"))]
+                        panic!("Conductor is configured to use the LLVM WASM backend but this binary does not support it");
+
+                        #[cfg(feature = "wasmer-sys-llvm")]
+                        WasmBackend::Llvm
+                    }
+                    holochain_conductor_api::conductor::WasmBackend::Wasmi => {
+                        #[cfg(not(feature = "wasmer-wasmi"))]
+                        panic!("Conductor is configured to use the wasmi WASM backend but this binary does not support it");
+
+                        #[cfg(feature = "wasmer-wasmi")]
+                        WasmBackend::Wasmi
+                    }
+                },
+                None => {
+                    cfg_select! {
+                        feature = "wasmer-sys-cranelift" => WasmBackend::Cranelift,
+                        feature = "wasmer-wasmi" => WasmBackend::Wasmi,
+                        feature = "wasmer-sys-llvm" => WasmBackend::Llvm,
+                    }
+                }
+            };
+            info!("Using the {wasm_backend:?} WASM backend");
+
+            let wasmer_module_cache =
+                Arc::new(make_module_cache(wasm_backend, spaces.wasm_store.clone()));
 
             let nr = network_events::NetworkEventHandle::new(1000);
             let network_state = nr.network_state();
@@ -267,15 +297,13 @@ mod startup_shutdown_impls {
                 admin_websocket_ports: RwShare::new(Vec::new()),
                 scheduler: Arc::new(parking_lot::Mutex::new(None)),
                 ribosome_store,
+                #[cfg(feature = "test_utils")]
+                inline_zome_store,
                 keystore,
                 holochain_p2p,
                 post_commit,
-                #[cfg(feature = "wasmer_sys")]
-                wasmer_module_cache: Some(Arc::new(ModuleCacheLock::new(ModuleCache::new(
-                    maybe_data_root_path.map(|p| p.join(WASM_CACHE)),
-                )))),
-                #[cfg(feature = "wasmer_wamr")]
-                wasmer_module_cache: None,
+                wasm_backend,
+                wasmer_module_cache,
                 app_auth_token_store: RwShare::default(),
                 app_broadcast: AppBroadcast::default(),
                 network_events: nr,
@@ -335,7 +363,7 @@ mod startup_shutdown_impls {
             admin_configs: Vec<AdminInterfaceConfig>,
         ) -> ConductorResult<()> {
             // Load the wasms and dna defs from the database and populate the RibosomeStore
-            self.load_ribosomes().await?;
+            self.load_wasms_into_ribosomes().await?;
 
             info!("Conductor startup: Ribosomes loaded.");
 
@@ -537,23 +565,44 @@ mod interface_impls {
 /// DNA-related methods
 mod dna_impls {
     use super::*;
+    use crate::core::ribosome::Ribosome;
 
     impl Conductor {
-        /// Get the list of hashes of installed Dnas in this Conductor
-        pub fn list_dna_hashes(&self) -> HashSet<DnaHash> {
-            self.ribosome_store().share_ref(|ds| ds.list_dna_hashes())
+        /// Get the list of hashes of all installed DNAs in this Conductor.
+        ///
+        /// This reads from the DNA definition store rather than the in-memory
+        /// ribosome store. Ribosomes are loaded on demand, so the in-memory
+        /// store may hold only a partial set (for example, the ribosomes of
+        /// disabled or awaiting-memproof apps are not loaded). The database is
+        /// the authoritative record of every registered and installed DNA.
+        pub async fn list_dna_hashes(&self) -> ConductorResult<HashSet<DnaHash>> {
+            Ok(self
+                .spaces
+                .dna_def_store
+                .as_read()
+                .list_dna_hashes()
+                .await?)
         }
 
         /// Get a [`DnaDef`] from the [`RibosomeStore`]
-        pub fn get_dna_def(&self, cell_id: &CellId) -> Option<DnaDef> {
+        pub fn get_dna_def(&self, cell_id: &CellId) -> Option<DnaDefHashed> {
             self.ribosome_store()
                 .share_ref(|ds| ds.get_dna_def(cell_id))
         }
 
-        /// Get a [`DnaFile`] from the [`RibosomeStore`]
-        pub fn get_dna_file(&self, cell_id: &CellId) -> Option<DnaFile> {
-            self.ribosome_store()
-                .share_ref(|ds| ds.get_dna_file(cell_id))
+        /// Get a [`DnaDefHashed`] from the DNA definition store.
+        ///
+        /// Unlike [`Conductor::get_dna_def`], which reads the in-memory ribosome
+        /// store, this reads from the database — the authoritative record of
+        /// every registered and installed DNA — so it also resolves DNAs whose
+        /// ribosomes are not currently loaded (for example, disabled or
+        /// awaiting-memproof apps). This keeps `GetDnaDefinition` consistent with
+        /// `ListDnas`.
+        pub async fn get_dna_definition(
+            &self,
+            cell_id: &CellId,
+        ) -> ConductorResult<Option<DnaDefHashed>> {
+            Ok(self.spaces.dna_def_store.as_read().get(cell_id).await?)
         }
 
         /// Get an [`EntryDef`] from the [`EntryDefBufferKey`]
@@ -563,35 +612,19 @@ mod dna_impls {
 
         /// Create a hash map of all existing DNA definitions, mapped to cell
         /// ids.
-        pub fn get_dna_definitions(
+        pub async fn get_dna_definitions(
             &self,
             app: &InstalledApp,
         ) -> ConductorResult<IndexMap<CellId, DnaDefHashed>> {
             let mut dna_defs = IndexMap::new();
             for cell_id in app.all_cells() {
-                let ribosome = self.get_ribosome(&cell_id)?;
-                let dna_def_hashed = ribosome.dna_def_hashed();
-                dna_defs.insert(cell_id.to_owned(), dna_def_hashed.to_owned());
+                let def = match self.spaces.dna_def_store.as_read().get(&cell_id).await? {
+                    Some(def) => def,
+                    None => return Err(ConductorError::DnaDefMissing(cell_id)),
+                };
+                dna_defs.insert(cell_id.to_owned(), def.to_owned());
             }
             Ok(dna_defs)
-        }
-
-        pub(crate) async fn register_dna_wasm(
-            &self,
-            cell_id: CellId,
-            ribosome: RealRibosome,
-        ) -> ConductorResult<Vec<(EntryDefBufferKey, EntryDef)>> {
-            let is_full_wasm_dna = ribosome
-                .dna_def_hashed()
-                .all_zomes()
-                .all(|(_, zome_def)| matches!(zome_def, ZomeDef::Wasm(_)));
-
-            // Only install wasm if the DNA is composed purely of WasmZomes (no InlineZomes)
-            if is_full_wasm_dna {
-                Ok(self.put_wasm_and_defs(cell_id, ribosome).await?)
-            } else {
-                Ok(Vec::with_capacity(0))
-            }
         }
 
         pub(crate) fn register_dna_entry_defs(
@@ -602,94 +635,90 @@ mod dna_impls {
                 .share_mut(|d| d.add_entry_defs(entry_defs));
         }
 
-        pub(crate) fn add_ribosome_to_store(&self, cell_id: CellId, ribosome: RealRibosome) {
+        pub(crate) fn add_ribosome_to_store(&self, cell_id: CellId, ribosome: Ribosome) {
             self.ribosome_store
                 .share_mut(|d| d.add_ribosome(cell_id, ribosome));
         }
 
-        pub(crate) async fn load_wasms_into_dna_files(
-            &self,
-        ) -> ConductorResult<(
-            impl IntoIterator<Item = (CellId, RealRibosome)>,
-            impl IntoIterator<Item = (EntryDefBufferKey, EntryDef)>,
-        )> {
+        pub(crate) async fn load_wasms_into_ribosomes(&self) -> ConductorResult<()> {
             // Get all installed cells from conductor state
             let state = self.get_state().await?;
-            let all_cells: Vec<CellId> = state
-                .installed_apps()
-                .values()
-                .flat_map(|app| app.all_cells())
-                .collect();
+
+            let enabled_apps: Vec<_> = state.enabled_apps().map(|(_, app)| app.clone()).collect();
+            for enabled_app in enabled_apps {
+                self.load_wasms_into_ribosome_for_app(&enabled_app).await?;
+            }
+
+            Ok(())
+        }
+
+        pub(crate) async fn load_wasms_into_ribosome_for_app(
+            &self,
+            installed_app: &InstalledApp,
+        ) -> ConductorResult<()> {
+            let all_cells: Vec<CellId> = installed_app.all_cells().collect();
 
             // Retrieve DNA definitions from wasm database
             let mut dna_defs_with_cell_id = Vec::new();
             for cell_id in all_cells {
-                if let Some(cell_dna_tuple) =
-                    self.spaces.dna_def_store.as_read().get(&cell_id).await?
-                {
-                    dna_defs_with_cell_id.push(cell_dna_tuple);
-                }
+                let def = match self.spaces.dna_def_store.as_read().get(&cell_id).await? {
+                    Some(def) => def,
+                    None => return Err(ConductorError::DnaDefMissing(cell_id)),
+                };
+                dna_defs_with_cell_id.push((cell_id, def));
             }
 
-            // Gather all the unique wasm hashes.
-            let unique_wasm_hashes = dna_defs_with_cell_id
-                .iter()
-                .flat_map(|(_cell_id, dna_def)| {
-                    dna_def
-                        .all_zomes()
-                        .map(|(zome_name, zome)| Ok(zome.wasm_hash(zome_name)?))
-                })
-                .collect::<ConductorResult<HashSet<_>>>()?;
-
-            // Get the code for each unique wasm.
-            let mut wasms_and_hashes = HashMap::new();
-            for wasm_hash in unique_wasm_hashes {
-                let wasm_hashed = self
-                    .spaces
-                    .wasm_store
-                    .as_read()
-                    .get(&wasm_hash)
-                    .await?
-                    .ok_or(ConductorError::WasmMissing)?;
-                wasms_and_hashes.insert(wasm_hash, wasm_hashed.into_content());
-            }
-
-            let dna_defs_with_wasms = dna_defs_with_cell_id
-                .into_iter()
-                .map(|(cell_id, dna_def)| {
-                    // Load all wasms for each dna_def from the wasm db into memory
-                    let wasms = dna_def.all_zomes().filter_map(|(zome_name, zome)| {
-                        let wasm_hash = zome.wasm_hash(zome_name).ok()?;
-                        // Note this is a cheap arc clone.
-                        wasms_and_hashes.get(&wasm_hash).cloned()
-                    });
-                    let wasms = wasms.collect::<Vec<_>>();
-                    ((cell_id, dna_def), wasms)
-                })
-                // This needs to happen due to the environment not being Send
-                .collect::<Vec<_>>();
             let entry_defs = self.spaces.entry_def_store.as_read().get_all().await?;
 
             // try to join all the tasks and return the list of dna files
             let ribosomes_with_cell_id_future =
-                dna_defs_with_wasms
+                dna_defs_with_cell_id
                     .into_iter()
-                    .map(|((cell_id, dna_def), wasms)| async move {
-                        let dna_file = DnaFile::new(dna_def, wasms).await;
+                    .map(|(cell_id, dna_def_hashed)| {
+                        #[cfg(feature = "test_utils")]
+                        let inline_zome_store = self.inline_zome_store.clone();
+                        async move {
+                            #[cfg(feature = "test_utils")]
+                            {
+                                let all_inline = dna_def_hashed
+                                    .all_zomes()
+                                    .into_iter()
+                                    .all(|z| matches!(z.1, ZomeDef::Inline(_)));
 
-                        #[cfg(feature = "wasmer_sys")]
-                        let ribosome =
-                            RealRibosome::new(dna_file, self.wasmer_module_cache.clone()).await?;
-                        #[cfg(feature = "wasmer_wamr")]
-                        let ribosome = RealRibosome::new(dna_file, None).await?;
+                                if all_inline {
+                                    let ribosome =
+                                        crate::core::ribosome::inline_ribosome::InlineRibosome::new(
+                                            dna_def_hashed.clone(),
+                                            inline_zome_store,
+                                        );
+                                    return ConductorResult::Ok((
+                                        cell_id,
+                                        Ribosome::new(dna_def_hashed, ribosome).await?,
+                                    ));
+                                }
+                            }
 
-                        ConductorResult::Ok((cell_id, ribosome))
+                            let ribosome = RealRibosome::new(
+                                self.wasm_backend,
+                                dna_def_hashed.clone(),
+                                self.wasmer_module_cache.clone(),
+                            )
+                            .await?;
+                            let ribosome = Ribosome::new(dna_def_hashed, ribosome).await?;
+
+                            ConductorResult::Ok((cell_id, ribosome))
+                        }
                     });
 
             let ribosomes_with_cell_id =
                 futures::future::try_join_all(ribosomes_with_cell_id_future).await?;
 
-            Ok((ribosomes_with_cell_id, entry_defs))
+            self.ribosome_store().share_mut(|ds| {
+                ds.add_ribosomes(ribosomes_with_cell_id);
+                ds.add_entry_defs(entry_defs);
+            });
+
+            Ok(())
         }
 
         /// Get the root environment directory.
@@ -730,53 +759,31 @@ mod dna_impls {
         pub(crate) async fn put_wasm_and_defs(
             &self,
             cell_id: CellId,
-            ribosome: RealRibosome,
+            ribosome: Ribosome,
         ) -> ConductorResult<Vec<(EntryDefBufferKey, EntryDef)>> {
-            let dna_def = ribosome.dna_def_hashed().clone();
-            let code = ribosome.dna_file().code().clone().into_values();
+            let dna_def = ribosome.dna_def().clone();
             let zome_defs = get_entry_defs(ribosome).await?;
-            self.put_code_and_defs_in_databases(cell_id, dna_def, code, zome_defs)
+            self.put_defs_in_databases(cell_id, dna_def, zome_defs)
                 .await
         }
 
         #[cfg_attr(feature = "instrument", tracing::instrument(skip_all))]
-        pub(crate) async fn put_code_and_defs_in_databases(
+        pub(crate) async fn put_defs_in_databases(
             &self,
             cell_id: CellId,
             dna_def_hashed: DnaDefHashed,
-            code: impl Iterator<Item = wasm::DnaWasm>,
             zome_defs: Vec<(EntryDefBufferKey, EntryDef)>,
         ) -> ConductorResult<Vec<(EntryDefBufferKey, EntryDef)>> {
-            // TODO: PERF: This loop might be slow
-            let wasms = futures::future::join_all(code.map(DnaWasmHashed::from_content)).await;
-
-            let wasm_read = self.spaces.wasm_store.as_read();
-            for wasm in wasms {
-                if !wasm_read.contains(wasm.as_hash()).await? {
-                    self.spaces.wasm_store.put(wasm).await?;
-                }
-            }
-
             for (key, entry_def) in zome_defs.clone() {
                 self.spaces.entry_def_store.put(key, &entry_def).await?;
             }
 
             self.spaces
                 .dna_def_store
-                .put(&cell_id, &dna_def_hashed.into_content())
+                .put(cell_id.agent_pubkey(), &dna_def_hashed.into_content())
                 .await?;
 
             Ok(zome_defs)
-        }
-
-        #[cfg_attr(feature = "instrument", tracing::instrument(skip_all))]
-        pub(crate) async fn load_ribosomes(&self) -> ConductorResult<()> {
-            let (ribosomes, entry_defs) = self.load_wasms_into_dna_files().await?;
-            self.ribosome_store().share_mut(|ds| {
-                ds.add_ribosomes(ribosomes);
-                ds.add_entry_defs(entry_defs);
-            });
-            Ok(())
         }
 
         /// Install a [`DnaFile`] in this Conductor
@@ -791,10 +798,53 @@ mod dna_impls {
                 return Ok(());
             }
 
-            let ribosome = RealRibosome::new(dna_file, self.wasmer_module_cache.clone()).await?;
+            // Store the WASM code for this DNA. Makes the code available to the `RealRibosome` to
+            // load on demand.
+            for (hash, code) in dna_file.code() {
+                if !self.spaces.wasm_store.as_read().contains(hash).await? {
+                    self.spaces
+                        .wasm_store
+                        .put(DnaWasmHashed::with_pre_hashed(code.clone(), hash.clone()))
+                        .await?;
+                }
+            }
+
+            #[cfg(feature = "test_utils")]
+            for zome in dna_file.inline_zomes() {
+                self.inline_zome_store
+                    .insert(dna_file.dna_def_hashed().clone(), zome.clone());
+            }
+
+            #[allow(unused_labels)]
+            let ribosome = 'build: {
+                #[cfg(feature = "test_utils")]
+                {
+                    let all_inline = dna_file
+                        .dna_def()
+                        .all_zomes()
+                        .all(|z| matches!(z.1, ZomeDef::Inline(_)));
+
+                    if all_inline {
+                        let ribosome = crate::core::ribosome::inline_ribosome::InlineRibosome::new(
+                            dna_file.dna_def_hashed().clone(),
+                            self.inline_zome_store.clone(),
+                        );
+                        break 'build Ribosome::new(dna_file.dna_def_hashed().clone(), ribosome)
+                            .await?;
+                    }
+                }
+
+                let ribosome = RealRibosome::new(
+                    self.wasm_backend,
+                    dna_file.dna_def_hashed().clone(),
+                    self.wasmer_module_cache.clone(),
+                )
+                .await?;
+                Ribosome::new(dna_file.dna_def_hashed().clone(), ribosome).await?
+            };
 
             let entry_defs = self
-                .register_dna_wasm(cell_id.clone(), ribosome.clone())
+                .put_wasm_and_defs(cell_id.clone(), ribosome.clone())
                 .await?;
 
             self.register_dna_entry_defs(entry_defs);
@@ -812,13 +862,9 @@ mod network_impls {
     use crate::conductor::api::error::{
         zome_call_response_to_conductor_api_result, ConductorApiError,
     };
-    use futures::future::join_all;
     use holochain_conductor_api::ZomeCallParamsSigned;
     use holochain_conductor_api::{DnaStorageInfo, StorageBlob, StorageInfo};
-    use holochain_sqlite::helpers::BytesSql;
-    use holochain_sqlite::sql::sql_peer_meta_store;
-    use holochain_sqlite::stats::{get_size_on_disk, get_used_size};
-    use holochain_zome_types::block::Block;
+    use holochain_state::conductor::WitnessNonceResult;
     use holochain_zome_types::block::BlockTargetId;
     use kitsune2_api::Url;
     use zome_call_signature_verification::is_valid_signature;
@@ -902,44 +948,29 @@ mod network_impls {
             let mut all_infos = BTreeMap::new();
 
             for dna_hash in space_ids {
-                let db = self.spaces.peer_meta_store_db(&dna_hash)?;
-                let url2 = url.clone();
+                let store = self.spaces.peer_meta_store(&dna_hash)?;
+                let entries = store
+                    .as_read()
+                    .get_all_by_url(url.as_str())
+                    .await
+                    .map_err(|e| ConductorApiError::Other(e.into()))?;
 
-                let infos = db
-                    .read_async(
-                        move |txn| -> DatabaseResult<BTreeMap<String, PeerMetaInfo>> {
-                            let mut infos: BTreeMap<String, PeerMetaInfo> = BTreeMap::new();
+                let infos = entries
+                    .into_iter()
+                    .map(|entry| {
+                        let meta_value: serde_json::Value =
+                            serde_json::from_slice(&entry.meta_value)
+                                .map_err(|e| ConductorApiError::Other(e.into()))?;
+                        let peer_meta_info = PeerMetaInfo {
+                            meta_value,
+                            expires_at: entry
+                                .expires_at
+                                .map(|seconds| Timestamp::from_micros(seconds * 1_000_000)),
+                        };
 
-                            let mut stmt = txn.prepare(sql_peer_meta_store::GET_ALL_BY_URL)?;
-                            let mut rows = stmt.query(named_params! {
-                                ":peer_url": url2.as_str()
-                            })?;
-
-                            while let Some(row) = rows.next()? {
-                                let meta_key = row.get::<_, String>(0)?;
-                                let meta_value: serde_json::Value =
-                                    serde_json::from_slice(&(row.get::<_, BytesSql>(1)?.0))
-                                        .map_err(|e| {
-                                            rusqlite::Error::FromSqlConversionFailure(
-                                                2,
-                                                rusqlite::types::Type::Blob,
-                                                e.into(),
-                                            )
-                                        })?;
-                                let expires_at = row.get::<_, Option<i64>>(2)?;
-
-                                let peer_meta_info = PeerMetaInfo {
-                                    meta_value,
-                                    expires_at: expires_at.map(Timestamp),
-                                };
-
-                                infos.insert(meta_key, peer_meta_info);
-                            }
-
-                            Ok(infos)
-                        },
-                    )
-                    .await?;
+                        Ok((entry.meta_key, peer_meta_info))
+                    })
+                    .collect::<ConductorApiResult<_>>()?;
 
                 all_infos.insert(dna_hash, infos);
             }
@@ -953,19 +984,11 @@ mod network_impls {
             nonce: Nonce256Bits,
             expires: Timestamp,
         ) -> ConductorResult<WitnessNonceResult> {
-            Ok(witness_nonce(
-                &self.spaces.conductor_db,
-                agent,
-                nonce,
-                Timestamp::now(),
-                expires,
-            )
-            .await?)
-        }
-
-        /// Unblock some target.
-        pub async fn unblock(&self, input: Block) -> DatabaseResult<()> {
-            self.spaces.unblock(input).await
+            self.spaces
+                .conductor_store
+                .witness_nonce(agent, nonce, Timestamp::now(), expires)
+                .await
+                .map_err(ConductorError::other)
         }
 
         /// Check if some target is blocked.
@@ -1016,47 +1039,12 @@ mod network_impls {
             dna_hash: &DnaHash,
             used_by: &[InstalledAppId],
         ) -> ConductorResult<StorageBlob> {
-            let authored_dbs = self.spaces.get_all_authored_dbs(dna_hash)?;
-            let dht_db = self.spaces.dht_db(dna_hash)?;
-            let cache_db = self.spaces.cache(dna_hash)?;
+            // Get the storage sizes from the DhtStore.
+            let dht_store = self.get_or_create_dht_store(dna_hash)?.as_read();
 
             Ok(StorageBlob::Dna(DnaStorageInfo {
-                authored_data_size_on_disk: join_all(
-                    authored_dbs
-                        .iter()
-                        .map(|db| db.read_async(get_size_on_disk)),
-                )
-                .await
-                .into_iter()
-                .map(|r| r.map_err(ConductorError::DatabaseError))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .sum(),
-                authored_data_size: join_all(
-                    authored_dbs.iter().map(|db| db.read_async(get_used_size)),
-                )
-                .await
-                .into_iter()
-                .map(|r| r.map_err(ConductorError::DatabaseError))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .sum(),
-                dht_data_size_on_disk: dht_db
-                    .read_async(get_size_on_disk)
-                    .map_err(ConductorError::DatabaseError)
-                    .await?,
-                dht_data_size: dht_db
-                    .read_async(get_used_size)
-                    .map_err(ConductorError::DatabaseError)
-                    .await?,
-                cache_data_size_on_disk: cache_db
-                    .read_async(get_size_on_disk)
-                    .map_err(ConductorError::DatabaseError)
-                    .await?,
-                cache_data_size: cache_db
-                    .read_async(get_used_size)
-                    .map_err(ConductorError::DatabaseError)
-                    .await?,
+                dht_data_size_on_disk: dht_store.size_on_disk().await? as usize,
+                dht_data_size: dht_store.used_size().await? as usize,
                 dna_hash: dna_hash.clone(),
                 used_by: used_by.to_vec(),
             }))
@@ -1064,7 +1052,10 @@ mod network_impls {
 
         /// List all host functions provided by this conductor for wasms.
         pub async fn list_wasm_host_functions(&self) -> ConductorApiResult<Vec<String>> {
-            Ok(RealRibosome::tooling_imports().await?)
+            Ok(
+                RealRibosome::tooling_imports(self.wasm_backend, self.spaces.wasm_store.clone())
+                    .await?,
+            )
         }
 
         /// Handle a zome call coming from outside of the conductor, e.g. through the ConductorApi.
@@ -1371,6 +1362,7 @@ mod app_impls {
                         defer_memproofs: false,
                         ignore_genesis_failure: false,
                     }),
+                    InitPropertiesMap::new(),
                 )
                 .await?;
 
@@ -1385,6 +1377,7 @@ mod app_impls {
             agent_key: Option<AgentPubKey>,
             ops: AppRoleResolution,
             flags: InstallAppCommonFlags,
+            init_properties: InitPropertiesMap,
         ) -> ConductorResult<InstalledApp> {
             let agent_key = match agent_key {
                 Some(key) => key,
@@ -1448,8 +1441,15 @@ mod app_impls {
                         Timestamp::now(),
                     )?;
 
-                    // Update the db
-                    let disabled_app = self.add_disabled_app_to_db(app).await?;
+                    for cell in app.all_cells() {
+                        if let Ok(ribosome) = self.get_ribosome(&cell) {
+                            ribosome.genesis_complete().await;
+                        }
+                    }
+
+                    // Write the app row and init_properties atomically so the app
+                    // can never be enabled into a state where init_properties are missing.
+                    let disabled_app = self.add_disabled_app_to_db(app, init_properties).await?;
 
                     // Return the result, which be may be an error if no_rollback was specified
                     genesis_result.map(|_| disabled_app)
@@ -1474,11 +1474,26 @@ mod app_impls {
                 network_seed,
                 roles_settings,
                 ignore_genesis_failure,
+                restore_from_dht,
             } = payload;
+
+            if restore_from_dht && agent_key.is_none() {
+                return Err(ConductorError::AppStatusError(
+                    "restore_from_dht requires agent_key to be specified".to_string(),
+                ));
+            }
+
+            if let Some(ref key) = agent_key {
+                let keys_in_lair = self.keystore.list_public_keys().await?;
+                if !keys_in_lair.contains(key) {
+                    return Err(ConductorError::AgentKeyNotInKeystore(key.clone()));
+                }
+            }
 
             let modifiers = get_modifiers_map_from_role_settings(&roles_settings);
             let membrane_proofs = get_memproof_map_from_role_settings(&roles_settings);
             let existing_cells = get_existing_cells_map_from_role_settings(&roles_settings);
+            let init_properties = get_init_properties_map_from_role_settings(&roles_settings);
 
             let bundle = {
                 let original_bundle = source.resolve().await?;
@@ -1511,9 +1526,41 @@ mod app_impls {
                 .resolve_cells(membrane_proofs, existing_cells)
                 .await?;
 
-            self.clone()
-                .install_app_common(installed_app_id, manifest, agent_key, ops, flags)
-                .await
+            // Reject any init_properties whose role name is unknown or belongs to a
+            // non-provisioned role (UseExisting / CloneOnly cells have no init callback).
+            for role_name in init_properties.keys() {
+                let role = manifest
+                    .app_roles()
+                    .into_iter()
+                    .find(|r| &r.name == role_name)
+                    .ok_or_else(|| {
+                        ConductorError::InitPropertiesError(format!(
+                            "init_properties specifies unknown role '{role_name}'"
+                        ))
+                    })?;
+                if !matches!(
+                    role.provisioning,
+                    None | Some(CellProvisioning::Create { .. })
+                ) {
+                    return Err(ConductorError::InitPropertiesError(format!(
+                        "init_properties specifies role '{role_name}' which is not a provisioned cell"
+                    )));
+                }
+            }
+
+            let app = self
+                .clone()
+                .install_app_common(
+                    installed_app_id.clone(),
+                    manifest,
+                    agent_key,
+                    ops,
+                    flags,
+                    init_properties,
+                )
+                .await?;
+
+            Ok(app)
         }
 
         /// Uninstall an app, removing all traces of it including its cells.
@@ -1535,16 +1582,21 @@ mod app_impls {
             if force || deps.is_empty() {
                 let app = state.get_app(installed_app_id)?;
                 let cells_to_remove = app.all_cells().collect::<Vec<_>>();
-                // Delete the cells' databases.
-                self.delete_cell_databases(app.id(), cells_to_remove.clone())
-                    .await?;
 
-                // Delete app from DB and state.
+                // Remove the app from state first so app-status reconciliation
+                // cannot restart its cells while they are being torn down.
                 self.remove_app_from_db(installed_app_id).await?;
                 tracing::debug!(msg = "Removed app from db.", app = ?app);
 
-                // Remove the cells from conductor state.
+                // Stop the cells next so their workflows and networking release
+                // the databases before we delete them. Deleting databases out
+                // from under running cells leaves background tasks querying
+                // files that no longer exist.
                 self.remove_cells(&cells_to_remove).await;
+
+                // Delete the cells' databases and drop the now-unused spaces.
+                self.delete_cell_databases(app.id(), cells_to_remove.clone())
+                    .await?;
 
                 // Remove the app's signal broadcast from conductor.
                 let installed_app_ids = self
@@ -1584,16 +1636,34 @@ mod app_impls {
             let apps_ids: Vec<&String> = match status_filter {
                 Some(Enabled) => conductor_state.enabled_apps().map(|(id, _)| id).collect(),
                 Some(Disabled) => conductor_state.disabled_apps().map(|(id, _)| id).collect(),
+                Some(AwaitingMemproofs) => conductor_state
+                    .awaiting_memproofs_apps()
+                    .map(|(id, _)| id)
+                    .collect(),
+                Some(AwaitingRestore) => conductor_state
+                    .awaiting_restore_apps()
+                    .map(|(id, _)| id)
+                    .collect(),
+                Some(Unrecoverable) => conductor_state
+                    .installed_apps()
+                    .iter()
+                    .filter(|(_, app)| matches!(&app.status, AppStatus::Unrecoverable(..)))
+                    .map(|(id, _)| id)
+                    .collect(),
                 None => conductor_state.installed_apps().keys().collect(),
             };
 
-            let mut app_infos: Vec<AppInfo> = apps_ids
-                .into_iter()
-                .map(|app_id| self.get_app_info_inner(app_id, &conductor_state))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .flatten()
-                .collect();
+            let mut app_infos: Vec<AppInfo> = futures::future::join_all(
+                apps_ids
+                    .into_iter()
+                    .map(|app_id| self.get_app_info_inner(app_id, &conductor_state)),
+            )
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
             app_infos.sort_by_key(|app_info| std::cmp::Reverse(app_info.installed_at));
 
             Ok(app_infos)
@@ -1659,7 +1729,7 @@ mod app_impls {
             installed_app_id: &InstalledAppId,
         ) -> ConductorResult<Option<AppInfo>> {
             let state = self.get_state().await?;
-            let maybe_app_info = self.get_app_info_inner(installed_app_id, &state)?;
+            let maybe_app_info = self.get_app_info_inner(installed_app_id, &state).await?;
             Ok(maybe_app_info)
         }
 
@@ -1682,7 +1752,17 @@ mod app_impls {
                 })
                 .collect();
 
+            self.load_wasms_into_ribosome_for_app(app).await?;
+
             crate::conductor::conductor::genesis_cells(self.clone(), cells_to_genesis).await?;
+
+            // Evict the modules loaded for genesis from the in-memory cache, mirroring
+            // the non-deferred install path. They will be rebuilt on demand if needed.
+            for cell in app.all_cells() {
+                if let Ok(ribosome) = self.get_ribosome(&cell) {
+                    ribosome.genesis_complete().await;
+                }
+            }
 
             self.update_state({
                 let installed_app_id = installed_app_id.clone();
@@ -1698,7 +1778,7 @@ mod app_impls {
             Ok(())
         }
 
-        fn get_app_info_inner(
+        async fn get_app_info_inner(
             &self,
             app_id: &InstalledAppId,
             state: &ConductorState,
@@ -1706,7 +1786,7 @@ mod app_impls {
             match state.get_app(app_id) {
                 Err(_) => Ok(None),
                 Ok(app) => {
-                    let dna_definitions = self.get_dna_definitions(app)?;
+                    let dna_definitions = self.get_dna_definitions(app).await?;
                     Ok(Some(AppInfo::from_installed_app(app, &dna_definitions)))
                 }
             }
@@ -1856,8 +1936,7 @@ mod clone_cell_impls {
             if app_role.is_provisioned {
                 // Check source chain if agent key is valid
                 let source_chain = SourceChain::new(
-                    self.get_or_create_authored_db(app_role.dna_hash(), app.agent_key().clone())?,
-                    self.get_or_create_dht_db(app_role.dna_hash())?,
+                    self.get_or_create_dht_store(app_role.dna_hash())?,
                     self.keystore.clone(),
                     app.agent_key().clone(),
                 )
@@ -1933,7 +2012,7 @@ mod clone_cell_impls {
                         let app_role = app.primary_role(&clone_id.as_base_role_name())?;
                         let original_dna_hash = app_role.dna_hash().clone();
                         let ribosome = conductor.get_ribosome(&cell_id)?;
-                        let dna_def = ribosome.dna_file.dna_def();
+                        let dna_def = ribosome.dna_def();
                         let dna_modifiers = dna_def.modifiers.clone();
                         let name = dna_def.name.clone();
                         let enabled_cell = ClonedCell {
@@ -2166,7 +2245,7 @@ mod app_status_impls {
             );
             let space = self
                 .get_or_create_space(cell_id.dna_hash())
-                .map_err(|e| CellError::FailedToCreateDnaSpace(ConductorError::from(e).into()))?;
+                .map_err(|e| CellError::FailedToCreateDnaSpace(e.into()))?;
             let signal_tx = self
                 .get_signal_tx(cell_id)
                 .await
@@ -2201,6 +2280,8 @@ mod app_status_impls {
             if app.status == AppStatus::Enabled {
                 return Ok(app.clone());
             }
+
+            self.load_wasms_into_ribosome_for_app(app).await?;
 
             // Prepare module config overrides from app manifest
             let config_override = Self::p2p_config_overrides(&app.manifest);
@@ -2259,12 +2340,18 @@ mod app_status_impls {
         pub(crate) async fn add_disabled_app_to_db(
             &self,
             app: InstalledAppCommon,
+            init_properties: InitPropertiesMap,
         ) -> ConductorResult<InstalledApp> {
+            let app_id = app.id().to_string();
             let (_, disabled_app) = self
-                .update_state_prime(move |mut state| {
-                    let disabled_app = state.add_app(app)?;
-                    Ok((state, disabled_app))
-                })
+                .update_state_prime_and_init_properties(
+                    move |mut state| {
+                        let disabled_app = state.add_app(app)?;
+                        Ok((state, disabled_app))
+                    },
+                    &app_id,
+                    &init_properties,
+                )
                 .await?;
             Ok(disabled_app)
         }
@@ -2275,7 +2362,7 @@ mod app_status_impls {
             match manifest {
                 AppManifest::V0(manifest) => {
                     overrides.bootstrap_url = manifest.bootstrap_url.clone();
-                    overrides.signal_url = manifest.signal_url.clone();
+                    overrides.relay_url = manifest.relay_url.clone();
                 }
             }
             if overrides.is_overriding() {
@@ -2326,9 +2413,30 @@ mod state_impls {
         }
 
         /// Update the internal state with a pure function mapping old state to new,
-        /// which may also produce an output value which will be the output of
-        /// this function
-        #[cfg_attr(feature = "instrument", tracing::instrument(skip_all))]
+        /// optionally writing `init_properties` rows for `app_id` in the same transaction.
+        ///
+        /// When `init_properties` is empty the `app_id` is not used. Callers
+        /// that do not need to persist init properties should use [`Self::update_state_prime`].
+        ///
+        /// Any value produced by the state change will be the output of this function.
+        pub(crate) async fn update_state_prime_and_init_properties<F, O>(
+            &self,
+            f: F,
+            app_id: &str,
+            init_properties: &InitPropertiesMap,
+        ) -> ConductorResult<(ConductorState, O)>
+        where
+            F: FnOnce(ConductorState) -> ConductorResult<(ConductorState, O)> + Send + 'static,
+            O: Send + 'static,
+        {
+            self.check_running()?;
+            self.spaces
+                .update_state_prime(f, app_id, init_properties)
+                .await
+        }
+
+        /// Convenience wrapper around [`Self::update_state_prime_and_init_properties`] for callers
+        /// that do not need to persist init properties.
         pub(crate) async fn update_state_prime<F, O>(
             &self,
             f: F,
@@ -2337,8 +2445,8 @@ mod state_impls {
             F: FnOnce(ConductorState) -> ConductorResult<(ConductorState, O)> + Send + 'static,
             O: Send + 'static,
         {
-            self.check_running()?;
-            self.spaces.update_state_prime(f).await
+            self.update_state_prime_and_init_properties(f, "", &InitPropertiesMap::new())
+                .await
         }
     }
 }
@@ -2367,19 +2475,16 @@ mod scheduler_impls {
             self: Arc<Self>,
             interval_period: std::time::Duration,
         ) -> StateMutationResult<()> {
-            // Clear all ephemeral cruft in all cells before starting a scheduler.
-            let tasks = self
-                .spaces
-                .get_from_spaces(|space| {
-                    let all_dbs = space.get_all_authored_dbs();
-
-                    all_dbs.into_iter().map(|db| async move {
-                        db.write_async(|txn| delete_all_ephemeral_scheduled_fns(txn))
-                            .await
-                    })
-                })
-                .into_iter()
-                .flatten();
+            // Clear all ephemeral cruft in all spaces before starting a
+            // scheduler. One call per space clears every author.
+            let tasks = self.spaces.get_from_spaces(|space| {
+                let dht_store = space.dht_store.clone();
+                async move {
+                    if let Err(e) = dht_store.delete_all_ephemeral_scheduled_functions().await {
+                        error!("error clearing ephemeral scheduled functions: {:?}", e);
+                    }
+                }
+            });
 
             futures::future::join_all(tasks).await;
 
@@ -2421,8 +2526,8 @@ mod scheduler_impls {
 /// Miscellaneous methods
 mod misc_impls {
     use super::{state_dump_helpers::peer_store_dump, *};
-    use holochain_conductor_api::JsonDump;
-    use holochain_zome_types::{action::builder, Entry};
+    use holochain_conductor_api::{CellInfo, JsonDump};
+    use holochain_zome_types::prelude::Entry;
     use kitsune2_api::{SpaceId, TransportStats};
     use std::sync::atomic::Ordering;
 
@@ -2439,11 +2544,7 @@ mod misc_impls {
             cell.check_or_run_zome_init().await?;
 
             let source_chain = SourceChain::new(
-                self.get_or_create_authored_db(
-                    cell_id.dna_hash(),
-                    cell.id().agent_pubkey().clone(),
-                )?,
-                self.get_or_create_dht_db(cell_id.dna_hash())?,
+                self.get_or_create_dht_store(cell_id.dna_hash())?,
                 self.keystore.clone(),
                 cell_id.agent_pubkey().clone(),
             )
@@ -2451,14 +2552,14 @@ mod misc_impls {
 
             let cap_grant_entry = Entry::CapGrant(cap_grant);
             let entry_hash = EntryHash::with_data_sync(&cap_grant_entry);
-            let action_builder = builder::Create {
+            let action_data = ActionData::Create(CreateData {
                 entry_type: EntryType::CapGrant,
                 entry_hash,
-            };
+            });
 
             let action_hash = source_chain
-                .put_weightless(
-                    action_builder,
+                .put(
+                    action_data,
                     Some(cap_grant_entry),
                     ChainTopOrdering::default(),
                 )
@@ -2491,11 +2592,7 @@ mod misc_impls {
             cell.check_or_run_zome_init().await?;
 
             let source_chain = SourceChain::new(
-                self.get_or_create_authored_db(
-                    cell_id.dna_hash(),
-                    cell.id().agent_pubkey().clone(),
-                )?,
-                self.get_or_create_dht_db(cell_id.dna_hash())?,
+                self.get_or_create_dht_store(cell_id.dna_hash())?,
                 self.keystore.clone(),
                 cell_id.agent_pubkey().clone(),
             )
@@ -2511,7 +2608,7 @@ mod misc_impls {
                 .await?
                 .into_iter()
                 .find_map(|record| {
-                    if record.action_hash() == &action_hash {
+                    if record.action_address() == &action_hash {
                         match record.entry {
                             RecordEntry::Present(entry) => Some(entry),
                             _ => None,
@@ -2523,12 +2620,12 @@ mod misc_impls {
                 .ok_or_else(|| ConductorApiError::other("No cap grant found for action hash"))?;
             let entry_hash = EntryHash::with_data_sync(&cap_grant_entry);
 
-            let action_builder = builder::Delete {
+            let action_data = ActionData::Delete(DeleteData {
                 deletes_address: action_hash,
                 deletes_entry_address: entry_hash,
-            };
+            });
             let action_hash = source_chain
-                .put_weightless(action_builder, None, ChainTopOrdering::default())
+                .put(action_data, None, ChainTopOrdering::default())
                 .await?;
 
             source_chain
@@ -2563,17 +2660,13 @@ mod misc_impls {
 
             for cell_id in cell_set.iter() {
                 // create a source chain read to query for the cap grant
-                let chain = SourceChainRead::new(
-                    self.get_or_create_authored_db(
-                        cell_id.dna_hash(),
-                        cell_id.agent_pubkey().clone(),
-                    )?
-                    .into(),
-                    self.get_or_create_dht_db(cell_id.dna_hash())?.into(),
+                let chain = SourceChain::new(
+                    self.get_or_create_dht_store(cell_id.dna_hash())?,
                     self.keystore().clone(),
                     cell_id.agent_pubkey().clone(),
                 )
-                .await?;
+                .await?
+                .as_read();
 
                 // query for the cap grant and delete actions (capability revokes)
                 let grant_list = chain.query(grant_query.clone()).await?;
@@ -2586,8 +2679,11 @@ mod misc_impls {
                     .await?
                     .iter()
                     .filter_map(|record| {
-                        if let Action::Delete(delete) = record.action() {
-                            Some((delete.deletes_address.clone(), delete.timestamp))
+                        if let ActionData::Delete(DeleteData {
+                            deletes_address, ..
+                        }) = &record.action().data
+                        {
+                            Some((deletes_address.clone(), record.action().timestamp()))
                         } else {
                             None
                         }
@@ -2599,7 +2695,7 @@ mod misc_impls {
                 // create a list of CapGrantInfo structs for each cell
                 let mut cap_grants: Vec<CapGrantInfo> = vec![];
                 for grant_record in grant_list {
-                    let cap_action_hash = grant_record.action_hash().clone();
+                    let cap_action_hash = grant_record.action_address().clone();
                     let mut revoke_time: Option<Timestamp> = None;
 
                     // skip grant info if include_revoked is false
@@ -2631,21 +2727,32 @@ mod misc_impls {
             Ok(AppCapGrantInfo(grant_info))
         }
 
-        /// Create a JSON dump of the cell's state
-        #[cfg_attr(feature = "instrument", tracing::instrument(skip_all))]
-        pub async fn dump_cell_state(&self, cell_id: &CellId) -> ConductorApiResult<String> {
-            let cell = self.cell_by_id(cell_id).await?;
-            let authored_db = cell.get_or_create_authored_db()?;
-            let dht_db = cell.dht_db();
+        /// Create a paginated JSON dump of the cell's state.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if the cell cannot be read or pagination is invalid.
+        pub async fn dump_cell_state(
+            &self,
+            cell_id: &CellId,
+            source_chain_cursor: Option<&SourceChainCursor>,
+            limit: Option<u32>,
+        ) -> ConductorApiResult<String> {
+            let dht_store = self.get_or_create_dht_store(cell_id.dna_hash())?;
             let agent_pub_key = cell_id.agent_pubkey().clone();
             let peer_dump = peer_store_dump(self, cell_id).await?;
-            let source_chain_dump =
-                source_chain::dump_state(authored_db.clone().into(), agent_pub_key).await?;
+            let source_chain_dump = source_chain::dump_state_paginated(
+                &dht_store.as_read(),
+                agent_pub_key,
+                source_chain_cursor,
+                limit,
+            )
+            .await?;
 
             let out = JsonDump {
                 peer_dump,
                 source_chain_dump,
-                integration_dump: integration_dump(dht_db).await?,
+                integration_dump: integration_dump(&dht_store.as_read()).await?,
             };
             // Add summary
             let summary = out.to_string();
@@ -2696,26 +2803,93 @@ mod misc_impls {
             Ok(out)
         }
 
-        /// Create a comprehensive structured dump of a cell's state.
+        /// Create one paginated comprehensive dump of a cell's state.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if the cell cannot be read or the limit is zero.
         pub async fn dump_full_cell_state(
             &self,
             cell_id: &CellId,
-            dht_ops_cursor: Option<u64>,
+            dht_ops_cursor: Option<DhtOpsCursor>,
+            limit: Option<u32>,
         ) -> ConductorApiResult<FullStateDump> {
-            let authored_db =
-                self.get_or_create_authored_db(cell_id.dna_hash(), cell_id.agent_pubkey().clone())?;
-            let dht_db = self.get_or_create_dht_db(cell_id.dna_hash())?;
+            let dht_store = self.get_or_create_dht_store(cell_id.dna_hash())?;
             let source_chain_dump =
-                source_chain::dump_state(authored_db.into(), cell_id.agent_pubkey().clone())
+                source_chain::dump_state(&dht_store.as_read(), cell_id.agent_pubkey().clone())
                     .await?;
             let peer_dump = peer_store_dump(self, cell_id).await?;
 
             let out = FullStateDump {
                 peer_dump,
                 source_chain_dump,
-                integration_dump: full_integration_dump(&dht_db, dht_ops_cursor).await?,
+                integration_dump: full_integration_dump_paginated(
+                    &dht_store.as_read(),
+                    dht_ops_cursor,
+                    limit,
+                )
+                .await?,
             };
             Ok(out)
+        }
+
+        /// Dump one page of DHT-op lifecycle timings for a DNA.
+        ///
+        /// Ops are ordered by `(when_received, op_hash)` across both
+        /// validation limbos and the integrated set, so a page can mix
+        /// in-flight and integrated ops.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if the DNA's DHT store cannot be read or the
+        /// limit is zero.
+        pub async fn dump_op_timings(
+            &self,
+            dna_hash: &DnaHash,
+            cursor: Option<OpTimingsCursor>,
+            limit: Option<u32>,
+        ) -> ConductorApiResult<OpTimingsDump> {
+            let dht_store = self.get_or_create_dht_store(dna_hash)?;
+            Ok(dht_store
+                .as_read()
+                .op_timings_page_for_dump(cursor.as_ref(), limit)
+                .await?)
+        }
+
+        /// Dump one page of DHT-op lifecycle timings for a DNA of `installed_app_id`.
+        ///
+        /// This is the app-interface entry point: `dna_hash` must be the DNA of
+        /// one of the calling app's cells, so an app cannot inspect the DHT of
+        /// a DNA it does not run.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if the app is unknown, the app runs no cell of
+        /// `dna_hash`, the DHT store cannot be read, or the limit is zero.
+        pub async fn dump_op_timings_for_app(
+            &self,
+            installed_app_id: &InstalledAppId,
+            dna_hash: &DnaHash,
+            cursor: Option<OpTimingsCursor>,
+            limit: Option<u32>,
+        ) -> ConductorApiResult<OpTimingsDump> {
+            let belongs_to_app = {
+                let state = self.get_state().await?;
+                let installed_app = state.get_app(installed_app_id)?;
+                // `all_cells()` borrows from `state`, and as the block's tail
+                // expression its temporary would outlive `state` (E0597). The
+                // binding forces the iterator to drop before the block ends,
+                // so do not collapse it into the tail expression.
+                let belongs = installed_app
+                    .all_cells()
+                    .any(|id| id.dna_hash() == dna_hash);
+                belongs
+            };
+            if !belongs_to_app {
+                return Err(ConductorApiError::Other("DNA hash not found in app".into()));
+            }
+
+            self.dump_op_timings(dna_hash, cursor, limit).await
         }
 
         /// Dump of network metrics from Kitsune2.
@@ -2931,8 +3105,23 @@ mod misc_impls {
             &self,
             cell_id: CellId,
             coordinator_zomes: CoordinatorZomes,
-            wasms: Vec<wasm::DnaWasm>,
+            wasms: Vec<DnaWasmHashed>,
         ) -> ConductorResult<()> {
+            // Check if any WASMs are missing, that needs to block proceeding
+            let required_wasms: HashSet<ZomeHash> = coordinator_zomes
+                .iter()
+                .map(|(_, c)| c.zome_hash())
+                .collect();
+            let provided_wasms: HashSet<ZomeHash> =
+                wasms.iter().map(|w| w.hash.clone().into()).collect();
+            let missing_wasms = required_wasms
+                .difference(&provided_wasms)
+                .collect::<Vec<_>>();
+            if !missing_wasms.is_empty() {
+                tracing::info!("A coordinator update for {:?} cannot proceed due to missing WASM code for {:?}", cell_id, missing_wasms);
+                return Err(ConductorError::WasmMissing);
+            }
+
             // Note this isn't really concurrent safe. It would be a race condition to update the
             // same dna concurrently.
             let mut ribosome =
@@ -2941,16 +3130,29 @@ mod misc_impls {
                         Some(dna) => Ok(dna),
                         None => Err(ConductorError::CellMissing(cell_id.clone())),
                     })?;
-            let _old_wasms = ribosome
-                .dna_file
-                .update_coordinators(coordinator_zomes.clone(), wasms.clone())
-                .await?;
+            ribosome.update_dna_def(|dna_def| {
+                dna_def.content.replace_coordinators(coordinator_zomes)
+            })?;
 
-            // Write new wasm code and dna def into the database.
-            self.put_code_and_defs_in_databases(
+            // TODO some WASMs may have been orphaned here. Delegate to store to clean up
+            //      unreferenced WASMs? Also see below.
+            for wasm in wasms {
+                if !self
+                    .spaces
+                    .wasm_store
+                    .as_read()
+                    .contains(&wasm.hash)
+                    .await?
+                {
+                    self.spaces.wasm_store.put(wasm).await?;
+                }
+            }
+
+            // Write the new dna def into the database.
+            self.put_defs_in_databases(
                 cell_id.clone(),
-                ribosome.dna_def_hashed().clone(),
-                wasms.into_iter(),
+                ribosome.dna_def().clone(),
+                // No new entry defs to store because the integrity zomes haven't changed.
                 Vec::with_capacity(0),
             )
             .await?;
@@ -2963,12 +3165,73 @@ mod misc_impls {
 
             Ok(())
         }
+
+        /// Send a signal directly to the specified agents, bypassing WASM execution
+        pub async fn send_direct_signal(
+            &self,
+            installed_app_id: InstalledAppId,
+            dna_hash: DnaHash,
+            agents: Vec<AgentPubKey>,
+            signal: Vec<u8>,
+        ) -> ConductorResult<()> {
+            if agents.is_empty() {
+                return Err(ConductorError::Other("No agents to signal".into()));
+            }
+
+            if signal.len() > DIRECT_SIGNAL_MAX_SIZE {
+                return Err(ConductorError::Other(
+                    format!(
+                        "Signal payload larger than {} bytes",
+                        DIRECT_SIGNAL_MAX_SIZE
+                    )
+                    .into(),
+                ));
+            }
+
+            let app_info = self.get_app_info(&installed_app_id).await?.ok_or_else(|| {
+                ConductorError::other(format!("App not installed: {installed_app_id}"))
+            })?;
+
+            let dna_belongs_to_app = app_info
+                .cell_info
+                .values()
+                .flatten()
+                .find(|c| match c {
+                    CellInfo::Provisioned(cell) => cell.cell_id.dna_hash() == &dna_hash,
+                    CellInfo::Cloned(cell) => cell.cell_id.dna_hash() == &dna_hash,
+                    CellInfo::Stem(cell) => cell.original_dna_hash == dna_hash,
+                })
+                .is_some();
+            if !dna_belongs_to_app {
+                return Err(ConductorError::Other(format!("Attempted to send to DNA hash {dna_hash:?} but it was not found in app {installed_app_id}").into()));
+            }
+
+            let signal_bytes = holochain_serialized_bytes::encode(&DirectSignal(signal))?;
+
+            let sig = self
+                .keystore()
+                .sign(app_info.agent_pub_key.clone(), signal_bytes.clone().into())
+                .await?;
+
+            self.holochain_p2p()
+                .send_remote_signal_direct(
+                    dna_hash,
+                    agents,
+                    signal_bytes,
+                    app_info.agent_pub_key,
+                    sig,
+                )
+                .await?;
+
+            Ok(())
+        }
     }
 }
 
 /// Pure accessor methods
 mod accessor_impls {
     use super::*;
+    use crate::core::ribosome::Ribosome;
     use tokio::sync::broadcast;
 
     impl Conductor {
@@ -2994,7 +3257,7 @@ mod accessor_impls {
         }
 
         /// Get the Ribosome for a given CellId from the RibosomeStore
-        pub(crate) fn get_ribosome(&self, cell_id: &CellId) -> ConductorResult<RealRibosome> {
+        pub(crate) fn get_ribosome(&self, cell_id: &CellId) -> ConductorResult<Ribosome> {
             self.ribosome_store
                 .share_ref(|d| match d.get_ribosome(cell_id) {
                     Some(r) => Ok(r),
@@ -3006,7 +3269,7 @@ mod accessor_impls {
         pub(crate) fn get_any_ribosome_for_dna_hash(
             &self,
             dna_hash: &DnaHash,
-        ) -> ConductorResult<RealRibosome> {
+        ) -> ConductorResult<Ribosome> {
             self.ribosome_store
                 .share_ref(|d| match d.get_any_ribosome_for_dna_hash(dna_hash) {
                     Some(r) => Ok(r),
@@ -3015,34 +3278,15 @@ mod accessor_impls {
         }
 
         /// Get a dna space or create it if one doesn't exist.
-        pub(crate) fn get_or_create_space(&self, dna_hash: &DnaHash) -> DatabaseResult<Space> {
+        pub(crate) fn get_or_create_space(&self, dna_hash: &DnaHash) -> ConductorResult<Space> {
             self.spaces.get_or_create_space(dna_hash)
         }
 
-        pub(crate) fn get_or_create_authored_db(
+        pub(crate) fn get_or_create_dht_store(
             &self,
             dna_hash: &DnaHash,
-            author: AgentPubKey,
-        ) -> DatabaseResult<DbWrite<DbKindAuthored>> {
-            self.spaces.get_or_create_authored_db(dna_hash, author)
-        }
-
-        pub(crate) fn get_authored_db_if_present(
-            &self,
-            dna_hash: &DnaHash,
-            author: &AgentPubKey,
-        ) -> DatabaseResult<Option<DbWrite<DbKindAuthored>>> {
-            match self.spaces.get_authored_db_if_present(dna_hash, author)? {
-                Some(db) => Ok(Some(db.clone())),
-                None => Ok(None),
-            }
-        }
-
-        pub(crate) fn get_or_create_dht_db(
-            &self,
-            dna_hash: &DnaHash,
-        ) -> DatabaseResult<DbWrite<DbKindDht>> {
-            self.spaces.dht_db(dna_hash)
+        ) -> ConductorResult<DhtStore> {
+            self.spaces.dht_store(dna_hash)
         }
 
         /// Get the post commit sender.
@@ -3073,6 +3317,61 @@ mod accessor_impls {
                 .await?
                 .find_app_containing_cell(cell_id)
                 .cloned())
+        }
+
+        /// Read the init properties supplied at install time for the role that
+        /// the given cell is provisioned for.
+        ///
+        /// Returns `None` if no app contains the cell, the cell is not a
+        /// provisioned cell of any role, or no init properties were supplied
+        /// for that role.
+        pub async fn get_init_properties_for_cell(
+            &self,
+            cell_id: &CellId,
+        ) -> ConductorResult<Option<InitProperties>> {
+            let state = self.get_state().await?;
+            let Some(app) = state.find_app_containing_cell(cell_id) else {
+                return Ok(None);
+            };
+            let Some((role_name, _)) = app
+                .provisioned_cells()
+                .find(|(_, provisioned_cell_id)| provisioned_cell_id == cell_id)
+            else {
+                return Ok(None);
+            };
+            let app_id = app.id().clone();
+            let role_name = role_name.clone();
+            Ok(self
+                .spaces
+                .conductor_store
+                .as_read()
+                .get_init_properties(&app_id, &role_name)
+                .await?)
+        }
+
+        /// Remove the init properties for the role that the given cell is provisioned for.
+        /// Called after a successful `init` so the seed material does not remain past its use.
+        pub async fn delete_init_properties_for_cell(
+            &self,
+            cell_id: &CellId,
+        ) -> ConductorResult<()> {
+            let state = self.get_state().await?;
+            let Some(app) = state.find_app_containing_cell(cell_id) else {
+                return Ok(());
+            };
+            let Some((role_name, _)) = app
+                .provisioned_cells()
+                .find(|(_, provisioned_cell_id)| provisioned_cell_id == cell_id)
+            else {
+                return Ok(());
+            };
+            let app_id = app.id().clone();
+            let role_name = role_name.clone();
+            self.spaces
+                .conductor_store
+                .delete_init_properties(&app_id, &role_name)
+                .await?;
+            Ok(())
         }
     }
 }
@@ -3249,48 +3548,15 @@ impl Conductor {
         self.admin_websocket_ports.share_mut(|p| p.push(port));
     }
 
-    async fn delete_or_purge_database<Kind: DbKindT + Send + Sync + 'static>(
-        &self,
-        db: DbWrite<Kind>,
-    ) -> ConductorResult<()> {
-        let mut path = db.path().clone();
-        if let Err(err) = ffs::remove_file(&path).await {
-            tracing::warn!(?err, "Could not remove primary DB file, probably because it is still in use. Purging all data instead.");
-            db.write_async(|txn| purge_data(txn)).await?;
-        } else {
-            tracing::info!("Deleted primary DB file {}", path.display());
-        }
-        path.set_extension("");
-        let stem = path.to_string_lossy();
-        for ext in ["shm", "wal"] {
-            let path = PathBuf::from(format!("{stem}-{ext}"));
-            if let Err(err) = ffs::remove_file(&path).await {
-                let err = err.remove_backtrace();
-                tracing::warn!(?err, "Failed to remove DB support file");
-            } else {
-                tracing::info!("Deleted file {}", path.display());
-            }
-        }
-        Ok(())
-    }
-
     /// Delete cell databases.
     ///
-    /// All data used by that cell (across Authored, DHT, and Cache databases) will also be deleted.
+    /// All DHT data for a DNA no longer used by any installed app is deleted.
     #[cfg_attr(feature = "instrument", tracing::instrument(skip_all))]
     async fn delete_cell_databases(
         &self,
         app_id: &InstalledAppId,
         cell_ids: Vec<CellId>,
     ) -> ConductorResult<()> {
-        // Delete authored database or purge data
-        for cell_id in cell_ids.clone() {
-            let authored_db = self
-                .spaces
-                .get_or_create_authored_db(cell_id.dna_hash(), cell_id.agent_pubkey().clone())?;
-            self.delete_or_purge_database(authored_db).await?;
-        }
-
         // Find DNAs of this app which are not used by any other app or agent.
         let remaining_dnas = self
             .get_state()
@@ -3310,29 +3576,39 @@ impl Conductor {
             tracing::info!(?dnas_to_purge, "Purging DNAs");
         }
 
-        // For any DNAs no longer represented in any installed app,
-        // delete DHT and cache databases or purge data.
+        // For any DNAs no longer represented in any installed app, delete the
+        // per-DNA store so a reinstall doesn't inherit stale rows from the
+        // previous installation.
         for dna_hash in dnas_to_purge {
-            // Delete all data from DHT and cache databases.
-            // Database files will be deleted after this step, but
-            // the DB continues to exist in memory while the conductor
-            // is running, supposedly because the pool holds the connection
-            // open.
-            let dht_db = self.spaces.dht_db(dna_hash)?;
-            let cache_db = self.spaces.cache(dna_hash)?;
-            futures::future::join_all(
-                [
-                    dht_db.write_async(|txn| purge_data(txn)).boxed(),
-                    cache_db.write_async(|txn| purge_data(txn)).boxed(),
-                ]
-                .into_iter(),
-            )
-            .await
-            .into_iter()
-            .collect::<Result<Vec<()>, _>>()?;
+            let dht_store = self.spaces.dht_store(dna_hash)?;
+            let dht_store_id = holochain_state::data::Dht::new(Arc::new(dna_hash.clone()));
+            let dht_store_path = self.spaces.db_dir.as_ref().as_ref().join(
+                holochain_state::data::DatabaseIdentifier::database_id(&dht_store_id),
+            );
+            if let Err(err) = ffs::remove_file(&dht_store_path).await {
+                tracing::warn!(
+                    ?err,
+                    "Could not remove DhtStore DB file, probably because it is still in use. Purging all data instead."
+                );
+                dht_store.purge_all().await.map_err(ConductorError::other)?;
+            } else {
+                tracing::info!("Deleted DhtStore DB file {}", dht_store_path.display());
+            }
+            let stem = dht_store_path.to_string_lossy();
+            for ext in ["shm", "wal"] {
+                let support_path = PathBuf::from(format!("{stem}-{ext}"));
+                if let Err(err) = ffs::remove_file(&support_path).await {
+                    let err = err.remove_backtrace();
+                    tracing::warn!(?err, "Failed to remove DhtStore DB support file");
+                } else {
+                    tracing::info!("Deleted file {}", support_path.display());
+                }
+            }
 
-            self.delete_or_purge_database(dht_db).await?;
-            self.delete_or_purge_database(cache_db).await?;
+            // Drop the cached space now its databases are gone, so a reinstall
+            // of this DNA opens fresh, migrated databases rather than reusing
+            // pools that point at the deleted files.
+            self.spaces.remove_space(dna_hash);
         }
 
         Ok(())
@@ -3389,7 +3665,7 @@ impl Conductor {
         let clone_dna = ribosome_store.share_ref(|rs| {
             let base_cell_id = CellId::new(base_cell_dna_hash, agent_key.clone());
             let mut dna_file = rs
-                .get_dna_file(&base_cell_id)
+                .get_dna_def(&base_cell_id)
                 .ok_or(ConductorError::CellMissing(base_cell_id))?
                 .update_modifiers(dna_modifiers);
             if let Some(name) = name {
@@ -3397,9 +3673,9 @@ impl Conductor {
             }
             Ok::<_, ConductorError>(dna_file)
         })?;
-        let name = clone_dna.dna_def().name.clone();
-        let dna_modifiers = clone_dna.dna_def().modifiers.clone();
-        let clone_dna_hash = clone_dna.dna_hash().to_owned();
+        let name = clone_dna.name.clone();
+        let dna_modifiers = clone_dna.modifiers.clone();
+        let clone_dna_hash = clone_dna.to_hash().to_owned();
         let clone_cell_id = CellId::new(clone_dna_hash, agent_key);
 
         let clone_cell_id_move = clone_cell_id.clone();
@@ -3434,8 +3710,15 @@ impl Conductor {
             })
             .await?;
 
+        #[cfg(feature = "test_utils")]
+        self.inline_zome_store
+            .handle_clone_created(&installed_clone_cell);
+
         // register clone cell dna in ribosome store
-        self.register_dna_file(clone_cell_id, clone_dna).await?;
+        // Note: No WASMs provided in the DnaFile because they should already have been stored
+        //       when the cell being cloned was installed.
+        self.register_dna_file(clone_cell_id, DnaFile::new(clone_dna, []).await)
+            .await?;
         Ok(installed_clone_cell)
     }
 
@@ -3459,6 +3742,7 @@ impl Conductor {
 #[allow(missing_docs)]
 mod test_utils_impls {
     use super::*;
+    use crate::core::ribosome::Ribosome;
     use tokio::sync::broadcast;
 
     impl Conductor {
@@ -3473,16 +3757,8 @@ mod test_utils_impls {
             self.app_broadcast.subscribe(installed_app_id)
         }
 
-        pub fn get_dht_db(&self, dna_hash: &DnaHash) -> ConductorApiResult<DbWrite<DbKindDht>> {
-            Ok(self.get_or_create_dht_db(dna_hash)?)
-        }
-
-        pub async fn get_cache_db(
-            &self,
-            cell_id: &CellId,
-        ) -> ConductorApiResult<DbWrite<DbKindCache>> {
-            let cell = self.cell_by_id(cell_id).await?;
-            Ok(cell.cache().clone())
+        pub fn get_dht_store(&self, dna_hash: &DnaHash) -> ConductorApiResult<DhtStore> {
+            Ok(self.get_or_create_dht_store(dna_hash)?)
         }
 
         pub fn get_spaces(&self) -> Spaces {
@@ -3496,18 +3772,20 @@ mod test_utils_impls {
             let cell = self.cell_by_id(cell_id).await?;
             Ok(cell.triggers().clone())
         }
-    }
-}
 
-#[cfg_attr(feature = "instrument", tracing::instrument(skip_all))]
-fn purge_data(txn: &mut Transaction) -> DatabaseResult<()> {
-    txn.execute("DELETE FROM DhtOp", ())?;
-    txn.execute("DELETE FROM Action", ())?;
-    txn.execute("DELETE FROM Entry", ())?;
-    txn.execute("DELETE FROM ValidationReceipt", ())?;
-    txn.execute("DELETE FROM ChainLock", ())?;
-    txn.execute("DELETE FROM ScheduledFunctions", ())?;
-    Ok(())
+        pub fn test_get_ribosome(&self, cell_id: &CellId) -> ConductorResult<Ribosome> {
+            self.get_ribosome(cell_id)
+        }
+
+        pub async fn load_wasms_into_ribosome_for_installed_app(
+            &self,
+            installed_app_id: &InstalledAppId,
+        ) -> ConductorResult<()> {
+            let state = self.get_state().await?;
+            let app = state.get_app(installed_app_id)?;
+            self.load_wasms_into_ribosome_for_app(app).await
+        }
+    }
 }
 
 /// Perform Genesis on the source chains for each of the specified CellIds.
@@ -3525,22 +3803,12 @@ pub(crate) async fn genesis_cells(
         tokio::spawn(async move {
             let space = conductor
                 .get_or_create_space(cell_id_inner.dna_hash())
-                .map_err(|e| CellError::FailedToCreateDnaSpace(ConductorError::from(e).into()))?;
+                .map_err(|e| CellError::FailedToCreateDnaSpace(e.into()))?;
 
-            let authored_db =
-                space.get_or_create_authored_db(cell_id_inner.agent_pubkey().clone())?;
-            let dht_db = space.dht_db;
+            let dht_store = space.dht_store;
             let ribosome = conductor.get_ribosome(&cell_id_inner).map_err(Box::new)?;
 
-            Cell::genesis(
-                cell_id_inner.clone(),
-                conductor,
-                authored_db,
-                dht_db,
-                ribosome,
-                proof,
-            )
-            .await
+            Cell::genesis(cell_id_inner.clone(), conductor, dht_store, ribosome, proof).await
         })
         .map_err(CellError::from)
         .map(|genesis_result| (cell_id, genesis_result.and_then(|r| r)))
@@ -3602,96 +3870,91 @@ pub fn app_manifest_from_dnas(
         .into()
 }
 
+/// Build [`DhtOp`]s from wire rows for the
+/// integration dump. Rows that fail to build are dropped (the same lenient
+/// behaviour the wire path uses), so the result is a best-effort view.
+pub fn wire_rows_to_ops(
+    chain: Vec<holochain_state::dht_store::K2ChainOpForWireRow>,
+    warrants: Vec<holochain_state::dht_store::K2WarrantForWireRow>,
+) -> Vec<holochain_types::op::DhtOp> {
+    chain
+        .into_iter()
+        .filter_map(|r| holochain_p2p::build_chain_dht_op(r).ok())
+        .chain(
+            warrants
+                .into_iter()
+                .filter_map(|r| holochain_p2p::build_warrant_dht_op(r).ok()),
+        )
+        .collect()
+}
+
 /// Dump the integration json state.
-pub async fn integration_dump<Db: ReadAccess<DbKindDht>>(
-    vault: &Db,
+pub async fn integration_dump(
+    dht_store: &DhtStoreRead,
 ) -> ConductorApiResult<IntegrationStateDump> {
-    vault
-        .read_async(move |txn| {
-            let integrated = txn.query_row(
-                "SELECT count(hash) FROM DhtOp WHERE when_integrated IS NOT NULL",
-                [],
-                |row| row.get(0),
-            )?;
-            let integration_limbo = txn.query_row(
-                "SELECT count(hash) FROM DhtOp WHERE when_integrated IS NULL AND validation_stage = 3",
-                [],
-                |row| row.get(0),
-            )?;
-            let validation_limbo = txn.query_row(
-                "
-                SELECT count(hash) FROM DhtOp
-                WHERE when_integrated IS NULL
-                AND
-                (validation_stage IS NULL OR validation_stage < 3)
-                ",
-                [],
-                |row| row.get(0),
-            )?;
-            ConductorApiResult::Ok(IntegrationStateDump {
-                validation_limbo,
-                integration_limbo,
-                integrated,
-            })
-        })
-        .await
+    let (validation_limbo, integration_limbo, integrated) = dht_store.limbo_state_counts().await?;
+    Ok(IntegrationStateDump {
+        validation_limbo,
+        integration_limbo,
+        integrated,
+    })
 }
 
 /// Dump the full integration json state.
 /// Careful! This will return a lot of data.
 pub async fn full_integration_dump(
-    vault: &DbRead<DbKindDht>,
-    dht_ops_cursor: Option<u64>,
+    dht_store: &DhtStoreRead,
+    dht_ops_cursor: Option<DhtOpsCursor>,
 ) -> ConductorApiResult<FullIntegrationStateDump> {
-    vault
-        .read_async(move |txn| {
-            let integrated =
-                query_dht_ops_from_statement(txn, state_dump::DHT_OPS_INTEGRATED, dht_ops_cursor)?;
-
-            let validation_limbo = query_dht_ops_from_statement(
-                txn,
-                state_dump::DHT_OPS_IN_VALIDATION_LIMBO,
-                dht_ops_cursor,
-            )?;
-
-            let integration_limbo = query_dht_ops_from_statement(
-                txn,
-                state_dump::DHT_OPS_IN_INTEGRATION_LIMBO,
-                dht_ops_cursor,
-            )?;
-
-            let dht_ops_cursor = txn
-                .query_row(state_dump::DHT_OPS_ROW_ID, [], |row| row.get(0))
-                .unwrap_or(0);
-
-            ConductorApiResult::Ok(FullIntegrationStateDump {
-                validation_limbo,
-                integration_limbo,
-                integrated,
-                dht_ops_cursor,
-            })
-        })
-        .await
+    full_integration_dump_paginated(dht_store, dht_ops_cursor, None).await
 }
 
-fn query_dht_ops_from_statement(
-    txn: &Transaction,
-    stmt_str: &str,
-    dht_ops_cursor: Option<u64>,
-) -> ConductorApiResult<Vec<DhtOp>> {
-    let final_stmt_str = match dht_ops_cursor {
-        Some(cursor) => format!("{stmt_str} AND DhtOp.rowid > {cursor}"),
-        None => stmt_str.into(),
-    };
+/// Dump one page of the full integration JSON state.
+pub(crate) async fn full_integration_dump_paginated(
+    dht_store: &DhtStoreRead,
+    dht_ops_cursor: Option<DhtOpsCursor>,
+    limit: Option<u32>,
+) -> ConductorApiResult<FullIntegrationStateDump> {
+    let after = dht_ops_cursor
+        .as_ref()
+        .map(|cursor| (cursor.when_received, &cursor.hash));
+    let page = dht_store.dht_ops_page_for_dump(after, limit).await?;
+    let dht_ops_cursor = page.cursor.map(|cursor| DhtOpsCursor {
+        when_received: cursor.when_received,
+        hash: cursor.hash,
+    });
+    let mut validation_limbo = Vec::new();
+    let mut integration_limbo = Vec::new();
+    let mut integrated = Vec::new();
+    for row in page.rows {
+        let op = match row.wire {
+            holochain_state::dht_store::DumpOpWireRow::Chain(row) => {
+                holochain_p2p::build_chain_dht_op(row).ok()
+            }
+            holochain_state::dht_store::DumpOpWireRow::Warrant(row) => {
+                holochain_p2p::build_warrant_dht_op(row).ok()
+            }
+        };
+        let Some(op) = op else {
+            continue;
+        };
+        match row.state {
+            holochain_state::dht_store::DumpOpState::ValidationLimbo => {
+                validation_limbo.push(op);
+            }
+            holochain_state::dht_store::DumpOpState::IntegrationLimbo => {
+                integration_limbo.push(op);
+            }
+            holochain_state::dht_store::DumpOpState::Integrated => integrated.push(op),
+        }
+    }
 
-    let mut stmt = txn.prepare(final_stmt_str.as_str())?;
-
-    let r: Vec<DhtOp> = stmt
-        .query_and_then([], |row| {
-            holochain_state::query::map_sql_dht_op(false, "dht_type", row)
-        })?
-        .collect::<StateQueryResult<Vec<_>>>()?;
-    Ok(r)
+    Ok(FullIntegrationStateDump {
+        validation_limbo,
+        integration_limbo,
+        integrated,
+        dht_ops_cursor,
+    })
 }
 
 /// Extract the modifiers from the RoleSettingsMap into their own HashMap
@@ -3722,6 +3985,27 @@ fn get_memproof_map_from_role_settings(role_settings: &Option<RoleSettingsMap>) 
                 RoleSettings::Provisioned { membrane_proof, .. } => membrane_proof
                     .as_ref()
                     .map(|m| (role_name.clone(), m.clone())),
+            })
+            .collect(),
+        None => HashMap::new(),
+    }
+}
+
+/// Extract the init properties from the RoleSettingsMap into their own HashMap
+fn get_init_properties_map_from_role_settings(
+    roles_settings: &Option<RoleSettingsMap>,
+) -> InitPropertiesMap {
+    match roles_settings {
+        Some(role_settings_map) => role_settings_map
+            .iter()
+            .filter_map(|(role_name, role_settings)| match role_settings {
+                #[allow(deprecated)]
+                RoleSettings::UseExisting { .. } => None,
+                RoleSettings::Provisioned {
+                    init_properties, ..
+                } => init_properties
+                    .as_ref()
+                    .map(|p| (role_name.clone(), p.clone())),
             })
             .collect(),
         None => HashMap::new(),

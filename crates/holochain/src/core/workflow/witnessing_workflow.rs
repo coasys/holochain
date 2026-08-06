@@ -3,7 +3,6 @@
 use super::{error::WorkflowResult, incoming_dht_ops_workflow::incoming_dht_ops_workflow};
 use crate::conductor::space::Space;
 use crate::core::queue_consumer::{TriggerSender, WorkComplete};
-use crate::core::ribosome::weigh_placeholder;
 use crate::core::share::Share;
 use holo_hash::{ActionHash, AgentPubKey, DhtOpHash, EntryHash};
 use holochain_p2p::event::CountersigningSessionNegotiationMessage;
@@ -62,7 +61,9 @@ pub(crate) async fn witnessing_workflow(
                 sys_validation_trigger.clone(),
                 non_enzymatic_ops
                     .into_iter()
-                    .map(|(_h, o)| o.into())
+                    // Countersigning ops are published ops and require
+                    // validation receipts.
+                    .map(|(_h, o)| (o.into(), true))
                     .collect(),
             )
             .await?;
@@ -104,14 +105,13 @@ pub(crate) fn receive_incoming_countersigning_ops(
     // For each op check it's the right type and extract the
     // entry hash, required actions and expires time.
     for (hash, op) in ops {
-        // Must be a store entry op.
-        if let ChainOp::StoreEntry(_, _, entry) = &op {
+        // Must be a store entry op, with its entry present.
+        if let ChainOp::CreateEntry(_, OpEntry::Present(entry)) = &op {
             // Must be a CounterSign entry type.
             if let Entry::CounterSign(session_data, _) = entry {
                 let entry_hash = EntryHash::with_data_sync(entry);
                 // Get the required actions for this session.
-                let weight = weigh_placeholder();
-                let action_set = session_data.build_action_set(entry_hash, weight)?;
+                let action_set = build_action_set(session_data, entry_hash)?;
 
                 // Get the expires time for this session.
                 let expires = *session_data.preflight_request().session_times.end();
@@ -137,7 +137,7 @@ pub(crate) fn receive_incoming_countersigning_ops(
                 tracing::warn!(?op, "Incoming countersigning op is not a CounterSign entry");
             }
         } else {
-            tracing::warn!(?op, "Incoming countersigning op is not a StoreEntry op");
+            tracing::warn!(?op, "Incoming countersigning op is not a CreateEntry op");
         }
     }
 
@@ -170,7 +170,7 @@ impl WitnessingWorkspace {
         expires: Timestamp,
     ) {
         // Hash the action of this op.
-        let action_hash = ActionHash::with_data_sync(&op.action());
+        let action_hash = ActionHash::with_data_sync(op.signed_action().data());
         self.inner
             .share_mut(|i, _| {
                 // Get the session at this entry or create an empty one.
@@ -228,8 +228,9 @@ impl WitnessingWorkspace {
                         let r = map.into_iter().fold(
                             (Vec::new(), Vec::new(), Vec::new()),
                             |(mut agents, mut ops, mut actions), (_, (op_hash, op, _))| {
-                                let action = op.action();
-                                let signature = op.signature().clone();
+                                let signed_action = op.signed_action();
+                                let action = signed_action.data().clone();
+                                let signature = signed_action.signature().clone();
                                 // Agents to notify.
                                 agents.push(action.author().clone());
                                 // Signed actions to notify them with.
@@ -255,6 +256,28 @@ mod tests {
     use holo_hash::fixt::DhtOpHashFixturator;
     use holo_hash::fixt::EntryHashFixturator;
 
+    /// Build a `CreateLink` chain op, distinct per `seed`. The session
+    /// bookkeeping under test only cares about action identity and hash, not
+    /// signature validity, so the fields are arbitrary rather than fixturated.
+    fn create_link_op(seed: u8) -> ChainOp {
+        let action = Action {
+            header: ActionHeader {
+                author: AgentPubKey::from_raw_36(vec![seed; 36]),
+                timestamp: Timestamp::from_micros(seed as i64 * 1000),
+                action_seq: 1,
+                prev_action: Some(ActionHash::from_raw_36(vec![seed.wrapping_add(1); 36])),
+            },
+            data: ActionData::CreateLink(CreateLinkData {
+                base_address: EntryHash::from_raw_36(vec![seed.wrapping_add(2); 36]).into(),
+                target_address: EntryHash::from_raw_36(vec![seed.wrapping_add(3); 36]).into(),
+                zome_index: 0.into(),
+                link_type: 0.into(),
+                tag: LinkTag(vec![]),
+            }),
+        };
+        ChainOp::CreateLink(SignedAction::new(action, Signature::from([seed; 64])))
+    }
+
     /// Test that a session of 5 actions is complete when the expiry time is in the future and all
     /// required actions are present.
     #[test]
@@ -262,13 +285,12 @@ mod tests {
         let workspace = WitnessingWorkspace::new();
 
         // - Create the ops.
-        let data = || {
+        let mut next_seed = 0u8;
+        let mut data = || {
+            next_seed += 1;
             let op_hash = fixt!(DhtOpHash);
-            let op = ChainOp::RegisterAddLink(
-                Signature(vec![1; 64].try_into().unwrap()),
-                fixt!(CreateLink),
-            );
-            let action = op.action();
+            let op = create_link_op(next_seed);
+            let action = op.signed_action().data().clone();
             (op_hash, op, action)
         };
         let entry_hash = fixt!(EntryHash);
@@ -284,7 +306,7 @@ mod tests {
         }
 
         // - Put the ops in the workspace with expiry set to one hour from now.
-        for (op_h, op) in op_hashes.into_iter().zip(ops.into_iter()) {
+        for (op_h, op) in op_hashes.into_iter().zip(ops) {
             let expires = (Timestamp::now() + std::time::Duration::from_secs(60 * 60)).unwrap();
             workspace.put(
                 entry_hash.clone(),
@@ -317,11 +339,8 @@ mod tests {
 
         // - Create an op for a session that has expired in the past.
         let op_hash = fixt!(DhtOpHash);
-        let op = ChainOp::RegisterAddLink(
-            Signature(vec![1; 64].try_into().unwrap()),
-            fixt!(CreateLink),
-        );
-        let action = op.action();
+        let op = create_link_op(1);
+        let action = op.signed_action().data().clone();
         let entry_hash = fixt!(EntryHash);
         let action_hash = ActionHash::with_data_sync(&action);
         let expires = (Timestamp::now() - std::time::Duration::from_secs(60 * 60)).unwrap();

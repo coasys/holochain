@@ -1,8 +1,9 @@
 use super::error::WorkflowResult;
 use crate::core::queue_consumer::WorkComplete;
 use futures::{stream, StreamExt};
-use holochain_keystore::MetaLairClient;
+use holochain_keystore::{MetaLairClient, ValidationReceiptExt};
 use holochain_p2p::DynHolochainP2pDna;
+use holochain_state::dht_store::DhtStore;
 use holochain_state::prelude::*;
 use itertools::Itertools;
 use std::collections::HashSet;
@@ -17,12 +18,12 @@ mod unit_tests;
 
 #[cfg_attr(
     feature = "instrument",
-    tracing::instrument(skip(vault, network, keystore, apply_block))
+    tracing::instrument(skip(dht_store, network, keystore, apply_block))
 )]
-/// Send validation receipts to their authors in serial and without waiting for responses.
+/// Send validation receipts to their authors in serial, skipping authors not recently online.
 pub async fn validation_receipt_workflow(
     dna_hash: Arc<DnaHash>,
-    vault: DbWrite<DbKindDht>,
+    dht_store: DhtStore,
     network: DynHolochainP2pDna,
     keystore: MetaLairClient,
     running_cell_ids: HashSet<CellId>,
@@ -46,7 +47,10 @@ pub async fn validation_receipt_workflow(
         .collect::<Vec<_>>();
 
     // Get out all ops that are marked for sending receipt.
-    let receipts = pending_receipts(&vault, validators.clone()).await?;
+    let receipts = dht_store
+        .as_read()
+        .pending_validation_receipts(validators.clone())
+        .await?;
 
     let validators: HashSet<_> = validators.into_iter().collect();
 
@@ -63,6 +67,28 @@ pub async fn validation_receipt_workflow(
         .collect::<Vec<(AgentPubKey, Vec<ValidationReceipt>)>>();
 
     for (author, receipts) in grouped_by_author {
+        // Don't need to check online status for our own agents — the self-send
+        // is handled inside sign_and_send_receipts_to_author.
+        if !validators.contains(&author) {
+            // Check if the author was recently online before doing any signing/sending work.
+            // If they're not in the peer store, clear the flag so we don't retry until
+            // a new publish from them re-sets it.
+            let recently_online = match network.was_agent_recently_online(author.clone()).await {
+                Ok(recently_online) => recently_online,
+                Err(e) => {
+                    info!(failed_to_check_agent_online_status = ?e);
+                    continue;
+                }
+            };
+
+            if !recently_online {
+                let op_hashes: Vec<DhtOpHash> =
+                    receipts.iter().map(|r| r.dht_op_hash.clone()).collect();
+                dht_store.clear_require_receipts(op_hashes).await?;
+                continue;
+            }
+        }
+
         // Try to send the validation receipts
         match sign_and_send_receipts_to_author(
             network.clone(),
@@ -75,13 +101,9 @@ pub async fn validation_receipt_workflow(
         {
             Ok(()) => {
                 // Mark them sent so we don't keep trying
-                for receipt in receipts {
-                    vault
-                        .write_async(move |txn| {
-                            set_require_receipt(txn, &receipt.dht_op_hash, false)
-                        })
-                        .await?;
-                }
+                let op_hashes: Vec<DhtOpHash> =
+                    receipts.iter().map(|r| r.dht_op_hash.clone()).collect();
+                dht_store.clear_require_receipts(op_hashes).await?;
             }
             Err(e) => {
                 info!(failed_to_sign_and_send_receipt = ?e);
@@ -145,14 +167,4 @@ async fn sign_and_send_receipts_to_author(
     .await?;
 
     Ok(())
-}
-
-#[cfg_attr(feature = "instrument", tracing::instrument(skip_all))]
-async fn pending_receipts(
-    vault: &DbRead<DbKindDht>,
-    validators: Vec<AgentPubKey>,
-) -> StateQueryResult<Vec<(ValidationReceipt, AgentPubKey)>> {
-    vault
-        .read_async(move |txn| get_pending_validation_receipts(txn, validators))
-        .await
 }

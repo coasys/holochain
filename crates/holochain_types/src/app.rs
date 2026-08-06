@@ -135,6 +135,12 @@ pub struct InstallAppPayload {
     /// This can be useful for diagnostics.
     #[serde(default)]
     pub ignore_genesis_failure: bool,
+
+    /// If true, suppress genesis for all cells in this app and instead reconstruct each cell's
+    /// source chain by fetching the agent's prior chain from the DHT.
+    /// Requires `agent_key` to be `Some`.
+    #[serde(default)]
+    pub restore_from_dht: bool,
 }
 
 /// Alias
@@ -143,6 +149,8 @@ pub type MemproofMap = HashMap<RoleName, MembraneProof>;
 pub type ModifiersMap = HashMap<RoleName, DnaModifiersOpt<YamlProperties>>;
 /// Alias
 pub type ExistingCellsMap = HashMap<RoleName, CellId>;
+/// Alias
+pub type InitPropertiesMap = HashMap<RoleName, InitProperties>;
 /// Alias
 pub type RoleSettingsMap = HashMap<RoleName, RoleSettings>;
 /// Alias
@@ -173,6 +181,12 @@ pub enum RoleSettings {
         /// Overwrites the dna modifiers from the dna manifest. Only
         /// modifier fields for which `Some(T)` is provided will be overwritten.
         modifiers: Option<DnaModifiersOpt<YamlProperties>>,
+        /// Opaque, app-defined bytes made available to the cell during `init`.
+        ///
+        /// Not interpreted by the conductor and never written to the DHT. The bytes are persisted
+        /// by the conductor alongside the app at install time and read back during `init` via the
+        /// `hdk::migrate::get_init_properties` host function.
+        init_properties: Option<InitProperties>,
     },
 }
 
@@ -181,6 +195,7 @@ impl Default for RoleSettings {
         Self::Provisioned {
             membrane_proof: None,
             modifiers: None,
+            init_properties: None,
         }
     }
 }
@@ -191,9 +206,11 @@ impl From<RoleSettingsYaml> for RoleSettings {
             RoleSettingsYaml::Provisioned {
                 membrane_proof,
                 modifiers,
+                init_properties,
             } => Self::Provisioned {
                 membrane_proof,
                 modifiers,
+                init_properties,
             },
             #[allow(deprecated)]
             RoleSettingsYaml::UseExisting { cell_id } => Self::UseExisting { cell_id },
@@ -226,6 +243,12 @@ pub enum RoleSettingsYaml {
         /// Overwrites the dna modifiers from the dna manifest. Only
         /// modifier fields for which `Some(T)` is provided will be overwritten.
         modifiers: Option<DnaModifiersOpt<YamlProperties>>,
+        /// Opaque, app-defined bytes made available to the cell during `init`.
+        ///
+        /// Not interpreted by the conductor and never written to the DHT. The bytes are persisted
+        /// conductor-side at install time and read back during `init` via the
+        /// `hdk::migrate::get_init_properties` host function.
+        init_properties: Option<InitProperties>,
     },
 }
 
@@ -741,6 +764,41 @@ impl InstalledAppCommon {
     }
 }
 
+/// Compact, operator-visible summary of a [`SignedWarrant`].
+///
+/// Carries just enough to identify the warrant for debugging;
+/// the variant of [`UnrecoverableCellReason`] tells the operator what kind it is.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, SerializedBytes)]
+pub struct WarrantSummary {
+    /// The peer that authored and signed the warrant.
+    pub author: AgentPubKey,
+    /// The agent against whom the warrant was issued.
+    pub warrantee: AgentPubKey,
+    /// When the warrant was issued.
+    pub timestamp: Timestamp,
+}
+
+impl From<SignedWarrant> for WarrantSummary {
+    fn from(sw: SignedWarrant) -> Self {
+        let w = sw.into_data();
+        Self {
+            author: w.author,
+            warrantee: w.warrantee,
+            timestamp: w.timestamp,
+        }
+    }
+}
+
+/// Reason a cell's source chain is unrecoverable via restore.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, SerializedBytes)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum UnrecoverableCellReason {
+    /// Two or more conflicting actions at the same sequence position (proven chain fork).
+    ChainForkWarrant(Box<WarrantSummary>),
+    /// Another validated [`ChainIntegrityWarrant`] variant (e.g. `InvalidChainOp`).
+    ChainIntegrityWarrant(Box<WarrantSummary>),
+}
+
 /// The status of an installed app.
 ///
 /// Either Enabled or Disabled, set by the user via the conductor admin interface.
@@ -754,6 +812,14 @@ pub enum AppStatus {
     /// The app is installed, but genesis has not completed because Membrane Proofs
     /// have not been provided.
     AwaitingMemproofs,
+    /// Restore is in progress for one or more of the app's cells. Zome calls are rejected.
+    /// Transitions to Disabled(NeverStarted) once every cell has restored, or to
+    /// Unrecoverable if any cell fails permanently.
+    AwaitingRestore,
+    /// Restore hit a permanent failure: a locally-validated ChainIntegrityWarrant against the
+    /// agent. Terminal — the app cannot be enabled and must be uninstalled.
+    /// The CellId identifies which cell triggered the failure.
+    Unrecoverable(CellId, UnrecoverableCellReason),
 }
 
 /// The reason for an app being in a Disabled state.
@@ -931,7 +997,7 @@ mod tests {
                 description: None,
                 roles: vec![],
                 allow_deferred_memproofs: false,
-                signal_url: None,
+                relay_url: None,
                 bootstrap_url: None,
             }),
             Timestamp::now(),
@@ -952,7 +1018,7 @@ mod tests {
             description: None,
             roles: vec![],
             allow_deferred_memproofs: false,
-            signal_url: None,
+            relay_url: None,
             bootstrap_url: None,
         });
         let mut app = InstalledAppCommon::new(
@@ -1052,7 +1118,7 @@ mod tests {
             roles: vec![],
             allow_deferred_memproofs: false,
             bootstrap_url: None,
-            signal_url: None,
+            relay_url: None,
         });
         let mut app = InstalledAppCommon::new(
             "app",
@@ -1116,10 +1182,11 @@ mod tests {
         let role_settings: RoleSettings = RoleSettings::Provisioned {
             membrane_proof: None,
             modifiers: None,
+            init_properties: None,
         };
         assert_eq!(
             serde_json::to_string(&role_settings).unwrap(),
-            "{\"type\":\"provisioned\",\"value\":{\"membrane_proof\":null,\"modifiers\":null}}"
+            "{\"type\":\"provisioned\",\"value\":{\"membrane_proof\":null,\"modifiers\":null,\"init_properties\":null}}"
         );
     }
 
@@ -1154,5 +1221,56 @@ mod tests {
             serde_json::to_string(&reason).unwrap(),
             "{\"type\":\"user\"}"
         );
+    }
+
+    #[test]
+    fn warrant_summary_serde_round_trip() {
+        let summary = WarrantSummary {
+            author: fixt!(AgentPubKey),
+            warrantee: fixt!(AgentPubKey),
+            timestamp: Timestamp::from_micros(1_000_000),
+        };
+        let bytes = SerializedBytes::try_from(&summary).unwrap();
+        let recovered: WarrantSummary = bytes.try_into().unwrap();
+        assert_eq!(summary, recovered);
+    }
+
+    #[test]
+    fn unrecoverable_cell_reason_serde_round_trip() {
+        let summary = WarrantSummary {
+            author: fixt!(AgentPubKey),
+            warrantee: fixt!(AgentPubKey),
+            timestamp: Timestamp::from_micros(1_000_000),
+        };
+        let reason = UnrecoverableCellReason::ChainForkWarrant(Box::new(summary));
+        let bytes = SerializedBytes::try_from(&reason).unwrap();
+        let recovered: UnrecoverableCellReason = bytes.try_into().unwrap();
+        assert_eq!(reason, recovered);
+    }
+
+    #[test]
+    fn app_status_awaiting_restore_serialization() {
+        let status = AppStatus::AwaitingRestore;
+        assert_eq!(
+            serde_json::to_string(&status).unwrap(),
+            r#"{"type":"awaiting_restore"}"#
+        );
+        let recovered: AppStatus = serde_json::from_str(r#"{"type":"awaiting_restore"}"#).unwrap();
+        assert_eq!(status, recovered);
+    }
+
+    #[test]
+    fn app_status_unrecoverable_serialization() {
+        let cell_id = CellId::new(fixt!(DnaHash), fixt!(AgentPubKey));
+        let summary = WarrantSummary {
+            author: fixt!(AgentPubKey),
+            warrantee: fixt!(AgentPubKey),
+            timestamp: Timestamp::from_micros(1_000_000),
+        };
+        let reason = UnrecoverableCellReason::ChainForkWarrant(Box::new(summary));
+        let status = AppStatus::Unrecoverable(cell_id, reason);
+        let json = serde_json::to_string(&status).unwrap();
+        let recovered: AppStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(status, recovered);
     }
 }

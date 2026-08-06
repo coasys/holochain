@@ -1,51 +1,11 @@
 use crate::peer_meta::PeerMetaInfo;
-use crate::{AppInfo, FullStateDump, StorageInfo};
+use crate::{AppInfo, FullStateDump, OpTimingsDump, StorageInfo};
 use holo_hash::*;
 use holochain_types::prelude::*;
 use holochain_types::websocket::AllowedOrigins;
 use holochain_zome_types::cell::CellId;
 use kitsune2_api::Url;
-use serde::ser::SerializeSeq;
-use std::collections::{BTreeMap, HashMap, HashSet};
-
-/// A snapshot of the current network state of the conductor.
-///
-/// Returned by [`AdminRequest::GetNetworkState`]. Updated automatically as
-/// cells join, fail to join, and as peers are discovered.
-#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ConductorNetworkState {
-    /// Cells that have successfully joined the network.
-    pub joined_cells: HashSet<CellId>,
-    /// Cells that failed to join the network, keyed by cell ID with the error message.
-    #[serde(with = "serde_cell_id_map")]
-    pub failed_cells: HashMap<CellId, String>,
-    /// Known peers per DNA space, populated as peers are discovered.
-    pub peers_by_dna: HashMap<DnaHash, HashSet<AgentPubKey>>,
-    /// DNA spaces for which initial bootstrap/peer-discovery has completed.
-    pub bootstrap_complete_dnas: HashSet<DnaHash>,
-}
-
-impl ConductorNetworkState {
-    /// Returns `true` if the given cell has successfully joined the network.
-    pub fn is_joined(&self, cell_id: &CellId) -> bool {
-        self.joined_cells.contains(cell_id)
-    }
-
-    /// Returns the error for a cell that failed to join, if any.
-    pub fn join_error(&self, cell_id: &CellId) -> Option<&str> {
-        self.failed_cells.get(cell_id).map(|s| s.as_str())
-    }
-
-    /// Returns the number of peers known for a DNA space.
-    pub fn peer_count(&self, dna_hash: &DnaHash) -> usize {
-        self.peers_by_dna.get(dna_hash).map_or(0, |s| s.len())
-    }
-
-    /// Returns `true` if bootstrap has completed for the given DNA space.
-    pub fn is_bootstrap_complete(&self, dna_hash: &DnaHash) -> bool {
-        self.bootstrap_complete_dnas.contains(dna_hash)
-    }
-}
+use std::collections::{BTreeMap, HashMap};
 
 /// Represents the available conductor functions to call over an admin interface.
 ///
@@ -269,6 +229,12 @@ pub enum AdminRequest {
     DumpState {
         /// The cell ID for which to dump state
         cell_id: Box<CellId>,
+        /// Last source-chain record seen; the next page starts after it.
+        #[serde(default)]
+        source_chain_cursor: Option<crate::state_dump::SourceChainCursor>,
+        /// Maximum number of source-chain records to return. Must be greater than zero.
+        #[serde(default)]
+        limit: Option<u32>,
     },
 
     /// Dump the state of the conductor, including the in-memory representation
@@ -288,7 +254,7 @@ pub enum AdminRequest {
     /// Note that the response to this call can be very big, as it's requesting for
     /// the full database of the cell.
     ///
-    /// Also note that while DHT ops about private entries will be returned (like `StoreRecord`),
+    /// Also note that while DHT ops about private entries will be returned (like `CreateRecord`),
     /// the entry in itself will be missing, as it's not actually stored publicly in the DHT shard.
     ///
     /// # Returns
@@ -297,9 +263,44 @@ pub enum AdminRequest {
     DumpFullState {
         /// The cell ID for which to dump the state
         cell_id: Box<CellId>,
-        /// The last seen DhtOp RowId, returned in the full dump state.
-        /// Only DhtOps with RowId greater than the cursor will be returned.
-        dht_ops_cursor: Option<u64>,
+        /// Pagination cursor from a previous `DumpFullState`; only DHT ops
+        /// received after it are returned. `None` starts from the beginning.
+        #[serde(default)]
+        dht_ops_cursor: Option<crate::state_dump::DhtOpsCursor>,
+        /// Maximum number of DHT ops across all lifecycle buckets to return.
+        /// Must be greater than zero.
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+
+    /// Dump the lifecycle timings of the DHT ops held by this conductor for
+    /// the DNA specified by argument `dna_hash`.
+    ///
+    /// The DHT database is shared by every cell running the same DNA, so the
+    /// dump covers the whole DHT arc this conductor is currently holding for
+    /// that DNA, not the ops of any one agent running the DNA.
+    ///
+    /// Ops are returned oldest received first, across both validation limbos
+    /// and the integrated set, so a page can mix in-flight and integrated ops.
+    ///
+    /// The DHT op tables carry no index on received time, so each page is a
+    /// full scan and sort of the arc. Dumping a large arc is expensive;
+    /// always pass `limit` and page with the returned cursor.
+    ///
+    /// # Returns
+    ///
+    /// [`AdminResponse::OpTimingsDumped`]
+    DumpOpTimings {
+        /// The DNA whose DHT arc to dump op timings for
+        dna_hash: DnaHash,
+        /// Pagination cursor from a previous `DumpOpTimings`; only ops
+        /// ordered strictly after it are returned. `None` starts from the
+        /// beginning.
+        #[serde(default)]
+        cursor: Option<crate::state_dump::OpTimingsCursor>,
+        /// Maximum number of ops to return. Must be greater than zero.
+        #[serde(default)]
+        limit: Option<u32>,
     },
 
     /// Dump the network metrics tracked by kitsune.
@@ -438,39 +439,6 @@ pub enum AdminRequest {
     /// Namely, this finds cells with DNAs whose manifest lists the given DNA hash in its `lineage` field.
     #[cfg(feature = "unstable-migration")]
     GetCompatibleCells(DnaHash),
-
-    /// Get a snapshot of the current network state of the conductor.
-    ///
-    /// Returns the current state of all cells and peer discovery without blocking.
-    /// Fields are updated automatically as cells join the network and peers are discovered.
-    ///
-    /// To wait until a specific cell is ready, use [`AdminRequest::AwaitCellNetworkReady`].
-    ///
-    /// # Returns
-    ///
-    /// [`AdminResponse::NetworkState`]
-    GetNetworkState,
-
-    /// Wait until a specific cell has joined the network, or until the timeout elapses.
-    ///
-    /// This is the admin-interface equivalent of the in-process
-    /// `ConductorHandle::await_cell_network_ready` method. It blocks the request until the cell
-    /// has successfully joined its k2 space, or until `timeout_ms` milliseconds have elapsed.
-    ///
-    /// If the join succeeds, returns [`AdminResponse::CellNetworkReady`].
-    /// If the join fails or the timeout elapses, returns [`AdminResponse::Error`].
-    ///
-    /// # Returns
-    ///
-    /// [`AdminResponse::CellNetworkReady`]
-    AwaitCellNetworkReady {
-        /// The cell to wait for.
-        cell_id: CellId,
-        /// Maximum time to wait, in milliseconds.
-        /// If not set, waits up to 30 seconds.
-        #[serde(default)]
-        timeout_ms: Option<u64>,
-    },
 }
 
 /// Represents the possible responses to an [`AdminRequest`]
@@ -572,6 +540,11 @@ pub enum AdminResponse {
     /// Note that this result can be very big, as it's requesting the full database of the cell.
     FullStateDumped(FullStateDump),
 
+    /// The successful response to an [`AdminRequest::DumpOpTimings`].
+    ///
+    /// Contains one page of op timings plus the cursor to resume from.
+    OpTimingsDumped(OpTimingsDump),
+
     /// The successful response to an [`AdminRequest::DumpConductorState`].
     ///
     /// Simply a JSON serialized snapshot of `Conductor` and `ConductorState` from the `holochain` crate.
@@ -624,17 +597,6 @@ pub enum AdminResponse {
     /// The successful response to an [`AdminRequest::GetCompatibleCells`].
     #[cfg(feature = "unstable-migration")]
     CompatibleCells(CompatibleCells),
-
-    /// The successful response to an [`AdminRequest::GetNetworkState`].
-    ///
-    /// Contains a snapshot of the conductor's current network state: which cells have joined,
-    /// which have failed, and what peers have been discovered per DNA space.
-    NetworkState(ConductorNetworkState),
-
-    /// The successful response to an [`AdminRequest::AwaitCellNetworkReady`].
-    ///
-    /// The cell has successfully joined the network and is ready for operations.
-    CellNetworkReady,
 }
 
 #[cfg(feature = "unstable-migration")]
@@ -687,6 +649,12 @@ pub enum AppStatusFilter {
     Enabled,
     /// Filter on apps which are Disabled.
     Disabled,
+    /// Filter on apps which are awaiting memproofs.
+    AwaitingMemproofs,
+    /// Filter on apps whose source-chain restore is in progress.
+    AwaitingRestore,
+    /// Filter on apps whose source-chain restore has permanently failed.
+    Unrecoverable,
 }
 
 /// Informational response for listing app interfaces.
@@ -787,60 +755,14 @@ pub struct AppAuthenticationTokenIssued {
     pub expires_at: Option<Timestamp>,
 }
 
-mod serde_cell_id_map {
-    use super::*;
-    use serde::Deserialize;
-    pub fn serialize<S>(map: &HashMap<CellId, String>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut seq = serializer.serialize_seq(Some(map.len()))?;
-        for (cell_id, error) in map {
-            seq.serialize_element(&(cell_id, error))?;
-        }
-        seq.end()
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<HashMap<CellId, String>, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let entries: Vec<(CellId, String)> = Vec::deserialize(deserializer)?;
-        Ok(entries.into_iter().collect())
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::{AdminRequest, AdminResponse, ConductorNetworkState, ExternalApiWireError};
+    use crate::{AdminRequest, AdminResponse, DhtOpsCursor, ExternalApiWireError, OpTimingsCursor};
+    use holo_hash::{AgentPubKey, DhtOpHash, DnaHash};
+    use holochain_zome_types::cell::CellId;
     use serde::Deserialize;
 
     #[test]
-    fn conductor_network_state_json_round_trip() {
-        use holo_hash::{AgentPubKey, DnaHash};
-        use holochain_zome_types::cell::CellId;
-
-        let mut state = ConductorNetworkState::default();
-        let cell_a = CellId::new(
-            DnaHash::from_raw_36(vec![0; 36]),
-            AgentPubKey::from_raw_36(vec![1; 36]),
-        );
-        let cell_b = CellId::new(
-            DnaHash::from_raw_36(vec![2; 36]),
-            AgentPubKey::from_raw_36(vec![3; 36]),
-        );
-        state.joined_cells.insert(cell_a.clone());
-        state
-            .failed_cells
-            .insert(cell_b.clone(), "boom".to_string());
-
-        let json = serde_json::to_string(&state).unwrap();
-        let decoded: ConductorNetworkState = serde_json::from_str(&json).unwrap();
-
-        assert!(decoded.joined_cells.contains(&cell_a));
-        assert_eq!(decoded.failed_cells.get(&cell_b).unwrap(), "boom");
-    }
-
     fn admin_request_serialization() {
         use rmp_serde::Deserializer;
 
@@ -887,5 +809,88 @@ mod tests {
         let json_actual = serde_json::to_string(&json_value).unwrap();
 
         assert_eq!(json_actual, json_expected);
+    }
+
+    #[test]
+    fn state_dump_requests_default_omitted_pagination_fields() {
+        let cell_id = CellId::new(
+            DnaHash::from_raw_36(vec![1; 36]),
+            AgentPubKey::from_raw_36(vec![2; 36]),
+        );
+
+        let dump_state: AdminRequest = serde_json::from_value(serde_json::json!({
+            "type": "dump_state",
+            "value": { "cell_id": cell_id.clone() }
+        }))
+        .unwrap();
+        assert!(matches!(
+            dump_state,
+            AdminRequest::DumpState {
+                source_chain_cursor: None,
+                limit: None,
+                ..
+            }
+        ));
+
+        let dump_full_state: AdminRequest = serde_json::from_value(serde_json::json!({
+            "type": "dump_full_state",
+            "value": { "cell_id": cell_id }
+        }))
+        .unwrap();
+        assert!(matches!(
+            dump_full_state,
+            AdminRequest::DumpFullState {
+                dht_ops_cursor: None,
+                limit: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn dht_ops_cursor_serializes_received_time() {
+        let cursor = DhtOpsCursor {
+            when_received: 42,
+            hash: DhtOpHash::from_raw_36(vec![3; 36]),
+        };
+        let value = serde_json::to_value(cursor).unwrap();
+
+        assert_eq!(value["when_received"], 42);
+        assert!(value.get("when_integrated").is_none());
+    }
+
+    #[test]
+    fn dump_op_timings_request_defaults_omitted_pagination_fields() {
+        let dna_hash = DnaHash::from_raw_36(vec![1; 36]);
+
+        let request: AdminRequest = serde_json::from_value(serde_json::json!({
+            "type": "dump_op_timings",
+            "value": { "dna_hash": dna_hash }
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            request,
+            AdminRequest::DumpOpTimings {
+                cursor: None,
+                limit: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn op_timings_cursor_round_trips() {
+        let cursor = OpTimingsCursor {
+            when_received: 42,
+            hash: DhtOpHash::from_raw_36(vec![3; 36]),
+        };
+        let value = serde_json::to_value(cursor.clone()).unwrap();
+
+        assert_eq!(value["when_received"], 42);
+        assert_eq!(
+            serde_json::from_value::<OpTimingsCursor>(value).unwrap(),
+            cursor
+        );
     }
 }

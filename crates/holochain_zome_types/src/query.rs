@@ -2,10 +2,9 @@
 
 use crate::prelude::*;
 use holo_hash::EntryHash;
-use holo_hash::HasHash;
 use holo_hash::{ActionHash, AgentPubKey, AnyLinkableHash};
-use holochain_integrity_types::{LinkTag, LinkTypeFilter};
-pub use holochain_serialized_bytes::prelude::*;
+use holochain_integrity_types::prelude::{LinkTag, LinkTypeFilter};
+use holochain_serialized_bytes::prelude::*;
 use holochain_wasmer_common::WasmError;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -102,14 +101,14 @@ pub struct LinkQuery {
 /// An agent's status and chain records returned from a `hdk::chain::get_agent_activity`
 /// query.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, SerializedBytes)]
-pub struct AgentActivity {
+pub struct AgentActivityStatus {
     /// Actions on this chain seen as valid by this authority, matching the
     /// filters passed to the query, as a vector of
     /// `(action_sequence, action_hash)` tuples.
     ///
     /// **Note**: This may include actions seen as _invalid_ by authorities
     /// who have validated _other_ DHT operations for the actions. Check the
-    /// [`AgentActivity::warrants`] field for warrants against any of these
+    /// [`AgentActivityStatus::warrants`] field for warrants against any of these
     /// actions for a full picture of their validity.
     pub valid_activity: Vec<(u32, ActionHash)>,
     /// Actions on this chain seen as invalid by this authority, matching the
@@ -120,7 +119,7 @@ pub struct AgentActivity {
     /// chain head, last valid action, and any forks, irrespective of
     /// what chain actions match the filters. **Note**: warrants received from
     /// other sources are not reflected in this status; check the value of the
-    /// [`AgentActivity::warrants`] field.
+    /// [`AgentActivityStatus::warrants`] field.
     pub status: ChainStatus,
     /// The highest chain action that has been observed by this authority,
     /// irrespective of the filters. This includes actions that have been
@@ -137,7 +136,7 @@ pub struct AgentActivity {
 /// When calling `hdk::chain::get_agent_activity`, specify whether to get either a
 /// summary of the chain's status, or a summary plus the hashes of the chain
 /// actions that match the given [`ChainQueryFilter`]. See the notes on
-/// [`AgentActivity`] about the perspective-dependent nature of the agent's
+/// [`AgentActivityStatus`] about the perspective-dependent nature of the agent's
 /// status and valid/rejected activity.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize, SerializedBytes)]
 pub enum ActivityRequest {
@@ -152,17 +151,17 @@ pub enum ActivityRequest {
 
 /// The highest action sequence for an agent's chain that has been
 /// _observed_, but not necessarily validated and integrated, by this
-/// authority. This struct is seen in the [`AgentActivity`] response from
+/// authority. This struct is seen in the [`AgentActivityStatus`] response from
 /// the `hdk::chain::get_agent_activity` query. It also includes the hash(es) of
 /// the action(s) at this action sequence.
 ///
 /// Because it may come from an unintegrated DHT operation, a given hash
 /// shouldn't be used as a dependency when constructing another action that
 /// depends on its validity. Instead, check that the hash exists in
-/// [`AgentActivity::valid_activity`] and does not exist in
-/// [`AgentActivity::warrants`]; this will tell you that the action has been
+/// [`AgentActivityStatus::valid_activity`] and does not exist in
+/// [`AgentActivityStatus::warrants`]; this will tell you that the action has been
 /// integrated and presumably found valid by all validators. It's also
-/// recommended to check that [`AgentActivity::status`] is [`ChainStatus::Valid`].
+/// recommended to check that [`AgentActivityStatus::status`] is [`ChainStatus::Valid`].
 #[derive(Clone, Debug, PartialEq, Hash, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HighestObserved {
     /// The highest sequence number observed.
@@ -187,7 +186,7 @@ pub enum ChainStatus {
     /// highest integrated action is at the given action sequence and action
     /// hash. This does not indicate that the chain is valid from the
     /// perspective of _all_ authorities; check the contents of
-    /// [`AgentActivity::warrants`] for notices of invalidity found by
+    /// [`AgentActivityStatus::warrants`] for notices of invalidity found by
     /// other authorities.
     Valid(ChainHead),
     /// The chain is forked at the given action sequence by at least two
@@ -196,18 +195,27 @@ pub enum ChainStatus {
     ///
     /// The chain may also have invalid records in addition to being forked;
     /// in this case, `Forked` is still used. To check for invalid records,
-    /// look at the value of [`AgentActivity::warrants`] and/or call
+    /// look at the value of [`AgentActivityStatus::warrants`] and/or call
     /// `hdk::chain::get_agent_activity` with [`ActivityRequest::Full`] and look
-    /// at the values in [`AgentActivity::rejected_activity`].
+    /// at the values in [`AgentActivityStatus::rejected_activity`].
     Forked(ChainFork),
     /// The chain is not forked, but is invalid from the given action sequence
     /// and action hash forward, by virtue of this authority finding a
-    /// [`RegisterAgentActivity`] DHT operation for that action to be
+    /// [`AgentActivityStatus`] DHT operation for that action to be
     /// invalid. There may be other types of operations for the chain's
     /// actions which other authorities have found to be invalid; this
     /// information is not reflected here but is instead found in the
-    /// [`AgentActivity::warrants`] field.
+    /// [`AgentActivityStatus::warrants`] field.
     Invalid(ChainHead),
+    /// The chain is valid (as for [`ChainStatus::Valid`]) and additionally its
+    /// head is a `CloseChain` action, meaning the author has closed their
+    /// source chain and will append no further actions. The `ChainHead` points
+    /// to the `CloseChain` action.
+    ///
+    /// `Closed` takes precedence over [`ChainStatus::Valid`]. A chain that is
+    /// also forked or invalid is reported as [`ChainStatus::Forked`] or
+    /// [`ChainStatus::Invalid`] instead, since those are higher priority.
+    Closed(ChainHead),
 }
 
 /// A pairing of an action sequence and its corresponding action hash in a chain.
@@ -406,21 +414,11 @@ impl ChainQueryFilter {
     }
 
     /// Filter a vector of records according to the query.
+    ///
+    /// A [`Record`] is an [`ActionHashedContainer`], so this is just
+    /// [`Self::filter_actions`] specialised to records.
     pub fn filter_records(&self, records: Vec<Record>) -> Vec<Record> {
-        let actions = self.filter_actions(
-            records
-                .iter()
-                .map(|record| record.action_hashed().clone())
-                .collect(),
-        );
-        let action_hashset = actions
-            .iter()
-            .map(|action| action.as_hash().clone())
-            .collect::<HashSet<ActionHash>>();
-        records
-            .into_iter()
-            .filter(|record| action_hashset.contains(record.action_address()))
-            .collect()
+        self.filter_actions(records)
     }
 }
 
@@ -484,63 +482,65 @@ impl LinkQuery {
 #[cfg(feature = "fixturators")]
 mod tests {
     use super::ChainQueryFilter;
-    use crate::action::EntryType;
-    use crate::fixt::AppEntryDefFixturator;
+    use crate::fixt::{AppEntryDefFixturator, CreateAction, CreateLinkAction, UpdateAction};
     use crate::prelude::*;
     use ::fixt::prelude::*;
     use holo_hash::fixt::EntryHashFixturator;
     use holo_hash::HasHash;
+    use holochain_integrity_types::prelude::{ActionHashed, EntryType};
 
-    /// Create three Actions with various properties.
-    /// Also return the EntryTypes used to construct the first two actions.
+    /// Create hashed actions with various properties. The `Action`s are built
+    /// directly (header + `ActionData`), seeded from the per-variant
+    /// fixturators, so the content-derived hashes match the production
+    /// authoring path.
     fn fixtures() -> [ActionHashed; 7] {
         let entry_type_1 = EntryType::App(fixt!(AppEntryDef));
         let entry_type_2 = EntryType::AgentPubKey;
 
         let entry_hash_0 = fixt!(EntryHash);
 
-        let mut h0 = fixt!(Create);
-        h0.entry_type = entry_type_1.clone();
-        h0.action_seq = 0;
-        h0.entry_hash = entry_hash_0.clone();
-        let hh0 = ActionHashed::from_content_sync(h0);
+        let mut h0 = fixt!(Action, CreateAction);
+        *h0.entry_type_mut().unwrap() = entry_type_1.clone();
+        h0.header.action_seq = 0;
+        *h0.entry_hash_mut().unwrap() = entry_hash_0.clone();
+        let hh0: ActionHashed = ActionHashed::from_content_sync(h0);
 
-        let mut h1 = fixt!(Update);
-        h1.entry_type = entry_type_2.clone();
-        h1.action_seq = 1;
-        h1.prev_action = hh0.as_hash().clone();
-        let hh1 = ActionHashed::from_content_sync(h1);
+        let mut h1 = fixt!(Action, UpdateAction);
+        *h1.entry_type_mut().unwrap() = entry_type_2.clone();
+        h1.header.action_seq = 1;
+        h1.header.prev_action = Some(hh0.as_hash().clone());
+        let hh1: ActionHashed = ActionHashed::from_content_sync(h1);
 
-        let mut h2 = fixt!(CreateLink);
-        h2.action_seq = 2;
-        h2.prev_action = hh1.as_hash().clone();
-        let hh2 = ActionHashed::from_content_sync(h2);
+        let mut h2 = fixt!(Action, CreateLinkAction);
+        h2.header.action_seq = 2;
+        h2.header.prev_action = Some(hh1.as_hash().clone());
+        let hh2: ActionHashed = ActionHashed::from_content_sync(h2);
 
-        let mut h3 = fixt!(Create);
-        h3.entry_type = entry_type_2.clone();
-        h3.action_seq = 3;
-        h3.prev_action = hh2.as_hash().clone();
-        let hh3 = ActionHashed::from_content_sync(h3);
+        let mut h3 = fixt!(Action, CreateAction);
+        *h3.entry_type_mut().unwrap() = entry_type_2.clone();
+        h3.header.action_seq = 3;
+        h3.header.prev_action = Some(hh2.as_hash().clone());
+        let hh3: ActionHashed = ActionHashed::from_content_sync(h3);
 
         // Cheeky forker!
-        let mut h3a = fixt!(Create);
-        h3a.entry_type = entry_type_1.clone();
-        h3a.action_seq = 3;
-        h3a.prev_action = hh2.as_hash().clone();
-        let hh3a = ActionHashed::from_content_sync(h3a);
+        let mut h3a = fixt!(Action, CreateAction);
+        *h3a.entry_type_mut().unwrap() = entry_type_1.clone();
+        h3a.header.action_seq = 3;
+        h3a.header.prev_action = Some(hh2.as_hash().clone());
+        let hh3a: ActionHashed = ActionHashed::from_content_sync(h3a);
 
-        let mut h4 = fixt!(Update);
-        h4.entry_type = entry_type_1.clone();
+        let mut h4 = fixt!(Action, UpdateAction);
+        *h4.entry_type_mut().unwrap() = entry_type_1.clone();
         // same entry content as h0
-        h4.entry_hash = entry_hash_0;
-        h4.action_seq = 4;
-        h4.prev_action = hh3.as_hash().clone();
-        let hh4 = ActionHashed::from_content_sync(h4);
+        *h4.entry_hash_mut().unwrap() = entry_hash_0;
+        h4.header.action_seq = 4;
+        h4.header.prev_action = Some(hh3.as_hash().clone());
+        let hh4: ActionHashed = ActionHashed::from_content_sync(h4);
 
-        let mut h5 = fixt!(CreateLink);
-        h5.action_seq = 5;
-        h5.prev_action = hh4.as_hash().clone();
-        let hh5 = ActionHashed::from_content_sync(h5);
+        let mut h5 = fixt!(Action, CreateLinkAction);
+        h5.header.action_seq = 5;
+        h5.header.prev_action = Some(hh4.as_hash().clone());
+        let hh5: ActionHashed = ActionHashed::from_content_sync(h5);
 
         [hh0, hh1, hh2, hh3, hh3a, hh4, hh5]
     }
@@ -596,9 +596,11 @@ mod tests {
     fn filter_by_action_type() {
         let actions = fixtures();
 
-        let query_1 = ChainQueryFilter::new().action_type(actions[0].action_type());
-        let query_2 = ChainQueryFilter::new().action_type(actions[1].action_type());
-        let query_3 = ChainQueryFilter::new().action_type(actions[2].action_type());
+        // `ChainQueryFilter` filters against `ActionType`; the fixtures are
+        // Create (0), Update (1) and CreateLink (2).
+        let query_1 = ChainQueryFilter::new().action_type(ActionType::Create);
+        let query_2 = ChainQueryFilter::new().action_type(ActionType::Update);
+        let query_3 = ChainQueryFilter::new().action_type(ActionType::CreateLink);
 
         assert_eq!(
             map_query(&query_1, &actions),
@@ -701,7 +703,7 @@ mod tests {
         assert_eq!(
             map_query(
                 &ChainQueryFilter::new()
-                    .action_type(actions[0].action_type())
+                    .action_type(ActionType::Create)
                     .entry_type(actions[0].entry_type().unwrap().clone())
                     .sequence_range(ChainQueryFilterRange::ActionSeqRange(0, 0)),
                 &actions
@@ -712,7 +714,7 @@ mod tests {
         assert_eq!(
             map_query(
                 &ChainQueryFilter::new()
-                    .action_type(actions[1].action_type())
+                    .action_type(ActionType::Update)
                     .entry_type(actions[0].entry_type().unwrap().clone())
                     .sequence_range(ChainQueryFilterRange::ActionSeqRange(0, 999)),
                 &actions
@@ -739,8 +741,8 @@ mod tests {
         assert_eq!(
             map_query(
                 &ChainQueryFilter::new()
-                    .action_type(actions[0].action_type())
-                    .action_type(actions[1].action_type()),
+                    .action_type(ActionType::Create)
+                    .action_type(ActionType::Update),
                 &actions
             ),
             [true, true, false, true, true, true, false].to_vec()
@@ -749,7 +751,7 @@ mod tests {
         // Filter for create actions only
         assert_eq!(
             map_query(
-                &ChainQueryFilter::new().action_type(actions[0].action_type()),
+                &ChainQueryFilter::new().action_type(ActionType::Create),
                 &actions
             ),
             [true, false, false, true, true, false, false].to_vec()

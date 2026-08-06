@@ -54,14 +54,8 @@ async fn signed_zome_call() {
         .unwrap();
 
     // create a source chain read to query for the cap grant
-    let authored_db = conductor
-        .get_or_create_authored_db(cell_id.dna_hash(), cell_id.agent_pubkey().clone())
-        .unwrap();
-    let dht_db = conductor.get_dht_db(cell_id.dna_hash()).unwrap();
-
     let chain = SourceChainRead::new(
-        authored_db.into(),
-        dht_db.into(),
+        conductor.get_dht_store(cell_id.dna_hash()).unwrap(),
         conductor.keystore(),
         agent_pub_key.clone(),
     )
@@ -184,14 +178,8 @@ async fn signed_zome_call_wildcard() {
         .unwrap();
 
     // create a source chain read to query for the cap grant
-    let authored_db = conductor
-        .get_or_create_authored_db(cell_id.dna_hash(), cell_id.agent_pubkey().clone())
-        .unwrap();
-    let dht_db = conductor.get_dht_db(cell_id.dna_hash()).unwrap();
-
     let source_chain_read = SourceChainRead::new(
-        authored_db.into(),
-        dht_db.into(),
+        conductor.get_dht_store(cell_id.dna_hash()).unwrap(),
         conductor.keystore(),
         agent_pub_key.clone(),
     )
@@ -300,14 +288,8 @@ async fn cap_grant_info_call() {
     // println!("deletehash: {:?}\n", _deletehash);
 
     // create a source chain read to query for the deleted cap grant
-    let authored_db = conductor
-        .get_or_create_authored_db(cell_id.dna_hash(), cell_id.agent_pubkey().clone())
-        .unwrap();
-    let dht_db = conductor.get_dht_db(cell_id.dna_hash()).unwrap();
-
     let chain = SourceChainRead::new(
-        authored_db.into(),
-        dht_db.into(),
+        conductor.get_dht_store(cell_id.dna_hash()).unwrap(),
         conductor.keystore(),
         agent_pub_key.clone(),
     )
@@ -321,7 +303,7 @@ async fn cap_grant_info_call() {
     let delete_list = chain.query(delete_query.clone()).await.unwrap();
 
     // ensure that delete_address is same as cap_grant_address
-    if let Action::Delete(delete) = delete_list[0].action().clone() {
+    if let ActionData::Delete(delete) = &delete_list[0].action().data {
         let delete_action_address = delete.deletes_address.clone();
         assert_eq!(delete_action_address, grant_action_hash);
     } else {
@@ -383,7 +365,7 @@ async fn grant_zome_call_capability_call() {
 
     // Wait for integration workflow to complete
     retry_fn_until_timeout(
-        || async { conductor.all_ops_integrated(dna.dna_hash()).unwrap() },
+        || async { conductor.all_ops_integrated(dna.dna_hash()).await.unwrap() },
         None,
         None,
     )
@@ -393,7 +375,7 @@ async fn grant_zome_call_capability_call() {
     // Take state dump before calling grant_zome_call_capability
     let before_state_dump = conductor
         .raw_handle()
-        .dump_full_cell_state(cell_id, None)
+        .dump_full_cell_state(cell_id, None, None)
         .await
         .expect("Failed to get state dump");
 
@@ -431,7 +413,7 @@ async fn grant_zome_call_capability_call() {
 
     // Wait for integration workflow to complete
     retry_fn_until_timeout(
-        || async { conductor.all_ops_integrated(dna.dna_hash()).unwrap() },
+        || async { conductor.all_ops_integrated(dna.dna_hash()).await.unwrap() },
         None,
         None,
     )
@@ -441,7 +423,7 @@ async fn grant_zome_call_capability_call() {
     // Take state dump after calling grant_zome_call_capability
     let after_state_dump = conductor
         .raw_handle()
-        .dump_full_cell_state(cell_id, None)
+        .dump_full_cell_state(cell_id, None, None)
         .await
         .expect("Failed to get state dump");
 
@@ -479,7 +461,7 @@ async fn grant_zome_call_capability_call_ensures_zome_initialization() {
 
     // Wait for initialize zomes workflow and integration workflow to complete
     retry_fn_until_timeout(
-        || async { conductor.all_ops_integrated(dna.dna_hash()).unwrap() },
+        || async { conductor.all_ops_integrated(dna.dna_hash()).await.unwrap() },
         None,
         None,
     )
@@ -489,7 +471,7 @@ async fn grant_zome_call_capability_call_ensures_zome_initialization() {
     // Take state dump before calling grant_zome_call_capability
     let before_state_dump = conductor
         .raw_handle()
-        .dump_full_cell_state(cell_id, None)
+        .dump_full_cell_state(cell_id, None, None)
         .await
         .expect("Failed to get state dump");
 
@@ -511,7 +493,7 @@ async fn grant_zome_call_capability_call_ensures_zome_initialization() {
 
     // Wait for initialize zomes workflow and integration workflow to complete
     retry_fn_until_timeout(
-        || async { conductor.all_ops_integrated(dna.dna_hash()).unwrap() },
+        || async { conductor.all_ops_integrated(dna.dna_hash()).await.unwrap() },
         None,
         None,
     )
@@ -521,7 +503,7 @@ async fn grant_zome_call_capability_call_ensures_zome_initialization() {
     // Take state dump after calling grant_zome_call_capability
     let after_state_dump = conductor
         .raw_handle()
-        .dump_full_cell_state(cell_id, None)
+        .dump_full_cell_state(cell_id, None, None)
         .await
         .expect("Failed to get state dump");
 
@@ -581,7 +563,7 @@ async fn revoke_zome_call_capability_call() {
 
     // Wait for integration workflow to complete
     retry_fn_until_timeout(
-        || async { conductor.all_ops_integrated(dna.dna_hash()).unwrap() },
+        || async { conductor.all_ops_integrated(dna.dna_hash()).await.unwrap() },
         None,
         None,
     )
@@ -597,7 +579,7 @@ async fn revoke_zome_call_capability_call() {
     // Take a state dump, before calling revoke_zome_call_capability
     let before_state_dump = conductor
         .raw_handle()
-        .dump_full_cell_state(cell_id, None)
+        .dump_full_cell_state(cell_id, None, None)
         .await
         .expect("Failed to get state dump");
 
@@ -609,7 +591,7 @@ async fn revoke_zome_call_capability_call() {
 
     // Wait for integration workflow to complete
     retry_fn_until_timeout(
-        || async { conductor.all_ops_integrated(dna.dna_hash()).unwrap() },
+        || async { conductor.all_ops_integrated(dna.dna_hash()).await.unwrap() },
         None,
         None,
     )
@@ -619,7 +601,7 @@ async fn revoke_zome_call_capability_call() {
     // Take a state dump, after calling revoke_zome_call_capability
     let after_state_dump = conductor
         .raw_handle()
-        .dump_full_cell_state(cell_id, None)
+        .dump_full_cell_state(cell_id, None, None)
         .await
         .expect("Failed to get state dump");
 
@@ -680,7 +662,7 @@ async fn revoke_zome_call_capability_call_ensures_zome_initialization() {
 
     // Wait for integration workflow to complete
     retry_fn_until_timeout(
-        || async { conductor.all_ops_integrated(dna.dna_hash()).unwrap() },
+        || async { conductor.all_ops_integrated(dna.dna_hash()).await.unwrap() },
         None,
         None,
     )
@@ -690,7 +672,7 @@ async fn revoke_zome_call_capability_call_ensures_zome_initialization() {
     // Take a state dump, before calling revoke_zome_call_capability
     let before_state_dump = conductor
         .raw_handle()
-        .dump_full_cell_state(cell_id, None)
+        .dump_full_cell_state(cell_id, None, None)
         .await
         .expect("Failed to get state dump");
 
@@ -702,7 +684,7 @@ async fn revoke_zome_call_capability_call_ensures_zome_initialization() {
 
     // Wait for integration workflow to complete
     retry_fn_until_timeout(
-        || async { conductor.all_ops_integrated(dna.dna_hash()).unwrap() },
+        || async { conductor.all_ops_integrated(dna.dna_hash()).await.unwrap() },
         None,
         None,
     )
@@ -712,7 +694,7 @@ async fn revoke_zome_call_capability_call_ensures_zome_initialization() {
     // Take a state dump, after calling revoke_zome_call_capability
     let after_state_dump = conductor
         .raw_handle()
-        .dump_full_cell_state(cell_id, None)
+        .dump_full_cell_state(cell_id, None, None)
         .await
         .expect("Failed to get state dump");
 

@@ -6,9 +6,20 @@ use holo_hash::WasmHash;
 use holochain_types::prelude::*;
 
 /// A wrapper around the WASM database for managing WASM bytecode storage and retrieval.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct WasmStore<Db = holochain_data::DbWrite<holochain_data::kind::Wasm>> {
     db: Db,
+}
+
+#[cfg(feature = "test_utils")]
+impl WasmStore {
+    pub fn test_new() -> Self {
+        let db = tokio_helper::block_forever_on(holochain_data::test_open_db(
+            holochain_data::kind::Wasm,
+        ))
+        .unwrap();
+        Self { db }
+    }
 }
 
 /// A read-only view of the WASM store.
@@ -32,11 +43,23 @@ impl WasmStore<holochain_data::DbRead<holochain_data::kind::Wasm>> {
 
     /// Retrieve a WASM module from the database by its hash.
     pub async fn get(&self, hash: &WasmHash) -> StateQueryResult<Option<DnaWasmHashed>> {
-        match self.db.get_wasm(hash).await {
-            Ok(Some(wasm_hashed)) => Ok(Some(wasm_hashed)),
-            Ok(None) => Ok(None),
-            Err(e) => Err(StateQueryError::from(e)),
-        }
+        self.db.get_wasm(hash).await.map_err(StateQueryError::from)
+    }
+
+    /// Check whether a compiled, serialized WASM module exists in the database.
+    pub async fn contains_compiled(&self, hash: &WasmHash) -> StateQueryResult<bool> {
+        self.db
+            .compiled_wasm_exists(hash)
+            .await
+            .map_err(StateQueryError::from)
+    }
+
+    /// Retrieve a compiled, serialized WASM module from the database by its original WASM hash.
+    pub async fn get_compiled(&self, hash: &WasmHash) -> StateQueryResult<Option<bytes::Bytes>> {
+        self.db
+            .get_compiled_wasm(hash)
+            .await
+            .map_err(StateQueryError::from)
     }
 }
 
@@ -49,6 +72,18 @@ impl WasmStore<holochain_data::DbWrite<holochain_data::kind::Wasm>> {
             .map_err(StateMutationError::from)
     }
 
+    /// Store a compiled, serialized WASM module under its original WASM hash.
+    pub async fn put_compiled(
+        &self,
+        wasm_hash: WasmHash,
+        serialized: bytes::Bytes,
+    ) -> StateMutationResult<()> {
+        self.db
+            .put_compiled_wasm(wasm_hash, serialized)
+            .await
+            .map_err(StateMutationError::from)
+    }
+
     /// Downgrade this writable store to a read-only store.
     pub fn as_read(&self) -> WasmStoreRead {
         WasmStore::new(self.db.as_ref().clone())
@@ -56,7 +91,7 @@ impl WasmStore<holochain_data::DbWrite<holochain_data::kind::Wasm>> {
 
     /// Convert this writable store into a read-only store.
     pub fn into_read(self) -> WasmStoreRead {
-        WasmStore::new(self.db.as_ref().clone())
+        WasmStore::new(self.db.into())
     }
 }
 

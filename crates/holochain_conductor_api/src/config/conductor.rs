@@ -25,51 +25,24 @@
 //!   ## Use the Holochain-provided dev-test bootstrap server.
 //!   bootstrap_url: https://dev-test-bootstrap2.holochain.org
 //!
-//!   ## Use the Holochain-provided dev-test sbd/signalling server.
-//!   signal_url: wss://dev-test-bootstrap2.holochain.org
-//!
 //!   ## Use the iroh relay server.
 //!   relay_url: https://use1-1.relay.n0.iroh-canary.iroh.link./
 //!
-//!   ## Override the default WebRTC STUN configuration.
-//!   ## This is OPTIONAL. If this is not specified, it will default
-//!   ## to what you can see here:
-//!   webrtc_config: {
-//!     "iceServers": [
-//!       { "urls": ["stun:stun.l.google.com:19302"] }
-//!     ]
-//!   }
-//!
 //! "#;
-//!
-//! // The network config also supports an optional `space_overrides` map,
-//! // keyed by DNA hash (base64), to override bootstrap_url and/or signal_url
-//! // for specific DNA spaces. App manifest overrides take precedence.
-//! // Note: relay_url cannot be overridden per-space because the iroh
-//! // transport is shared across all spaces at the conductor level.
-//! //
-//! // Example:
-//! //   space_overrides:
-//! //     "uhC0k...base64DnaHash...":
-//! //       bootstrap_url: https://special-bootstrap.example.com
 //!
 //!use holochain_conductor_api::conductor::ConductorConfig;
 //!
-//!let _: ConductorConfig = serde_yaml::from_str(yaml).unwrap();
+//!let _: ConductorConfig = yaml_serde::from_str(yaml).unwrap();
 //! ```
 
 use crate::conductor::process::ERROR_CODE;
 use crate::config::conductor::paths::DataRootPath;
-use holochain_types::prelude::DbSyncStrategy;
-#[cfg(feature = "schema")]
-use kitsune2_transport_tx5::WebRtcConfig;
 use schemars::JsonSchema;
 #[cfg(feature = "schema")]
 use schemars::Schema;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::HashMap;
 use std::path::Path;
 
 mod admin_interface_config;
@@ -92,6 +65,12 @@ pub struct ConductorConfig {
     #[serde(default)]
     pub tracing_override: Option<String>,
 
+    /// The WASM backend to use.
+    ///
+    /// Only needs to be set if multiple WASM backends are available to Holochain, otherwise it
+    /// will default to the enabled backend.
+    pub wasm_backend: Option<WasmBackend>,
+
     /// The path to the data root for this conductor;
     /// This can be `None` while building up the config programatically but MUST
     /// be set by the time the config is used to build a conductor.
@@ -111,14 +90,14 @@ pub struct ConductorConfig {
 
     /// Override the default database synchronous strategy.
     ///
-    /// See [sqlite documentation] for information about database sync levels.
-    /// See [`DbSyncStrategy`] for details.
+    /// See [sqlite documentation](https://www.sqlite.org/pragma.html#pragma_synchronous) for information about database sync levels.
+    /// See [`DbSyncLevel`] for details.
     /// This is best left at its default value unless you know what you
     /// are doing.
     ///
     /// [sqlite documentation]: https://www.sqlite.org/pragma.html#pragma_synchronous
     #[serde(default)]
-    pub db_sync_strategy: DbSyncStrategy,
+    pub db_sync_level: DbSyncLevel,
 
     /// Override the default number of read connections available per database.
     ///
@@ -148,12 +127,37 @@ pub struct ConductorConfig {
     #[serde(default = "default_incoming_request_concurrency_limit")]
     pub incoming_request_concurrency_limit: u16,
 
+    /// Number of peers that must agree on the chain head during source-chain restore.
+    ///
+    /// Increasing this value raises the cost of feeding a restoring agent a fabricated history
+    /// but also raises the chance that restore fails on small or poorly-connected DHTs.
+    #[serde(
+        default = "default_restore_chain_quorum",
+        deserialize_with = "deserialize_restore_chain_quorum"
+    )]
+    pub restore_chain_quorum: u8,
+
     /// Tuning parameters to adjust the behaviour of the conductor.
     #[serde(default)]
     pub tuning_params: Option<ConductorTuningParams>,
 
     /// Tracing scope.
     pub tracing_scope: Option<String>,
+}
+
+/// Database synchronous level configuration.
+///
+/// Corresponds to the `PRAGMA synchronous` pragma.
+/// See [sqlite documentation](https://www.sqlite.org/pragma.html#pragma_synchronous).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+pub enum DbSyncLevel {
+    /// Use xSync for all writes. Not needed for WAL mode.
+    Full,
+    /// Sync at critical moments. Default.
+    #[default]
+    Normal,
+    /// Syncing is left to the operating system and power loss could result in corrupted database.
+    Off,
 }
 
 /// Default value is either 8, or the number of CPU cores multiplied by 2, whichever is greater.
@@ -173,17 +177,36 @@ fn default_incoming_request_concurrency_limit() -> u16 {
     std::cmp::max(default_db_max_readers() - 3, 1)
 }
 
+fn default_restore_chain_quorum() -> u8 {
+    2
+}
+
+fn deserialize_restore_chain_quorum<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u8::deserialize(deserializer)?;
+    if value == 0 {
+        return Err(serde::de::Error::custom(
+            "restore_chain_quorum must be greater than 0",
+        ));
+    }
+    Ok(value)
+}
+
 impl Default for ConductorConfig {
     fn default() -> Self {
         Self {
             tracing_override: None,
+            wasm_backend: None,
             data_root_path: None,
             keystore: KeystoreConfig::default(),
             admin_interfaces: None,
             network: NetworkConfig::default(),
-            db_sync_strategy: DbSyncStrategy::default(),
+            db_sync_level: DbSyncLevel::default(),
             db_max_readers: default_db_max_readers(),
             incoming_request_concurrency_limit: default_incoming_request_concurrency_limit(),
+            restore_chain_quorum: default_restore_chain_quorum(),
             tuning_params: None,
             tracing_scope: None,
         }
@@ -195,7 +218,7 @@ fn config_from_yaml<T>(yaml: &str) -> ConductorConfigResult<T>
 where
     T: DeserializeOwned,
 {
-    serde_yaml::from_str(yaml).map_err(ConductorConfigError::SerializationError)
+    yaml_serde::from_str(yaml).map_err(ConductorConfigError::SerializationError)
 }
 
 impl ConductorConfig {
@@ -245,6 +268,34 @@ impl ConductorConfig {
     }
 }
 
+/// The WASM backend to use.
+///
+/// Note that the backend must be available in the Holochain binary, otherwise it will reject the
+/// configuration at startup.
+#[derive(Clone, Deserialize, Serialize, Debug, PartialEq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub enum WasmBackend {
+    /// Use the cranelift WASM compiler.
+    ///
+    /// Recommended as the default for users.
+    #[serde(rename = "cranelift")]
+    Cranelift,
+
+    /// Use the LLVM WASM compiler.
+    ///
+    /// Recommended for service conductors, where the LLVM toolchain can be provided and improved
+    /// WASM execution time is wanted.
+    #[serde(rename = "LLVM")]
+    Llvm,
+
+    /// Use the wasmi WASM compiler.
+    ///
+    /// Recommended where neither cranelift nor LLVM can be used. This is known to be the case on
+    /// iOS where compilation on the fly is not permitted.
+    #[serde(rename = "wasmi")]
+    Wasmi,
+}
+
 /// Configure Kitsune2 Reporting.
 #[derive(Clone, Default, Deserialize, Serialize, Debug, PartialEq, JsonSchema)]
 #[serde(
@@ -267,49 +318,25 @@ pub enum ReportConfig {
     },
 }
 
-/// Per-space network configuration overrides, keyed by DNA hash (base64).
-///
-/// These override the default bootstrap_url and signal_url for specific spaces/DNAs.
-#[derive(Clone, Deserialize, Serialize, Debug, PartialEq, JsonSchema)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct SpaceNetworkOverride {
-    /// Override the bootstrap server URL for this space.
-    #[serde(default)]
-    #[schemars(schema_with = "holochain_util::jsonschema::optional_url2_schema")]
-    pub bootstrap_url: Option<url2::Url2>,
-    /// Override the signal server URL for this space.
-    #[serde(default)]
-    #[schemars(schema_with = "holochain_util::jsonschema::optional_url2_schema")]
-    pub signal_url: Option<url2::Url2>,
-    /// Override the base64-encoded authentication material for bootstrap/signal
-    /// services for this space. Required when the space's bootstrap server
-    /// uses a different auth credential than the conductor default.
-    #[serde(default)]
-    pub base64_auth_material: Option<String>,
-    /// Override the relay URL for this space. When set, this relay will be
-    /// dynamically added to the iroh endpoint when the space is created,
-    /// allowing spaces with different relay servers to coexist.
-    #[serde(default)]
-    #[schemars(schema_with = "holochain_util::jsonschema::optional_url2_schema")]
-    pub relay_url: Option<url2::Url2>,
-}
-
 /// All the network config information for the conductor.
-#[derive(Clone, Deserialize, Serialize, Debug, PartialEq, JsonSchema)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct NetworkConfig {
-    /// Authentication material if required by sbd/signal/bootstrap services.
-    /// This material should be specified as a base64 string
+    /// Authentication material if required by the bootstrap service.
+    ///
+    /// This material should be specified as a base64 url-safe, with no padding, string.
     #[serde(default)]
-    pub base64_auth_material: Option<String>,
+    pub base64_auth_material_bootstrap: Option<String>,
+
+    /// Authentication material if required by the relay service.
+    ///
+    /// This material should be specified as a base64 url-safe, with no padding, string.
+    #[serde(default)]
+    pub base64_auth_material_relay: Option<String>,
 
     /// The Kitsune2 bootstrap server to use for WAN discovery.
     #[schemars(schema_with = "holochain_util::jsonschema::url2_schema")]
     pub bootstrap_url: url2::Url2,
-
-    /// The Kitsune2 signaling server for WebRTC connections to use.
-    #[schemars(schema_with = "holochain_util::jsonschema::url2_schema")]
-    pub signal_url: url2::Url2,
 
     /// The iroh relay server address used with the iroh transport.
     #[schemars(schema_with = "holochain_util::jsonschema::url2_schema")]
@@ -325,10 +352,6 @@ pub struct NetworkConfig {
     #[serde(default = "default_request_timeout_s")]
     pub request_timeout_s: u64,
 
-    /// The Kitsune2 webrtc_config to use for connecting to peers.
-    #[cfg_attr(feature = "schema", schemars(schema_with = "webrtc_config_schema"))]
-    pub webrtc_config: Option<serde_json::Value>,
-
     /// The target arc factor to apply when receiving hints from kitsune2.
     /// In normal operation, leave this as the default 1.
     /// For leacher nodes that do not contribute to gossip, set to zero.
@@ -338,24 +361,6 @@ pub struct NetworkConfig {
     /// Configure Kitsune2 Reporting.
     #[serde(default)]
     pub report: ReportConfig,
-
-    /// Per-space network configuration overrides, keyed by DNA hash (base64).
-    ///
-    /// Allows configuring different bootstrap and signal servers for specific
-    /// DNA spaces. Overrides specified here take effect as a fallback when the
-    /// app manifest does not provide its own override.
-    ///
-    /// Example:
-    /// ```yaml
-    /// space_overrides:
-    ///   "uhC0k...base64DnaHash...":
-    ///     bootstrap_url: https://special-bootstrap.example.com
-    ///   "uhC0k...anotherDnaHash...":
-    ///     bootstrap_url: https://other-bootstrap.example.com
-    ///     signal_url: wss://other-signal.example.com
-    /// ```
-    #[serde(default)]
-    pub space_overrides: HashMap<String, SpaceNetworkOverride>,
 
     /// Use this advanced field to directly configure kitsune2.
     ///
@@ -383,15 +388,13 @@ pub struct NetworkConfig {
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
-            base64_auth_material: None,
+            base64_auth_material_bootstrap: None,
+            base64_auth_material_relay: None,
             bootstrap_url: url2::Url2::parse("https://dev-test-bootstrap2.holochain.org"),
-            signal_url: url2::Url2::parse("wss://dev-test-bootstrap2.holochain.org"),
             relay_url: url2::Url2::parse("https://use1-1.relay.n0.iroh-canary.iroh.link./"),
             request_timeout_s: default_request_timeout_s(),
-            webrtc_config: None,
             target_arc_factor: default_target_arc_factor(),
             report: Default::default(),
-            space_overrides: HashMap::new(),
             advanced: None,
             #[cfg(feature = "test-utils")]
             disable_bootstrap: false,
@@ -409,6 +412,39 @@ const fn default_request_timeout_s() -> u64 {
 
 const fn default_target_arc_factor() -> u32 {
     1
+}
+
+impl std::fmt::Debug for NetworkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("NetworkConfig");
+        s.field(
+            "base64_auth_material_bootstrap",
+            &self
+                .base64_auth_material_bootstrap
+                .as_ref()
+                .map(|_| "<redacted>"),
+        );
+        s.field(
+            "base64_auth_material_relay",
+            &self
+                .base64_auth_material_relay
+                .as_ref()
+                .map(|_| "<redacted>"),
+        );
+        s.field("bootstrap_url", &self.bootstrap_url);
+        s.field("relay_url", &self.relay_url);
+        s.field("request_timeout_s", &self.request_timeout_s);
+        s.field("target_arc_factor", &self.target_arc_factor);
+        s.field("report", &self.report);
+        s.field("advanced", &self.advanced);
+        #[cfg(feature = "test-utils")]
+        {
+            s.field("disable_bootstrap", &self.disable_bootstrap);
+            s.field("disable_publish", &self.disable_publish);
+            s.field("disable_gossip", &self.disable_gossip);
+        }
+        s.finish()
+    }
 }
 
 impl NetworkConfig {
@@ -500,52 +536,15 @@ impl NetworkConfig {
                 "serverUrl",
                 serde_json::Value::String(self.bootstrap_url.as_str().into()),
             )?;
+
+            // connectTimeoutS is set to the floor of 3/8 of the request_timeout_s.
+            let connect_timeout_s: serde_json::Number = ((self.request_timeout_s * 3) / 8).into();
             Self::insert_module_config(
                 module_config,
-                "tx5Transport",
-                "serverUrl",
-                serde_json::Value::String(self.signal_url.as_str().into()),
+                "irohTransport",
+                "connectTimeoutS",
+                serde_json::Value::Number(connect_timeout_s),
             )?;
-
-            // timeoutS is set to the floor of 1/2 of the request_timeout_s.
-            let timeout_s: serde_json::Number = (self.request_timeout_s / 2).into();
-            Self::insert_module_config(
-                module_config,
-                "tx5Transport",
-                "timeoutS",
-                serde_json::Value::Number(timeout_s),
-            )?;
-
-            // webrtcConnectTimeoutS is set to the floor of 3/8 of the request_timeout_s.
-            let webrtc_connect_timeout_s: serde_json::Number =
-                ((self.request_timeout_s * 3) / 8).into();
-            Self::insert_module_config(
-                module_config,
-                "tx5Transport",
-                "webrtcConnectTimeoutS",
-                serde_json::Value::Number(webrtc_connect_timeout_s),
-            )?;
-
-            if let Some(webrtc_config) = &self.webrtc_config {
-                Self::insert_module_config(
-                    module_config,
-                    "tx5Transport",
-                    "webrtcConfig",
-                    webrtc_config.clone(),
-                )?;
-            }
-
-            if tracing::enabled!(target: "NETAUDIT", tracing::Level::WARN) {
-                tracing::info!(
-                    "The NETAUDIT target is enabled, turning on network backend tracing"
-                );
-                Self::insert_module_config(
-                    module_config,
-                    "tx5Transport",
-                    "tracingEnabled",
-                    serde_json::Value::Bool(true),
-                )?;
-            }
 
             Self::insert_module_config(
                 module_config,
@@ -725,17 +724,6 @@ impl Default for ConductorTuningParams {
 }
 
 #[cfg(feature = "schema")]
-fn webrtc_config_schema(_: &mut schemars::SchemaGenerator) -> Schema {
-    let schema = schemars::schema_for!(Option<WebRtcConfig>);
-
-    // Note that the definitions for this type are not being copied. This type is embedded in the
-    // K2 config, so the definitions are already present in the schema.
-
-    Schema::try_from(schema.get("schema").expect("Missing schema field").clone())
-        .expect("Failed to convert schema")
-}
-
-#[cfg(feature = "schema")]
 fn kitsune2_config_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
     #[allow(dead_code)]
     #[derive(JsonSchema)]
@@ -753,8 +741,7 @@ fn kitsune2_config_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
         mem_peer_store: Option<kitsune2_core::factories::MemPeerStoreModConfig>,
         #[serde(flatten)]
         k2_gossip: Option<kitsune2_gossip::K2GossipModConfig>,
-        #[serde(flatten)]
-        tx5_transport: Option<kitsune2_transport_tx5::Tx5TransportModConfig>,
+        #[cfg(feature = "kitsune2_transport_iroh")]
         #[serde(flatten)]
         iroh_transport: Option<kitsune2_transport_iroh::IrohTransportModConfig>,
     }
@@ -762,7 +749,7 @@ fn kitsune2_config_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
     let schema = schemars::schema_for!(Option<K2Config>);
 
     for (k, v) in schema
-        .get("definitions")
+        .get("$defs")
         .and_then(|d| d.as_object())
         .expect("No definitions")
     {
@@ -775,8 +762,7 @@ fn kitsune2_config_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
         }
     }
 
-    Schema::try_from(schema.get("schema").expect("Missing schema field").clone())
-        .expect("Failed to convert schema")
+    schema
 }
 
 #[cfg(test)]
@@ -817,15 +803,17 @@ mod tests {
             result,
             ConductorConfig {
                 tracing_override: None,
+                wasm_backend: None,
                 data_root_path: Some(PathBuf::from("/path/to/env").into()),
                 network: NetworkConfig::default(),
                 keystore: KeystoreConfig::DangerTestKeystore,
                 admin_interfaces: None,
-                db_sync_strategy: DbSyncStrategy::default(),
+                db_sync_level: DbSyncLevel::default(),
                 db_max_readers: default_db_max_readers(),
                 tuning_params: None,
                 tracing_scope: None,
                 incoming_request_concurrency_limit: default_incoming_request_concurrency_limit(),
+                restore_chain_quorum: default_restore_chain_quorum(),
             }
         );
     }
@@ -943,13 +931,7 @@ admin_interfaces:
 
     network:
       bootstrap_url: https://test-boot.tld
-      signal_url: wss://test-sig.tld
       relay_url: https://relay.tld
-      webrtc_config: {
-        "iceServers": [
-          { "urls": ["stun:test-stun.tld:443"] },
-        ]
-      }
       request_timeout_s: 70
       advanced: {
         "my": {
@@ -963,7 +945,7 @@ admin_interfaces:
         }
       }
 
-    db_sync_strategy: Fast
+    db_sync_level: Off
     db_max_readers: 100
     incoming_request_concurrency_limit: 100
     "#;
@@ -971,14 +953,8 @@ admin_interfaces:
         let result: ConductorConfigResult<ConductorConfig> = config_from_yaml(yaml);
         let mut network_config = NetworkConfig::default();
         network_config.bootstrap_url = url2::url2!("https://test-boot.tld");
-        network_config.signal_url = url2::url2!("wss://test-sig.tld");
         network_config.relay_url = url2::url2!("https://relay.tld");
         network_config.request_timeout_s = 70;
-        network_config.webrtc_config = Some(serde_json::json!({
-            "iceServers": [
-                { "urls": ["stun:test-stun.tld:443"] },
-            ]
-        }));
         network_config.advanced = Some(serde_json::json!({
             "my": {
                 "totally": {
@@ -995,6 +971,7 @@ admin_interfaces:
             result.unwrap(),
             ConductorConfig {
                 tracing_override: None,
+                wasm_backend: None,
                 data_root_path: Some(PathBuf::from("/path/to/env").into()),
                 keystore: KeystoreConfig::LairServerInProc { lair_root: None },
                 admin_interfaces: Some(vec![AdminInterfaceConfig {
@@ -1005,9 +982,10 @@ admin_interfaces:
                     }
                 }]),
                 network: network_config,
-                db_sync_strategy: DbSyncStrategy::Fast,
+                db_sync_level: DbSyncLevel::Off,
                 db_max_readers: 100,
                 incoming_request_concurrency_limit: 100,
+                restore_chain_quorum: default_restore_chain_quorum(),
                 tuning_params: None,
                 tracing_scope: None,
             }
@@ -1027,17 +1005,19 @@ admin_interfaces:
             result.unwrap(),
             ConductorConfig {
                 tracing_override: None,
+                wasm_backend: None,
                 data_root_path: Some(PathBuf::from("/path/to/env").into()),
                 network: NetworkConfig::default(),
                 keystore: KeystoreConfig::LairServer {
                     connection_url: url2::url2!("unix:///var/run/lair-keystore/socket?k=EcRDnP3xDIZ9Rk_1E-egPE0mGZi5CcszeRxVkb2QXXQ"),
                 },
                 admin_interfaces: None,
-                db_sync_strategy: DbSyncStrategy::Resilient,
+                db_sync_level: DbSyncLevel::default(),
                 db_max_readers: default_db_max_readers(),
                 tuning_params: None,
                 tracing_scope: None,
                 incoming_request_concurrency_limit: default_incoming_request_concurrency_limit(),
+                restore_chain_quorum: default_restore_chain_quorum(),
             }
         );
     }
@@ -1061,9 +1041,6 @@ admin_interfaces:
                 "coreBootstrap": {
                     "backoffMinMs": "3500",
                 },
-                "tx5Transport": {
-                    "signalAllowPlainText": "true"
-                },
                 "irohTransport": {
                     "relayAllowPlainText": "true"
                 },
@@ -1089,13 +1066,8 @@ admin_interfaces:
                     "serverUrl": "https://dev-test-bootstrap2.holochain.org/",
                     "backoffMinMs": "3500",
                 },
-                "tx5Transport": {
-                    "serverUrl": "wss://dev-test-bootstrap2.holochain.org/",
-                    "timeoutS": 30,
-                    "webrtcConnectTimeoutS": 22,
-                    "signalAllowPlainText": "true"
-                },
                 "irohTransport": {
+                    "connectTimeoutS": 22,
                     "relayUrl": "https://use1-1.relay.n0.iroh-canary.iroh.link./",
                     "relayAllowPlainText": "true"
                 },
@@ -1112,11 +1084,6 @@ admin_interfaces:
             advanced: Some(serde_json::json!({
                 "coreBootstrap": {
                     "serverUrl": "https://something-else.net",
-                },
-                "tx5Transport": {
-                    "serverUrl": "wss://sbd.nowhere.net",
-                    "timeoutS": 10,
-                    "webrtcConnectTimeoutS": 10
                 },
                 "irohTransport": {
                     "relayUrl": "https://iroh.nowhere.net",
@@ -1139,12 +1106,8 @@ admin_interfaces:
                 "coreBootstrap": {
                     "serverUrl": "https://dev-test-bootstrap2.holochain.org/",
                 },
-                "tx5Transport": {
-                    "serverUrl": "wss://dev-test-bootstrap2.holochain.org/",
-                    "timeoutS": 30,
-                    "webrtcConnectTimeoutS": 22
-                },
                 "irohTransport": {
+                    "connectTimeoutS": 22,
                     "relayUrl": "https://use1-1.relay.n0.iroh-canary.iroh.link./",
                 },
             })
@@ -1173,12 +1136,8 @@ admin_interfaces:
                 "coreBootstrap": {
                     "serverUrl": "https://dev-test-bootstrap2.holochain.org/",
                 },
-                "tx5Transport": {
-                    "serverUrl": "wss://dev-test-bootstrap2.holochain.org/",
-                    "timeoutS": 30,
-                    "webrtcConnectTimeoutS": 22
-                },
                 "irohTransport": {
+                    "connectTimeoutS": 22,
                     "relayUrl": "https://use1-1.relay.n0.iroh-canary.iroh.link./",
                 },
                 "k2Gossip": {
@@ -1189,77 +1148,6 @@ admin_interfaces:
                 }
             })
         );
-    }
-
-    #[test]
-    fn config_space_overrides() {
-        let yaml = r#"---
-    data_root_path: /path/to/env
-    keystore:
-      type: danger_test_keystore
-    network:
-      bootstrap_url: https://default-boot.tld
-      signal_url: wss://default-sig.tld
-      relay_url: https://relay.tld
-      space_overrides:
-        "uhC0kDnaHash1":
-          bootstrap_url: https://special-boot.tld
-        "uhC0kDnaHash2":
-          bootstrap_url: https://other-boot.tld
-          signal_url: wss://other-sig.tld
-        "uhC0kDnaHash3":
-          bootstrap_url: https://authed-boot.tld
-          base64_auth_material: dGVzdA==
-          relay_url: https://authed-relay.tld/relay
-    "#;
-        let result: ConductorConfig = config_from_yaml(yaml).unwrap();
-        assert_eq!(result.network.space_overrides.len(), 3);
-
-        let override1 = result.network.space_overrides.get("uhC0kDnaHash1").unwrap();
-        assert_eq!(
-            override1.bootstrap_url.as_ref().unwrap().as_str(),
-            "https://special-boot.tld/"
-        );
-        assert!(override1.signal_url.is_none());
-        assert!(override1.relay_url.is_none());
-
-        let override2 = result.network.space_overrides.get("uhC0kDnaHash2").unwrap();
-        assert_eq!(
-            override2.bootstrap_url.as_ref().unwrap().as_str(),
-            "https://other-boot.tld/"
-        );
-        assert_eq!(
-            override2.signal_url.as_ref().unwrap().as_str(),
-            "wss://other-sig.tld/"
-        );
-        assert!(override2.relay_url.is_none());
-
-        let override3 = result.network.space_overrides.get("uhC0kDnaHash3").unwrap();
-        assert_eq!(
-            override3.bootstrap_url.as_ref().unwrap().as_str(),
-            "https://authed-boot.tld/"
-        );
-        assert_eq!(override3.base64_auth_material.as_ref().unwrap(), "dGVzdA==");
-        assert_eq!(
-            override3.relay_url.as_ref().unwrap().as_str(),
-            "https://authed-relay.tld/relay"
-        );
-    }
-
-    #[test]
-    fn config_without_space_overrides_still_works() {
-        // Existing configs without space_overrides should parse fine
-        let yaml = r#"---
-    data_root_path: /path/to/env
-    keystore:
-      type: danger_test_keystore
-    network:
-      bootstrap_url: https://default-boot.tld
-      signal_url: wss://default-sig.tld
-      relay_url: https://relay.tld
-    "#;
-        let result: ConductorConfig = config_from_yaml(yaml).unwrap();
-        assert!(result.network.space_overrides.is_empty());
     }
 
     #[test]
@@ -1284,5 +1172,52 @@ admin_interfaces:
 
         let cpu_count = u32::MAX as usize;
         assert_eq!(calculate_default_db_max_readers(cpu_count), u16::MAX);
+    }
+
+    #[cfg(feature = "schema")]
+    #[test]
+    fn schema_generation() {
+        let schema = schemars::schema_for!(ConductorConfig);
+        let schema_json = serde_json::to_value(&schema).unwrap();
+
+        let default_config = ConductorConfig::default();
+        let default_config_json = serde_json::to_value(&default_config).unwrap();
+
+        jsonschema::validate(&schema_json, &default_config_json).unwrap();
+    }
+
+    #[test]
+    fn config_restore_chain_quorum_default() {
+        let yaml = r#"---
+    data_root_path: /path/to/env
+    keystore:
+      type: danger_test_keystore
+    "#;
+        let result: ConductorConfig = config_from_yaml(yaml).unwrap();
+        assert_eq!(result.restore_chain_quorum, 2);
+    }
+
+    #[test]
+    fn config_restore_chain_quorum_explicit() {
+        let yaml = r#"---
+    data_root_path: /path/to/env
+    keystore:
+      type: danger_test_keystore
+    restore_chain_quorum: 5
+    "#;
+        let result: ConductorConfig = config_from_yaml(yaml).unwrap();
+        assert_eq!(result.restore_chain_quorum, 5);
+    }
+
+    #[test]
+    fn config_restore_chain_quorum_rejects_zero() {
+        let yaml = r#"---
+    data_root_path: /path/to/env
+    keystore:
+      type: danger_test_keystore
+    restore_chain_quorum: 0
+    "#;
+        let result: ConductorConfigResult<ConductorConfig> = config_from_yaml(yaml);
+        assert_matches!(result, Err(ConductorConfigError::SerializationError(_)));
     }
 }

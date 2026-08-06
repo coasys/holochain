@@ -1,21 +1,19 @@
 use crate::conductor::space::TestSpace;
 use crate::core::queue_consumer::{TriggerReceiver, TriggerSender};
-use crate::core::ribosome::weigh_placeholder;
 use crate::core::workflow::countersigning_workflow::{
     accept_countersigning_request, countersigning_workflow, CountersigningSessionState,
     CountersigningWorkspace, SessionCompletionDecision, SessionResolutionSummary,
 };
 use crate::core::workflow::countersigning_workflow::{countersigning_success, WorkComplete};
 use crate::core::workflow::WorkflowResult;
-use crate::prelude::CreateFixturator;
 use crate::prelude::EntryFixturator;
 use crate::prelude::SignatureFixturator;
 use crate::prelude::SignedAction;
 use crate::prelude::{ActionBase, PreflightBytes, PreflightRequest, PreflightRequestAcceptance};
-use crate::prelude::{ActionHashed, CounterSigningAgentState, SignedActionHashed};
+use crate::prelude::{CounterSigningAgentState, SignedActionHashed};
 use fixt::prelude::*;
-use hdk::prelude::{Action, Entry, EntryTypeFixturator, Record};
 use hdk::prelude::{CounterSigningSessionTimes, Timestamp};
+use hdk::prelude::{Entry, EntryTypeFixturator, Record, RecordEntry};
 use holo_hash::fixt::ActionHashFixturator;
 use holo_hash::fixt::DnaHashFixturator;
 use holo_hash::fixt::EntryHashFixturator;
@@ -23,24 +21,19 @@ use holo_hash::ActionHash;
 use holo_hash::{AgentPubKey, DnaHash, EntryHash};
 use holochain_keystore::MetaLairClient;
 use holochain_p2p::{HolochainP2pError, MockHolochainP2pDnaT};
-use holochain_state::chain_lock::get_chain_lock;
-use holochain_state::prelude::{
-    chain_head_db, current_countersigning_session, insert_op_authored,
-    remove_countersigning_session, set_withhold_publish, AppEntryBytesFixturator, HeadInfo,
-};
-use holochain_state::prelude::{
-    insert_action, insert_entry, unlock_chain, CounterSigningSessionData,
-};
+use holochain_state::prelude::CounterSigningSessionData;
+use holochain_state::prelude::{AppEntryBytesFixturator, HeadInfo};
 use holochain_state::prelude::{StateMutationError, StateMutationResult};
-use holochain_state::query::from_blob;
 use holochain_state::source_chain;
 use holochain_types::activity::AgentActivityResponse;
-use holochain_types::dht_op::{ChainOp, DhtOp, DhtOpHashed};
+use holochain_types::op::{ChainOp, DhtOp, DhtOpHashed, OpEntry};
 use holochain_types::prelude::SystemSignal;
 use holochain_types::prelude::{ChainItems, SignedActionHashedExt};
 use holochain_types::signal::Signal;
+use holochain_zome_types::action::from_countersigning_data;
 use holochain_zome_types::cell::CellId;
 use holochain_zome_types::countersigning::PreflightResponse;
+use holochain_zome_types::fixt::{ActionFixturator, CreateAction};
 use holochain_zome_types::prelude::CreateBase;
 use holochain_zome_types::query::{ChainHead, ChainStatus};
 use matches::assert_matches;
@@ -604,7 +597,7 @@ async fn attempts_resolution_if_only_invalid_signatures_received() {
 
             net.expect_get_agent_activity().returning({
                 let activity_response = activity_response.clone();
-                move |_, _, _| Ok(vec![activity_response.clone()])
+                move |_, _, _, _| Ok(vec![activity_response.clone()])
             });
 
             net
@@ -665,7 +658,7 @@ async fn recover_from_commit_when_other_agent_abandons() {
 
             net.expect_get_agent_activity().returning({
                 let activity_response = activity_response.clone();
-                move |_, _, _| Ok(vec![activity_response.clone()])
+                move |_, _, _, _| Ok(vec![activity_response.clone()])
             });
 
             net
@@ -728,7 +721,7 @@ async fn recover_from_commit_after_restart_when_other_agent_abandons() {
 
             net.expect_get_agent_activity().returning({
                 let activity_response = activity_response.clone();
-                move |_, _, _| Ok(vec![activity_response.clone()])
+                move |_, _, _, _| Ok(vec![activity_response.clone()])
             });
 
             net
@@ -762,7 +755,7 @@ async fn recover_from_commit_after_restart_when_other_agent_abandons() {
 
             net.expect_get_agent_activity().returning({
                 let activity_response = activity_response.clone();
-                move |_, _, _| Ok(vec![activity_response.clone()])
+                move |_, _, _, _| Ok(vec![activity_response.clone()])
             });
 
             net
@@ -825,7 +818,7 @@ async fn recover_from_commit_after_restart_when_other_agent_completes() {
 
             net.expect_get_agent_activity().returning({
                 let activity_response = activity_response.clone();
-                move |_, _, _| Ok(vec![activity_response.clone()])
+                move |_, _, _, _| Ok(vec![activity_response.clone()])
             });
 
             net
@@ -855,7 +848,7 @@ async fn recover_from_commit_after_restart_when_other_agent_completes() {
 
             net.expect_get_agent_activity().returning({
                 let activity_response = activity_response.clone();
-                move |_, _, _| Ok(vec![activity_response.clone()])
+                move |_, _, _, _| Ok(vec![activity_response.clone()])
             });
 
             net.expect_publish_countersign().return_once(|_, _| Ok(()));
@@ -931,7 +924,7 @@ async fn retry_in_unknown_state_when_activity_authorities_do_not_agree() {
             net.expect_get_agent_activity().returning({
                 let pick_response = pick_response.clone();
                 let assorted_responses = assorted_responses.clone();
-                move |_, _, _| {
+                move |_, _, _, _| {
                     let pick = pick_response.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                         % assorted_responses.len();
                     Ok(vec![assorted_responses[pick].clone()])
@@ -1035,7 +1028,7 @@ async fn retry_when_activity_authorities_are_missing_data() {
             net.expect_get_agent_activity().returning({
                 let pick_response = pick_response.clone();
                 let assorted_responses = assorted_responses.clone();
-                move |_, _, _| {
+                move |_, _, _, _| {
                     let pick = pick_response.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                         % assorted_responses.len();
                     Ok(vec![assorted_responses[pick].clone()])
@@ -1139,7 +1132,7 @@ async fn stay_in_unknown_state_when_bad_signatures_are_fetched() {
             net.expect_get_agent_activity().returning({
                 let pick_response = pick_response.clone();
                 let assorted_responses = assorted_responses.clone();
-                move |_, _, _| {
+                move |_, _, _, _| {
                     let pick = pick_response.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                         % assorted_responses.len();
                     Ok(vec![assorted_responses[pick].clone()])
@@ -1308,7 +1301,7 @@ async fn respect_retry_limit_on_timeout_with_no_signatures_received() {
 
             net.expect_get_agent_activity().returning({
                 let activity_response = activity_response.clone();
-                move |_, _, _| Ok(vec![activity_response.clone()])
+                move |_, _, _, _| Ok(vec![activity_response.clone()])
             });
 
             net
@@ -1378,7 +1371,7 @@ async fn respect_unlimited_retries_on_timeout_with_no_signatures_received() {
 
             net.expect_get_agent_activity().returning({
                 let activity_response = activity_response.clone();
-                move |_, _, _| Ok(vec![activity_response.clone()])
+                move |_, _, _, _| Ok(vec![activity_response.clone()])
             });
 
             net
@@ -1440,7 +1433,7 @@ async fn retry_limit_applies_after_a_restart() {
 
             net.expect_get_agent_activity().returning({
                 let activity_response = activity_response.clone();
-                move |_, _, _| Ok(vec![activity_response.clone()])
+                move |_, _, _, _| Ok(vec![activity_response.clone()])
             });
 
             net
@@ -1506,7 +1499,7 @@ async fn network_errors_do_not_count_towards_retry_limit() {
             net.expect_authority_for_hash().returning(|_| Ok(true));
 
             net.expect_get_agent_activity()
-                .returning(move |_, _, _| Err(HolochainP2pError::Other("test".into())));
+                .returning(move |_, _, _, _| Err(HolochainP2pError::Other("test".into())));
 
             net
         }
@@ -1530,7 +1523,7 @@ async fn network_errors_do_not_count_towards_retry_limit() {
 
             net.expect_get_agent_activity().returning({
                 let activity_response = activity_response.clone();
-                move |_, _, _| Ok(vec![activity_response.clone()])
+                move |_, _, _, _| Ok(vec![activity_response.clone()])
             });
 
             net
@@ -1598,7 +1591,7 @@ async fn recover_and_complete_after_resolution_failures() {
             net.expect_authority_for_hash().returning(|_| Ok(true));
 
             net.expect_get_agent_activity()
-                .returning(move |_, _, _| Err(HolochainP2pError::Other("test".into())));
+                .returning(move |_, _, _, _| Err(HolochainP2pError::Other("test".into())));
 
             net
         }
@@ -1620,7 +1613,7 @@ async fn recover_and_complete_after_resolution_failures() {
 
             net.expect_get_agent_activity().returning({
                 let activity_response = activity_response.clone();
-                move |_, _, _| Ok(vec![activity_response.clone()])
+                move |_, _, _, _| Ok(vec![activity_response.clone()])
             });
 
             net
@@ -1650,7 +1643,7 @@ async fn recover_and_complete_after_resolution_failures() {
 
             net.expect_get_agent_activity().returning({
                 let activity_response = activity_response.clone();
-                move |_, _, _| Ok(vec![activity_response.clone()])
+                move |_, _, _, _| Ok(vec![activity_response.clone()])
             });
 
             net.expect_publish_countersign().return_once(|_, _| Ok(()));
@@ -1682,7 +1675,7 @@ async fn recover_and_complete_after_resolution_failures() {
 
             net.expect_get_agent_activity().returning({
                 let activity_response = activity_response.clone();
-                move |_, _, _| Ok(vec![activity_response.clone()])
+                move |_, _, _, _| Ok(vec![activity_response.clone()])
             });
 
             net.expect_publish_countersign().return_once(|_, _| Ok(()));
@@ -1743,7 +1736,7 @@ async fn retry_on_network_errors_even_with_no_retries_configured() {
             net.expect_authority_for_hash().returning(|_| Ok(true));
 
             net.expect_get_agent_activity()
-                .returning(move |_, _, _| Err(HolochainP2pError::Other("test".into())));
+                .returning(move |_, _, _, _| Err(HolochainP2pError::Other("test".into())));
 
             net
         }
@@ -1792,11 +1785,7 @@ impl TestHarness {
         let publish_trigger = TriggerSender::new();
 
         source_chain::genesis(
-            test_space
-                .space
-                .get_or_create_authored_db(author.clone())
-                .unwrap(),
-            test_space.space.dht_db.clone(),
+            test_space.space.dht_store.clone(),
             keystore.clone(),
             dna_hash.clone(),
             author.clone(),
@@ -1879,7 +1868,6 @@ impl TestHarness {
             self.test_space.space.clone(),
             self.workspace.clone(),
             self.network.clone(),
-            self.keystore.clone(),
             CellId::new(self.dna_hash.clone(), self.author.clone()),
             self.signal_tx.clone(),
             self.countersigning_tx.clone(),
@@ -1893,16 +1881,11 @@ impl TestHarness {
     }
 
     async fn unlock_chain(&self) {
-        let authored = self
-            .test_space
+        // The chain lock lives in the DhtStore.
+        self.test_space
             .space
-            .get_or_create_authored_db(self.author.clone())
-            .unwrap();
-        authored
-            .write_async({
-                let author = self.author.clone();
-                move |txn| unlock_chain(txn, &author)
-            })
+            .dht_store
+            .release_chain_lock(&self.author)
             .await
             .unwrap();
     }
@@ -1947,40 +1930,62 @@ impl TestHarness {
         entry: Entry,
         entry_hash: EntryHash,
     ) -> SignedAction {
-        let my_action = Action::from_countersigning_data(
-            entry_hash.clone(),
-            session_data,
-            self.author.clone(),
-            weigh_placeholder(),
-        )
-        .unwrap();
-        let hashed = ActionHashed::from_content_sync(my_action.clone());
+        // Build the countersigning action via `from_countersigning_data` and
+        // sign over its bytes, matching the signature basis used everywhere
+        // else. The DhtStore writes below build the op from the same `signed`.
+        let my_action =
+            from_countersigning_data(entry_hash.clone(), session_data, self.author.clone())
+                .unwrap();
+        let action = my_action.clone();
+        let hashed = holo_hash::HoloHashed::from_content_sync(action.clone());
         let sah = SignedActionHashed::sign(&self.keystore, hashed)
             .await
             .unwrap();
+        let signature = sah.signature().clone();
 
-        let signed = SignedAction::from(sah.clone());
+        let signed = SignedAction::new(action, signature.clone());
 
-        let store_entry_op = ChainOp::StoreEntry(
-            fixt!(Signature),
-            my_action.clone().try_into().unwrap(),
-            entry.clone(),
-        );
-        let dht_op = DhtOp::ChainOp(Box::new(store_entry_op));
-        let dht_op = DhtOpHashed::from_content_sync(dht_op);
+        // Build the `CreateEntry`/`CreateEntry` op for the DhtStore writes below.
+        // It carries the real action signature: the store record is
+        // reconstructed from this op and the completion path verifies the
+        // record's signature, so a fixt signature would be rejected.
+        let store_entry_op = ChainOp::CreateEntry(signed.clone(), OpEntry::Present(entry.clone()));
+        let dht_op = DhtOpHashed::from_content_sync(DhtOp::ChainOp(Box::new(store_entry_op)));
 
+        // Write the commit to the DhtStore so the store-backed session reads
+        // (`current_countersigning_session`, chain head) see it.
+        // The session op is withheld from publishing until the session
+        // succeeds, matching the flush path. The entry must be routed by
+        // visibility so a private session entry lands in `PrivateEntry`.
+        let private_author = my_action
+            .entry_visibility()
+            .is_some_and(|v| matches!(v, holochain_zome_types::entry_def::EntryVisibility::Private))
+            .then_some(&self.author);
         self.test_space
             .space
-            .get_or_create_authored_db(self.author.clone())
-            .unwrap()
-            .write_async(move |txn| -> StateMutationResult<()> {
-                insert_action(txn, &sah)?;
-                insert_entry(txn, &entry_hash, &entry)?;
-                insert_op_authored(txn, &dht_op)?;
-                set_withhold_publish(txn, &dht_op.hash)?;
+            .dht_store
+            .test_insert_entry(&entry_hash, &entry, private_author)
+            .await
+            .unwrap();
+        self.test_space
+            .space
+            .dht_store
+            .test_insert_authored_chain_op(dht_op, None, None, Some(true))
+            .await
+            .unwrap();
 
-                Ok(())
-            })
+        // The real flush emits a `AgentActivity` op for every action.
+        // The chain-head lookup (used by `current_countersigning_session` and
+        // `read_chain_head_hash`) scopes to the integrated agent-activity op, so
+        // mirror it here — withheld like the session's other ops — otherwise the
+        // committed session head is invisible to the store reads.
+        let agent_activity_op = DhtOpHashed::from_content_sync(DhtOp::ChainOp(Box::new(
+            ChainOp::AgentActivity(signed.clone()),
+        )));
+        self.test_space
+            .space
+            .dht_store
+            .test_insert_additional_integrated_op(agent_activity_op, Some(true))
             .await
             .unwrap();
 
@@ -1988,40 +1993,29 @@ impl TestHarness {
     }
 
     async fn read_chain_head_hash(&self) -> HeadInfo {
-        let authored = self
-            .test_space
+        // The chain head lives in the DhtStore.
+        self.test_space
             .space
-            .get_or_create_authored_db(self.author.clone())
-            .unwrap();
-        let chain_head = authored.read_async(chain_head_db).await.unwrap();
-
-        chain_head.unwrap()
+            .dht_store
+            .as_read()
+            .chain_head_for_author(&self.author)
+            .await
+            .unwrap()
+            .unwrap()
     }
 
     async fn try_remove_countersigning_entry(
         &self,
         action_hash: ActionHash,
     ) -> StateMutationResult<()> {
-        let authored = self
-            .test_space
+        // Session removal goes through the DhtStore, whose guard
+        // refuses to remove a session once any of its ops has been published —
+        // i.e. its store `ChainOpPublish` withhold flag has been cleared on
+        // success. The entry hash is irrelevant to the published guard.
+        self.test_space
             .space
-            .get_or_create_authored_db(self.author.clone())
-            .unwrap();
-        authored
-            .write_async({
-                move |txn| {
-                    let blob: Vec<u8> = txn.query_row(
-                        "SELECT blob FROM Action WHERE hash = ?",
-                        [action_hash],
-                        |r| r.get(0),
-                    )?;
-                    remove_countersigning_session(
-                        txn,
-                        from_blob::<SignedAction>(blob)?.action().clone(),
-                        fixt!(EntryHash),
-                    )
-                }
-            })
+            .dht_store
+            .remove_countersigning_session(action_hash, fixt!(EntryHash))
             .await
     }
 }
@@ -2096,16 +2090,13 @@ impl TestHarness {
     }
 
     async fn expect_chain_locked(&self) {
-        let authored = self
+        // The chain lock lives in the DhtStore.
+        let lock = self
             .test_space
             .space
-            .get_or_create_authored_db(self.author.clone())
-            .unwrap();
-        let lock = authored
-            .read_async({
-                let author = self.author.clone();
-                move |txn| get_chain_lock(txn, &author)
-            })
+            .dht_store
+            .as_read()
+            .get_chain_lock(self.author.clone())
             .await
             .unwrap();
 
@@ -2113,16 +2104,13 @@ impl TestHarness {
     }
 
     pub async fn expect_chain_unlocked(&self) {
-        let authored = self
+        // The chain lock lives in the DhtStore.
+        let lock = self
             .test_space
             .space
-            .get_or_create_authored_db(self.author.clone())
-            .unwrap();
-        let lock = authored
-            .read_async({
-                let author = self.author.clone();
-                move |txn| get_chain_lock(txn, &author)
-            })
+            .dht_store
+            .as_read()
+            .get_chain_lock(self.author.clone())
             .await
             .unwrap();
 
@@ -2130,14 +2118,14 @@ impl TestHarness {
     }
 
     pub async fn expect_session_removed(&self, preflight_request: PreflightRequest) {
-        let authored = self
+        // The session lives in the DhtStore, so verify removal against the
+        // store.
+        let session = self
             .test_space
             .space
-            .get_or_create_authored_db(self.author.clone())
-            .unwrap();
-
-        let session = authored
-            .read_async(current_countersigning_session)
+            .dht_store
+            .as_read()
+            .current_countersigning_session(&self.author)
             .await
             .unwrap();
 
@@ -2247,18 +2235,13 @@ impl RemoteAgent {
         entry_hash: &EntryHash,
         keystore: MetaLairClient,
     ) -> SignedAction {
-        let action = Action::from_countersigning_data(
-            entry_hash.clone(),
-            session_data,
-            self.agent.clone(),
-            weigh_placeholder(),
-        )
-        .unwrap();
+        let action =
+            from_countersigning_data(entry_hash.clone(), session_data, self.agent.clone()).unwrap();
 
-        let hashed = ActionHashed::from_content_sync(action.clone());
+        let hashed = holo_hash::HoloHashed::from_content_sync(action);
         let sah = SignedActionHashed::sign(&keystore, hashed).await.unwrap();
 
-        SignedAction::from(sah)
+        SignedAction::new(sah.hashed.content.clone(), sah.signature().clone())
     }
 
     fn no_activity_response(&self) -> AgentActivityResponse {
@@ -2273,13 +2256,13 @@ impl RemoteAgent {
     }
 
     fn other_activity_response(&self) -> AgentActivityResponse {
-        let action = Action::Create(fixt!(Create));
+        let action = fixt!(Action, CreateAction);
 
         AgentActivityResponse {
             agent: self.agent.clone(),
             valid_activity: ChainItems::Full(vec![Record::new(
                 SignedActionHashed::new_unchecked(action, fixt!(Signature)),
-                Some(fixt!(Entry)),
+                RecordEntry::Present(fixt!(Entry)),
             )]),
             rejected_activity: ChainItems::NotRequested,
             status: ChainStatus::Valid(ChainHead {
@@ -2312,10 +2295,10 @@ impl RemoteAgent {
             agent: self.agent.clone(),
             valid_activity: ChainItems::Full(vec![Record::new(
                 SignedActionHashed::with_presigned(
-                    ActionHashed::from_content_sync(signed_action.into_data()),
+                    holo_hash::HoloHashed::from_content_sync(signed_action.into_data()),
                     signature,
                 ),
-                Some(entry),
+                RecordEntry::Present(entry),
             )]),
             rejected_activity: ChainItems::NotRequested,
             status: ChainStatus::Valid(ChainHead {

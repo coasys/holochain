@@ -5,7 +5,6 @@ use super::interface::error::InterfaceError;
 use crate::conductor::cell::error::CellError;
 use crate::core::workflow::WorkflowError;
 use holochain_conductor_api::conductor::ConductorConfigError;
-use holochain_sqlite::error::DatabaseError;
 use holochain_types::prelude::*;
 use holochain_wasmer_host::prelude::WasmErrorInner;
 use holochain_zome_types::cell::CellId;
@@ -32,9 +31,6 @@ pub enum ConductorError {
     #[error(transparent)]
     AppManifestError(#[from] AppManifestError),
 
-    #[error(transparent)]
-    DatabaseError(#[from] DatabaseError),
-
     #[error("Cell already exists. CellId: {0:?}")]
     CellAlreadyExists(CellId),
 
@@ -54,7 +50,7 @@ pub enum ConductorError {
     CountersigningError(#[from] CountersigningError),
 
     #[error("Config deserialization error: {0}")]
-    SerializationError(#[from] serde_yaml::Error),
+    SerializationError(#[from] yaml_serde::Error),
 
     #[error("Attempted to call into the conductor while it is shutting down")]
     ShuttingDown,
@@ -84,8 +80,11 @@ pub enum ConductorError {
     #[error(transparent)]
     SerializedBytesError(#[from] holochain_serialized_bytes::SerializedBytesError),
 
-    #[error("Wasm code was not found in the wasm store")]
+    #[error("Wasm code was not found in the WASM store")]
     WasmMissing,
+
+    #[error("DNA definition was not found in the store: {0}")]
+    DnaDefMissing(CellId),
 
     #[error("Tried to access an app that was not installed: {0}")]
     AppNotInstalled(InstalledAppId),
@@ -95,6 +94,9 @@ pub enum ConductorError {
 
     #[error("App status could not be changed: {0}")]
     AppStatusError(String),
+
+    #[error("Init properties error: {0}")]
+    InitPropertiesError(String),
 
     #[error(transparent)]
     HolochainP2pError(#[from] holochain_p2p::HolochainP2pError),
@@ -121,10 +123,10 @@ pub enum ConductorError {
     JoinError(#[from] tokio::task::JoinError),
 
     #[error(transparent)]
-    RusqliteError(#[from] rusqlite::Error),
-
-    #[error(transparent)]
     RibosomeError(#[from] crate::core::ribosome::error::RibosomeError),
+
+    #[error("Agent key {0} is not present in the local Lair keystore")]
+    AgentKeyNotInKeystore(holo_hash::AgentPubKey),
 
     #[error("Authentication failed with reason: {0}")]
     FailedAuthenticationError(String),
@@ -150,6 +152,16 @@ impl ConductorError {
 impl From<one_err::OneErr> for ConductorError {
     fn from(e: one_err::OneErr) -> Self {
         Self::other(e)
+    }
+}
+
+impl From<holochain_conductor_api::state::ConductorStateError> for ConductorError {
+    fn from(e: holochain_conductor_api::state::ConductorStateError) -> Self {
+        use holochain_conductor_api::state::ConductorStateError;
+        match e {
+            ConductorStateError::AppNotInstalled(id) => Self::AppNotInstalled(id),
+            ConductorStateError::AppAlreadyInstalled(id) => Self::AppAlreadyInstalled(id),
+        }
     }
 }
 

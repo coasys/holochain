@@ -167,6 +167,17 @@ impl AppInterfaceApi {
                     .await?;
                 Ok(AppResponse::CloneCellEnabled(enabled_cell))
             }
+            AppRequest::DumpOpTimings {
+                dna_hash,
+                cursor,
+                limit,
+            } => {
+                let timings = self
+                    .conductor_handle
+                    .dump_op_timings_for_app(&installed_app_id, &dna_hash, cursor, limit)
+                    .await?;
+                Ok(AppResponse::OpTimingsDumped(timings))
+            }
             AppRequest::DumpNetworkMetrics {
                 dna_hash,
                 include_dht_summary,
@@ -220,6 +231,18 @@ impl AppInterfaceApi {
                         "app not in correct state to enable".to_string(),
                     )),
                 }
+            }
+            AppRequest::SendDirectSignal {
+                dna_hash,
+                agents,
+                signal,
+            } => {
+                self.conductor_handle
+                    .clone()
+                    .send_direct_signal(installed_app_id, dna_hash, agents, signal)
+                    .await?;
+
+                Ok(AppResponse::Ok)
             }
         }
     }

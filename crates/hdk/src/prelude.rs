@@ -74,10 +74,11 @@ pub use crate::x_salsa20_poly1305::x_salsa20_poly1305_shared_secret_export;
 pub use crate::x_salsa20_poly1305::x_salsa20_poly1305_shared_secret_ingest;
 pub use hdi;
 pub use hdi::map_extern_infallible;
-pub use hdi::op::OpHelper;
 pub use hdi::prelude::app_entry;
+pub use hdi::prelude::AgentActivity;
 pub use hdi::prelude::Anchor;
 pub use hdi::prelude::Component;
+pub use hdi::prelude::OpHelper;
 pub use hdi::prelude::Path;
 pub use hdi::prelude::ShardStrategy;
 pub use hdi::prelude::TypedPath;
@@ -169,6 +170,7 @@ macro_rules! holochain_externs {
             delete_clone_cell:1,
             close_chain:1,
             open_chain:1,
+            get_init_properties:1,
             get_validation_receipts:1,
             schedule:1
         );

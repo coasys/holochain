@@ -1,10 +1,10 @@
 use holochain_cli_sandbox::cli::LaunchInfo;
 use holochain_client::{AdminWebsocket, AllowedOrigins};
-use holochain_conductor_api::AppResponse;
 use holochain_conductor_api::{
     AdminInterfaceConfig, AdminRequest, AdminResponse, AppAuthenticationRequest, AppRequest,
     InterfaceDriver,
 };
+use holochain_conductor_api::{AppResponse, AppStatusFilter};
 use holochain_conductor_config::config::{read_config, write_config};
 use holochain_types::app::InstalledAppId;
 use holochain_types::prelude::{SerializedBytes, SerializedBytesError, YamlProperties};
@@ -12,7 +12,6 @@ use holochain_websocket::{
     self as ws, ConnectRequest, WebsocketConfig, WebsocketReceiver, WebsocketResult,
     WebsocketSender,
 };
-use serde_json::json;
 use std::future::Future;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
@@ -223,9 +222,9 @@ async fn generate_sandbox_and_connect() {
 }
 
 /// Generates a new sandbox with a single app deployed with membrane_proof_deferred
-/// set to true and tries to list DNA
+/// set to true and tries to list apps
 #[tokio::test(flavor = "multi_thread")]
-async fn generate_sandbox_memproof_deferred_and_call_list_dna() {
+async fn generate_sandbox_memproof_deferred_and_call_list_apps() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     package_fixture_if_not_packaged().await;
     let app_path = std::env::current_dir()
@@ -256,9 +255,11 @@ async fn generate_sandbox_memproof_deferred_and_call_list_dna() {
 
     // Connect to admin websocket and list DNAs
     let admin_ws = admin_client_from_launch(&launch_info).await;
-    let dnas = admin_ws.list_dnas().await.expect("Failed to list DNAs");
-    // Just verify we can list DNAs without error
-    assert!(!dnas.is_empty(), "Expected at least one DNA");
+    let apps = admin_ws
+        .list_apps(Some(AppStatusFilter::AwaitingMemproofs))
+        .await
+        .expect("Failed to list apps");
+    assert_eq!(1, apps.len(), "Expected one app awaiting memproofs");
 
     shutdown_sandbox(hc_admin).await;
 }
@@ -466,7 +467,7 @@ async fn generate_sandbox_with_roles_settings_override() {
             );
             assert_eq!(
                 role1.dna.modifiers.properties.unwrap(),
-                YamlProperties::new(serde_yaml::Value::String(String::from(
+                YamlProperties::new(yaml_serde::Value::String(String::from(
                     "some properties in the manifest",
                 )))
             );
@@ -483,7 +484,7 @@ async fn generate_sandbox_with_roles_settings_override() {
             );
             assert_eq!(
                 role2.dna.modifiers.properties.unwrap(),
-                YamlProperties::new(serde_yaml::Value::String(String::from(
+                YamlProperties::new(yaml_serde::Value::String(String::from(
                     "some properties in the manifest",
                 )))
             );
@@ -501,7 +502,7 @@ async fn generate_sandbox_with_roles_settings_override() {
             );
             assert_eq!(
                 role3.dna.modifiers.properties.unwrap(),
-                YamlProperties::new(serde_yaml::Value::String(String::from(
+                YamlProperties::new(yaml_serde::Value::String(String::from(
                     "should remain untouched by roles settings test",
                 )))
             );
@@ -512,69 +513,13 @@ async fn generate_sandbox_with_roles_settings_override() {
     shutdown_sandbox(hc_admin).await;
 }
 
-/// Generates a new sandbox, setting the webrtc signaling server URL via
-/// the webrtc argument and verifies that conductor config file has
-/// been written correctly.
-#[cfg(feature = "transport-tx5-backend-go-pion")]
-#[tokio::test(flavor = "multi_thread")]
-async fn generate_sandbox_with_tx5_network_type() {
-    use serde_json::json;
-
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    package_fixture_if_not_packaged().await;
-    let app_path = std::env::current_dir()
-        .unwrap()
-        .join("tests/fixtures/my-app/");
-
-    let relay_url = "wss://signal";
-
-    holochain_trace::test_run();
-    let mut cmd = get_sandbox_command();
-    cmd.env("RUST_BACKTRACE", "1")
-        .arg(format!(
-            "--holochain-path={}",
-            get_holochain_bin_path().to_str().unwrap()
-        ))
-        .arg("--piped")
-        .arg("generate")
-        .arg("--in-process-lair")
-        .arg(app_path)
-        .arg("network")
-        .arg("webrtc")
-        .arg(relay_url)
-        .current_dir(temp_dir.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .kill_on_drop(true);
-
-    println!("@@ {cmd:?}");
-
-    let mut hc_admin = input_piped_password(&mut cmd).await;
-
-    // Read conductor config yaml file
-    let config_root_path = get_config_root_path(&mut hc_admin).await;
-    hc_admin.wait().await.unwrap();
-    let config = read_config(config_root_path.clone().into())
-        .expect("Failed to read config from config_root_path")
-        .unwrap();
-
-    // Assert signal url has been set in config file
-    assert_eq!(config.network.signal_url, url2::Url2::parse(relay_url));
-    assert_eq!(
-        config.network.advanced.unwrap(),
-        json!({"tx5Transport": {
-            "signalAllowPlainText": true
-        }})
-    );
-}
-
 /// Generates a new sandbox, setting the iroh relay URL via
 /// the quic argument and verifies that conductor config file has
 /// been written correctly.
-#[cfg(feature = "transport-iroh")]
 #[tokio::test(flavor = "multi_thread")]
 async fn generate_sandbox_with_iroh_network_type() {
+    use serde_json::json;
+
     let temp_dir = tempfile::TempDir::new().unwrap();
     package_fixture_if_not_packaged().await;
     let app_path = std::env::current_dir()
@@ -635,13 +580,7 @@ async fn generate_sandbox_with_target_arc_factor_override() {
         .unwrap()
         .join("tests/fixtures/my-app/");
 
-    #[cfg(all(
-        feature = "transport-iroh",
-        not(feature = "transport-tx5-backend-go-pion")
-    ))]
     let (network_type, relay_url) = ("quic", "https://iroh-relay");
-    #[cfg(feature = "transport-tx5-backend-go-pion")]
-    let (network_type, relay_url) = ("webrtc", "wss://signal");
 
     holochain_trace::test_run();
     let mut cmd = get_sandbox_command();

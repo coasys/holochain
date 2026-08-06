@@ -1,14 +1,13 @@
 use crate::core::ribosome::error::RibosomeError;
-use crate::core::ribosome::CallContext;
+use crate::core::ribosome::{CallContext, Ribosome};
 use crate::core::ribosome::HostFnAccess;
-use crate::core::ribosome::RibosomeT;
 use holochain_types::prelude::*;
 use holochain_wasmer_host::prelude::*;
 use std::sync::Arc;
 use wasmer::RuntimeError;
 
 pub fn zome_info(
-    ribosome: Arc<impl RibosomeT>,
+    ribosome: Arc<Ribosome>,
     call_context: Arc<CallContext>,
     _input: (),
 ) -> Result<ZomeInfo, RuntimeError> {
@@ -86,7 +85,7 @@ pub mod test {
         );
     }
 
-    #[cfg(feature = "wasmer_sys")]
+    #[cfg(any(feature = "wasmer-sys-cranelift", feature = "wasmer-sys-llvm"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn zome_info_extern_fns_test() {
         holochain_trace::test_run();
@@ -116,7 +115,10 @@ pub mod test {
 
 
     // Same test, but excluding wasmer metering extern fns
-    #[cfg(feature = "wasmer_wamr")]
+    #[cfg(all(
+        feature = "wasmer-wasmi",
+        not(any(feature = "wasmer-sys-cranelift", feature = "wasmer-sys-llvm"))
+    ))]
     #[tokio::test(flavor = "multi_thread")]
     async fn zome_info_extern_fns_test() {
         holochain_trace::test_run();

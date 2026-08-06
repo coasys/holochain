@@ -9,8 +9,6 @@
 //! the higher level crates.
 
 #![deny(missing_docs)]
-// For proptest-derive
-#![allow(non_local_definitions)]
 
 #[allow(missing_docs)]
 pub mod action;
@@ -28,7 +26,6 @@ pub mod info;
 pub mod link;
 pub mod op;
 pub mod prelude;
-pub mod rate_limit;
 pub mod record;
 pub mod signature;
 pub use holochain_timestamp as timestamp;
@@ -41,12 +38,3 @@ pub mod zome;
 pub mod zome_io;
 
 pub mod trace;
-
-pub use action::Action;
-pub use entry::Entry;
-pub use prelude::*;
-
-/// Re-exported dependencies
-pub mod dependencies {
-    pub use ::subtle;
-}

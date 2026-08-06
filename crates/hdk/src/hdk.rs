@@ -27,7 +27,7 @@ pub trait HdkT: HdiT {
     fn get_agent_activity(
         &self,
         get_agent_activity_input: GetAgentActivityInput,
-    ) -> ExternResult<AgentActivity>;
+    ) -> ExternResult<holochain_zome_types::query::AgentActivityStatus>;
     fn query(&self, filter: ChainQueryFilter) -> ExternResult<Vec<Record>>;
     // Ed25519
     fn sign(&self, sign: Sign) -> ExternResult<Signature>;
@@ -99,6 +99,7 @@ pub trait HdkT: HdiT {
     // Migrate DNA
     fn close_chain(&self, input: CloseChainInput) -> ExternResult<ActionHash>;
     fn open_chain(&self, input: OpenChainInput) -> ExternResult<ActionHash>;
+    fn get_init_properties(&self, input: ()) -> ExternResult<Option<InitProperties>>;
     // Validation receipts
     fn get_validation_receipts(
         &self,
@@ -115,7 +116,7 @@ mockall::mock! {
         fn get_agent_activity(
             &self,
             get_agent_activity_input: GetAgentActivityInput,
-        ) -> ExternResult<AgentActivity>;
+        ) -> ExternResult<holochain_zome_types::prelude::AgentActivityStatus>;
         fn query(&self, filter: ChainQueryFilter) -> ExternResult<Vec<Record>>;
         // Ed25519
         fn sign(&self, sign: Sign) -> ExternResult<Signature>;
@@ -127,6 +128,7 @@ mockall::mock! {
         fn get(&self, get_input: Vec<GetInput>) -> ExternResult<Vec<Option<Record>>>;
         fn get_details(&self, get_input: Vec<GetInput>) -> ExternResult<Vec<Option<Details>>>;
         // CounterSigning
+        #[cfg(feature = "unstable-countersigning")]
         fn accept_countersigning_preflight_request(
             &self,
             preflight_request: PreflightRequest,
@@ -184,6 +186,7 @@ mockall::mock! {
         fn delete_clone_cell(&self, input: DeleteCloneCellInput) -> ExternResult<()>;
         fn close_chain(&self, input: CloseChainInput) -> ExternResult<ActionHash>;
         fn open_chain(&self, input: OpenChainInput) -> ExternResult<ActionHash>;
+        fn get_init_properties(&self, input: ()) -> ExternResult<Option<InitProperties>>;
         fn get_validation_receipts(&self, input: GetValidationReceiptsInput) -> ExternResult<Vec<ValidationReceiptSet>>;
     }
 
@@ -201,7 +204,7 @@ mockall::mock! {
         fn must_get_agent_activity(
             &self,
             must_get_agent_activity_input: MustGetAgentActivityInput,
-        ) -> ExternResult<Vec<RegisterAgentActivity>>;
+        ) -> ExternResult<Vec<AgentActivity>>;
         // Info
         fn dna_info(&self, dna_info_input: ()) -> ExternResult<DnaInfo>;
         fn zome_info(&self, zome_info_input: ()) -> ExternResult<ZomeInfo>;
@@ -266,7 +269,7 @@ impl HdiT for ErrHdk {
     fn must_get_agent_activity(
         &self,
         _: MustGetAgentActivityInput,
-    ) -> ExternResult<Vec<RegisterAgentActivity>> {
+    ) -> ExternResult<Vec<AgentActivity>> {
         Self::err()
     }
 
@@ -306,7 +309,10 @@ impl HdiT for ErrHdk {
 
 /// Every call is an error for the ErrHdk.
 impl HdkT for ErrHdk {
-    fn get_agent_activity(&self, _: GetAgentActivityInput) -> ExternResult<AgentActivity> {
+    fn get_agent_activity(
+        &self,
+        _: GetAgentActivityInput,
+    ) -> ExternResult<holochain_zome_types::query::AgentActivityStatus> {
         Self::err()
     }
     fn query(&self, _: ChainQueryFilter) -> ExternResult<Vec<Record>> {
@@ -461,6 +467,10 @@ impl HdkT for ErrHdk {
         Self::err()
     }
 
+    fn get_init_properties(&self, _input: ()) -> ExternResult<Option<InitProperties>> {
+        Self::err()
+    }
+
     // Validation receipts
     fn get_validation_receipts(
         &self,
@@ -499,7 +509,7 @@ impl HdiT for HostHdk {
     fn must_get_agent_activity(
         &self,
         must_get_agent_activity_input: MustGetAgentActivityInput,
-    ) -> ExternResult<Vec<RegisterAgentActivity>> {
+    ) -> ExternResult<Vec<AgentActivity>> {
         HostHdi::new().must_get_agent_activity(must_get_agent_activity_input)
     }
     fn dna_info(&self, _: ()) -> ExternResult<DnaInfo> {
@@ -540,8 +550,8 @@ impl HdkT for HostHdk {
     fn get_agent_activity(
         &self,
         get_agent_activity_input: GetAgentActivityInput,
-    ) -> ExternResult<AgentActivity> {
-        host_call::<GetAgentActivityInput, AgentActivity>(
+    ) -> ExternResult<holochain_zome_types::query::AgentActivityStatus> {
+        host_call::<GetAgentActivityInput, holochain_zome_types::query::AgentActivityStatus>(
             __hc__get_agent_activity_1,
             get_agent_activity_input,
         )
@@ -713,6 +723,10 @@ impl HdkT for HostHdk {
 
     fn open_chain(&self, input: OpenChainInput) -> ExternResult<ActionHash> {
         host_call::<OpenChainInput, ActionHash>(__hc__open_chain_1, input)
+    }
+
+    fn get_init_properties(&self, _input: ()) -> ExternResult<Option<InitProperties>> {
+        host_call::<(), Option<InitProperties>>(__hc__get_init_properties_1, ())
     }
 
     fn get_validation_receipts(

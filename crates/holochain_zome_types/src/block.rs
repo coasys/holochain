@@ -1,15 +1,10 @@
 // Temporarily allowing deprecation because of [`BlockTarget::NodeDna`] and [`BlockTarget::Node`].
 #![allow(deprecated)]
 
-use crate::prelude::*;
+use crate::cell::CellId;
 use holo_hash::DhtOpHash;
-use holochain_integrity_types::Timestamp;
-use holochain_timestamp::InclusiveTimestampInterval;
-#[cfg(any(feature = "sqlite", feature = "sqlite-encrypted"))]
-use rusqlite::{
-    types::{FromSql, ToSqlOutput},
-    ToSql,
-};
+use holochain_serialized_bytes::prelude::*;
+use holochain_timestamp::{InclusiveTimestampInterval, Timestamp};
 
 /// Reason why we might want to block a cell.
 #[derive(Clone, serde::Serialize, serde::Deserialize, Debug, Eq, PartialEq)]
@@ -57,70 +52,10 @@ impl From<BlockTarget> for BlockTargetId {
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "sqlite-encrypted"))]
-impl ToSql for BlockTargetId {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        Ok(rusqlite::types::ToSqlOutput::Owned(
-            holochain_serialized_bytes::encode(&self)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
-                .into(),
-        ))
-    }
-}
-
-#[cfg(any(feature = "sqlite", feature = "sqlite-encrypted"))]
-impl FromSql for BlockTargetId {
-    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
-        let bytes = match value {
-            rusqlite::types::ValueRef::Blob(b) => b,
-            _ => {
-                // Anything else is a type‑mismatch.
-                return Err(rusqlite::types::FromSqlError::InvalidType);
-            }
-        };
-
-        // Decode the byte slice back into a [`BlockTargetId`].
-        holochain_serialized_bytes::decode::<_, BlockTargetId>(bytes).map_err(|_| {
-            // Propagate the decoding error as an invalid type error.
-            rusqlite::types::FromSqlError::InvalidType
-        })
-    }
-}
-
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub enum BlockTargetReason {
     Cell(CellBlockReason),
     Ip(IpBlockReason),
-}
-
-#[cfg(any(feature = "sqlite", feature = "sqlite-encrypted"))]
-impl ToSql for BlockTargetReason {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        Ok(rusqlite::types::ToSqlOutput::Owned(
-            holochain_serialized_bytes::encode(&self)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
-                .into(),
-        ))
-    }
-}
-
-#[cfg(any(feature = "sqlite", feature = "sqlite-encrypted"))]
-impl FromSql for BlockTargetReason {
-    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
-        let bytes = match value {
-            rusqlite::types::ValueRef::Blob(b) => b,
-            _ => {
-                // Anything else is a type‑mismatch.
-                return Err(rusqlite::types::FromSqlError::InvalidType);
-            }
-        };
-
-        // Decode the byte slice back into a [`BlockTargetReason`].
-        holochain_serialized_bytes::decode::<_, BlockTargetReason>(bytes).map_err(|_| {
-            // Propagate the decoding error as an invalid type error.
-            rusqlite::types::FromSqlError::InvalidType
-        })
-    }
 }
 
 impl From<BlockTarget> for BlockTargetReason {
@@ -133,7 +68,6 @@ impl From<BlockTarget> for BlockTargetReason {
 }
 
 /// Represents a block.
-/// Also can represent an unblock.
 /// NOT serializable and NOT pub fields by design. `try_new` MUST be the only
 /// entrypoint to build a `Block` as this enforces that the start/end times are
 /// valid according to invariants the SQL queries rely on to avoid corrupting the

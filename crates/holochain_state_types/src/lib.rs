@@ -1,5 +1,5 @@
 use holo_hash::ActionHash;
-use holochain_integrity_types::{Action, Entry, Signature};
+use holochain_integrity_types::prelude::{Action, Entry, Signature};
 use serde::{Deserialize, Serialize};
 
 // TODO fix this.  We shouldn't really have nil values but this would
@@ -16,6 +16,17 @@ pub struct SourceChainDumpRecord {
     pub action_address: ActionHash,
     pub action: Action,
     pub entry: Option<Entry>,
+}
+
+/// Identifies the last source-chain record returned by a paginated dump.
+///
+/// The next page starts strictly after the identified record.
+#[derive(Serialize, Debug, Clone, Deserialize, PartialEq, Eq)]
+pub enum SourceChainCursor {
+    /// Resume after this action sequence number.
+    Sequence(u32),
+    /// Resume after the accepted action identified by this hash.
+    ActionHash(ActionHash),
 }
 
 pub mod prelude {

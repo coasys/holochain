@@ -1,8 +1,7 @@
 use crate::core::ribosome::host_fn::cascade_from_call_context;
-use crate::core::ribosome::CallContext;
 use crate::core::ribosome::HostContext;
 use crate::core::ribosome::RibosomeError;
-use crate::core::ribosome::RibosomeT;
+use crate::core::ribosome::{CallContext, Ribosome};
 use holochain_cascade::{Cascade, CascadeImpl};
 use holochain_p2p::actor::NetworkRequestOptions;
 use holochain_types::prelude::*;
@@ -15,7 +14,7 @@ use wasmer::RuntimeError;
     tracing::instrument(skip(_ribosome, call_context))
 )]
 pub fn must_get_entry(
-    _ribosome: Arc<impl RibosomeT>,
+    _ribosome: Arc<Ribosome>,
     call_context: Arc<CallContext>,
     input: MustGetEntryInput,
 ) -> Result<EntryHashed, RuntimeError> {
@@ -111,9 +110,10 @@ pub fn must_get_entry(
 pub mod test {
     use crate::test_entry_impl;
     use crate::test_utils::RibosomeTestFixture;
+    use ::fixt::prelude::*;
     use hdk::prelude::*;
-    use holochain_state::prelude::*;
     use holochain_wasm_test_utils::TestWasm;
+    use holochain_zome_types::fixt::{ActionFixturator, CreateAction, SignatureFixturator};
     use unwrap_to::unwrap_to;
 
     /// Mimics inside the must_get wasm.
@@ -128,53 +128,53 @@ pub mod test {
         holochain_trace::test_run();
         let RibosomeTestFixture {
             conductor,
-            alice,
             bob,
             alice_host_fn_caller,
             ..
         } = RibosomeTestFixture::new(TestWasm::MustGet).await;
 
+        // Cache a record as if fetched from the network: integrated and
+        // initially Accepted. Crucially this is `locally_validated = false`, so
+        // it can later be transitioned to Rejected — `reject_chain_ops` only
+        // transitions network-cached ops, never an agent's own authored,
+        // locally-validated ops.
         let entry = Entry::try_from(Something(vec![1, 2, 3])).unwrap();
-        let action_hash = alice_host_fn_caller
-            .commit_entry(
-                entry.clone(),
-                EntryDefLocation::app(0, EntryDefIndex(0)),
-                EntryVisibility::Public,
-            )
-            .await;
+        let action = fixt!(Action, CreateAction);
+        let entry_hash = action.entry_hash().unwrap().clone();
+        let action_hash = action.to_hash();
 
-        let dht_db = conductor
-            .raw_handle()
-            .get_dht_db(alice.cell_id().dna_hash())
+        let rendered = holochain_types::wire_ops::RenderedOp::new(
+            action.clone(),
+            fixt!(Signature),
+            None,
+            holochain_zome_types::op::ChainOpType::CreateRecord,
+        )
+        .unwrap();
+        let record_op_hash = holochain_types::op::ChainOpUniqueForm::op_hash(
+            holochain_zome_types::op::ChainOpType::CreateRecord,
+            &action,
+        );
+        let rendered_ops = holochain_types::wire_ops::RenderedOps {
+            entry: Some(EntryHashed::with_pre_hashed(entry.clone(), entry_hash)),
+            ops: vec![rendered],
+            warrant: None,
+        };
+        alice_host_fn_caller
+            .dht_store
+            .cache_chain_ops(&rendered_ops)
+            .await
             .unwrap();
 
-        // When we first get the record it will return because we haven't yet
-        // set the validation status.
-        let record: Record = conductor
+        // Before rejection the cached record is valid, so must_get_valid_record
+        // returns it.
+        let _record: Record = conductor
             .call(&bob, "must_get_valid_record", action_hash.clone())
             .await;
 
-        let signature = record.signature().clone();
-        let action = record.action().clone();
-        let record_entry: RecordEntry = record.entry().clone();
-        let entry = record_entry.clone().into_option().unwrap();
-        let entry_state = DhtOpHashed::from_content_sync(ChainOp::StoreEntry(
-            signature.clone(),
-            NewEntryAction::try_from(action.clone()).unwrap(),
-            entry.clone(),
-        ));
-        let record_state = DhtOpHashed::from_content_sync(ChainOp::StoreRecord(
-            signature,
-            action.clone(),
-            record_entry,
-        ));
-        dht_db
-            .write_async(move |txn| -> StateMutationResult<()> {
-                set_validation_status(txn, record_state.as_hash(), ValidationStatus::Rejected)?;
-                set_validation_status(txn, entry_state.as_hash(), ValidationStatus::Rejected)?;
-
-                Ok(())
-            })
+        // Reject the cached CreateRecord op.
+        alice_host_fn_caller
+            .dht_store
+            .reject_chain_ops(vec![record_op_hash])
             .await
             .unwrap();
 
@@ -190,7 +190,7 @@ pub mod test {
         let must_get_action: SignedActionHashed = conductor
             .call(&bob, "must_get_action", action_hash.clone())
             .await;
-        assert_eq!(must_get_action.action(), &action,);
+        assert_eq!(&must_get_action.hashed.content, &action,);
 
         // Must get VALID record ONLY returns the record if it is valid.
         let must_get_valid_record: Result<Record, _> = conductor

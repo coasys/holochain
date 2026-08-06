@@ -9,33 +9,29 @@
 #![deny(missing_docs)]
 // We have a lot of usages of type aliases to `&String`, which clippy objects to.
 #![allow(clippy::ptr_arg)]
-#![allow(non_local_definitions)]
 
 pub mod access;
-pub mod action;
 pub mod activity;
 pub mod app;
 pub mod cell_config_overrides;
 pub mod chain;
 pub mod combinators;
 pub mod countersigning;
-pub mod db;
-pub mod dht_op;
 pub mod dna;
 pub mod entry;
+pub mod error;
 pub mod link;
 mod macros;
+pub mod op;
 pub mod prelude;
-pub mod rate_limit;
 pub mod record;
 pub mod report;
 pub mod share;
 pub mod signal;
-#[warn(missing_docs)]
-pub mod sql;
 pub mod validation_receipt;
 pub mod warrant;
 pub mod web_app;
+pub mod wire_ops;
 pub mod zome_types;
 
 #[cfg(feature = "fixturators")]
@@ -47,5 +43,3 @@ pub mod network;
 #[cfg(feature = "test_utils")]
 pub mod test_utils;
 pub mod websocket;
-
-pub use holochain_zome_types::entry::EntryHashed;

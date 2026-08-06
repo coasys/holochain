@@ -1,8 +1,7 @@
-use crate::core::ribosome::weigh_placeholder;
 use crate::core::ribosome::CallContext;
 use crate::core::ribosome::HostFnAccess;
+use crate::core::ribosome::Ribosome;
 use crate::core::ribosome::RibosomeError;
-use crate::core::ribosome::RibosomeT;
 use holochain_types::prelude::*;
 use holochain_wasmer_host::prelude::*;
 use std::sync::Arc;
@@ -11,7 +10,7 @@ use wasmer::RuntimeError;
 /// create record
 #[allow(clippy::extra_unused_lifetimes)]
 pub fn create<'a>(
-    _ribosome: Arc<impl RibosomeT>,
+    _ribosome: Arc<Ribosome>,
     call_context: Arc<CallContext>,
     input: CreateInput,
 ) -> Result<ActionHash, RuntimeError> {
@@ -27,8 +26,6 @@ pub fn create<'a>(
                 chain_top_ordering,
             } = input;
 
-            let weight = weigh_placeholder();
-
             // Countersigned entries have different action handling.
             match entry {
                 Entry::CounterSign(_, _) => tokio_helper::block_forever_on(async move {
@@ -38,7 +35,7 @@ pub fn create<'a>(
                         .source_chain()
                         .as_ref()
                         .expect("Must have source chain if write_workspace access is given")
-                        .put_countersigned(entry, chain_top_ordering, weight)
+                        .put_countersigned(entry, chain_top_ordering)
                         .await
                         .map_err(|source_chain_error| -> RuntimeError {
                             wasm_error!(WasmErrorInner::Host(source_chain_error.to_string())).into()
@@ -62,11 +59,11 @@ pub fn create<'a>(
                         EntryDefLocation::CapClaim => EntryType::CapClaim,
                     };
 
-                    // build an action for the entry being committed
-                    let action_builder = builder::Create {
+                    // build the action data for the entry being committed
+                    let action_data = ActionData::Create(CreateData {
                         entry_type,
                         entry_hash,
-                    };
+                    });
 
                     // return the hash of the committed entry
                     // note that validation is handled by the workflow
@@ -80,7 +77,7 @@ pub fn create<'a>(
                             .source_chain()
                             .as_ref()
                             .expect("Must have source chain if write_workspace access is given")
-                            .put_weightless(action_builder, Some(entry), chain_top_ordering)
+                            .put(action_data, Some(entry), chain_top_ordering)
                             .await
                             .map_err(|source_chain_error| -> RuntimeError {
                                 wasm_error!(WasmErrorInner::Host(source_chain_error.to_string()))
@@ -106,6 +103,7 @@ pub fn create<'a>(
 #[cfg(feature = "slow_tests")]
 pub mod wasm_test {
     use super::create;
+    use crate::core::ribosome::mock_ribosome::MockRibosomeBuilder;
     use crate::fixt::*;
     use crate::sweettest::*;
     use crate::test_utils::RibosomeTestFixture;
@@ -123,9 +121,7 @@ pub mod wasm_test {
     /// we can get an entry hash out of the fn directly
     #[tokio::test(flavor = "multi_thread")]
     async fn create_entry_test() {
-        let ribosome = RealRibosomeFixturator::new(crate::fixt::Zomes(vec![TestWasm::Create]))
-            .next()
-            .unwrap();
+        let ribosome = MockRibosomeBuilder::new().build().await.unwrap();
         let mut call_context = CallContextFixturator::new(Unpredictable).next().unwrap();
         call_context.zome = TestWasmPair::<IntegrityZome, CoordinatorZome>::from(TestWasm::Create)
             .coordinator
@@ -180,8 +176,8 @@ pub mod wasm_test {
 
         let round_twice: Vec<Option<Record>> = conductor.call(&alice, "get_entry_twice", ()).await;
 
-        let bytes: Vec<u8> = match round.clone().and_then(|el| el.into()) {
-            Some(holochain_zome_types::entry::Entry::App(entry_bytes)) => {
+        let bytes: Vec<u8> = match round.clone().and_then(|el| el.entry().as_option().cloned()) {
+            Some(Entry::App(entry_bytes)) => {
                 entry_bytes.bytes().to_vec()
             }
             other => panic!("unexpected output: {other:?}"),

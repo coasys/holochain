@@ -2,9 +2,7 @@ use crate::tests::common::Handler;
 use holo_hash::{AgentPubKey, DnaHash};
 use holochain_keystore::test_keystore;
 use holochain_p2p::{spawn_holochain_p2p, HolochainP2pConfig};
-use holochain_state::prelude::{
-    test_cache_db_with_dna_hash, test_conductor_db, test_dht_db, test_peer_meta_store_db,
-};
+use holochain_state::data::PeerMetaStore;
 use kitsune2_api::LocalAgent;
 use std::sync::Arc;
 
@@ -13,10 +11,19 @@ async fn space_shutdown() {
     let dna_hash = DnaHash::from_raw_36(vec![0; 36]);
     let space_id = dna_hash.to_k2_space();
 
-    let dht_db = test_dht_db().to_db();
-    let cache_db = test_cache_db_with_dna_hash(dna_hash.clone()).to_db();
-    let conductor_db = test_conductor_db().to_db();
-    let peer_meta_db = test_peer_meta_store_db(dna_hash.clone()).to_db();
+    let dht_store = holochain_state::DhtStore::new_test(holochain_state::data::Dht::new(Arc::new(
+        dna_hash.clone(),
+    )))
+    .await
+    .unwrap();
+    let conductor_store = holochain_state::conductor::ConductorStore::new_test()
+        .await
+        .unwrap();
+    let peer_meta_db = holochain_state::peer_metadata_store::PeerMetaStore::new(
+        holochain_state::data::test_open_db(PeerMetaStore::new(Arc::new(dna_hash.clone())))
+            .await
+            .unwrap(),
+    );
 
     let keystore = test_keystore();
 
@@ -25,24 +32,15 @@ async fn space_shutdown() {
             network_config: Some(serde_json::json!({
                 "coreBootstrap": {
                     "serverUrl": "https://not_a_host"
-                },
-                "tx5Transport": {
-                    "serverUrl": "wss://not_a_host",
-                    "timeoutS": 30,
-                    "webrtcConnectTimeoutS": 25,
                 }
             })),
-            get_db_op_store: Arc::new(move |_space| {
-                let dht_db = dht_db.clone();
-                Box::pin(async move { Ok(dht_db) })
+            get_dht_store: Arc::new(move |_space| {
+                let dht_store = dht_store.clone();
+                Box::pin(async move { Ok(dht_store) })
             }),
-            get_db_cache: Arc::new(move |_space| {
-                let cache_db = cache_db.clone();
-                Box::pin(async move { Ok(cache_db) })
-            }),
-            get_conductor_db: Arc::new(move || {
-                let conductor_db = conductor_db.clone();
-                Box::pin(async move { conductor_db })
+            get_conductor_store: Arc::new(move || {
+                let conductor_store = conductor_store.clone();
+                Box::pin(async move { conductor_store })
             }),
             get_db_peer_meta: Arc::new(move |_space| {
                 let peer_meta_db = peer_meta_db.clone();

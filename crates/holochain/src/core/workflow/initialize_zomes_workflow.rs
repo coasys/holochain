@@ -1,3 +1,4 @@
+use super::error::WorkflowError;
 use super::error::WorkflowResult;
 use crate::conductor::api::CellConductorApi;
 use crate::conductor::api::CellConductorApiT;
@@ -7,49 +8,42 @@ use crate::core::ribosome::guest_callback::init::InitHostAccess;
 use crate::core::ribosome::guest_callback::init::InitInvocation;
 use crate::core::ribosome::guest_callback::init::InitResult;
 use crate::core::ribosome::guest_callback::post_commit::send_post_commit;
-use crate::core::ribosome::RibosomeT;
+use crate::core::ribosome::Ribosome;
 use derive_more::Constructor;
 use holochain_keystore::MetaLairClient;
 use holochain_p2p::DynHolochainP2pDna;
 use holochain_state::host_fn_workspace::SourceChainWorkspace;
 use holochain_types::prelude::*;
-use holochain_zome_types::action::builder;
 use tokio::sync::broadcast;
 
 #[derive(Constructor)]
-pub struct InitializeZomesWorkflowArgs<Ribosome>
-where
-    Ribosome: RibosomeT + 'static,
-{
+pub struct InitializeZomesWorkflowArgs {
     pub ribosome: Ribosome,
     pub conductor_handle: ConductorHandle,
     pub signal_tx: broadcast::Sender<Signal>,
     pub cell_id: CellId,
     pub integrate_dht_ops_trigger: TriggerSender,
+    pub publish_dht_ops_trigger: TriggerSender,
 }
 
-impl<Ribosome> InitializeZomesWorkflowArgs<Ribosome>
-where
-    Ribosome: RibosomeT + 'static,
-{
+impl InitializeZomesWorkflowArgs {
     pub fn dna_def(&self) -> &DnaDef {
-        self.ribosome.dna_def_hashed().as_content()
+        self.ribosome.dna_def().as_content()
     }
 }
 
 // #[cfg_attr(feature = "instrument", tracing::instrument(skip(network, keystore, workspace, args)))]
-pub async fn initialize_zomes_workflow<Ribosome>(
+pub async fn initialize_zomes_workflow(
     workspace: SourceChainWorkspace,
     network: DynHolochainP2pDna,
     keystore: MetaLairClient,
-    args: InitializeZomesWorkflowArgs<Ribosome>,
-) -> WorkflowResult<InitResult>
-where
-    Ribosome: RibosomeT + Clone + 'static,
-{
+    args: InitializeZomesWorkflowArgs,
+) -> WorkflowResult<InitResult> {
     let conductor_handle = args.conductor_handle.clone();
-    let coordinators = args.ribosome.dna_def_hashed().get_all_coordinators();
+    let cell_id = args.cell_id.clone();
+    let coordinators = args.ribosome.dna_def().get_all_coordinators();
     let integrate_dht_ops_trigger = args.integrate_dht_ops_trigger.clone();
+    let publish_dht_ops_trigger = args.publish_dht_ops_trigger.clone();
     let signal_tx = args.signal_tx.clone();
     let result =
         initialize_zomes_workflow_inner(workspace.clone(), network.clone(), keystore.clone(), args)
@@ -64,8 +58,22 @@ where
             .flush(network.target_arcs().await?)
             .await?;
 
+        // Remove the init properties as they have served their purpose and we don't want the seed
+        // material to outlive the init callback. Do this before post-commit so cleanup is not
+        // skipped if `send_post_commit` fails.
+        conductor_handle
+            .delete_init_properties_for_cell(&cell_id)
+            .await
+            .map_err(|e| WorkflowError::Other(Box::new(e)))?;
+
+        if !flushed_actions.is_empty() {
+            // Authored ops integrate at flush, bypassing the integration
+            // workflow, so record their integration metrics here.
+            crate::core::metrics::record_authored_op_integration(&network.dna_hash());
+        }
+
         send_post_commit(
-            conductor_handle,
+            conductor_handle.clone(),
             workspace,
             network,
             keystore,
@@ -78,19 +86,18 @@ where
 
         // Any ops that were moved to the dht_db as part of the flush but had dependencies will need to be integrated.
         integrate_dht_ops_trigger.trigger(&"initialize_zomes_workflow");
+        // The init data is integrated at flush, so trigger publishing directly.
+        publish_dht_ops_trigger.trigger(&"initialize_zomes_workflow");
     }
     Ok(result)
 }
 
-async fn initialize_zomes_workflow_inner<Ribosome>(
+async fn initialize_zomes_workflow_inner(
     workspace: SourceChainWorkspace,
     network: DynHolochainP2pDna,
     keystore: MetaLairClient,
-    args: InitializeZomesWorkflowArgs<Ribosome>,
-) -> WorkflowResult<InitResult>
-where
-    Ribosome: RibosomeT + 'static,
-{
+    args: InitializeZomesWorkflowArgs,
+) -> WorkflowResult<InitResult> {
     let dna_def = args.dna_def().clone();
     let InitializeZomesWorkflowArgs {
         ribosome,
@@ -119,7 +126,7 @@ where
     let ws = workspace.clone();
     ws.source_chain()
         .put(
-            builder::InitZomesComplete {},
+            ActionData::InitZomesComplete(InitZomesCompleteData {}),
             None,
             ChainTopOrdering::Strict,
         )
@@ -135,12 +142,10 @@ where
 mod tests {
     use super::*;
     use crate::conductor::Conductor;
-    use crate::core::ribosome::guest_callback::validate::ValidateResult;
-    use crate::core::ribosome::MockRibosomeT;
+    use crate::core::ribosome::mock_ribosome::MockRibosomeBuilder;
     use crate::fixt::DnaDefFixturator;
     use crate::fixt::MetaLairClientFixturator;
     use crate::sweettest::*;
-    use crate::test_utils::fake_genesis;
     use ::fixt::prelude::*;
     use holochain_keystore::test_keystore;
     use holochain_p2p::MockHolochainP2pDnaT;
@@ -153,8 +158,7 @@ mod tests {
 
     async fn get_chain(cell: &SweetCell, keystore: MetaLairClient) -> SourceChain {
         SourceChain::new(
-            cell.authored_db().clone(),
-            cell.dht_db().clone(),
+            cell.dht_store().clone(),
             keystore,
             cell.agent_pubkey().clone(),
         )
@@ -164,56 +168,49 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn adds_init_marker() {
-        let test_db = test_authored_db();
-        let test_cache = test_cache_db();
-        let test_dht = test_dht_db();
         let keystore = test_keystore();
-        let db = test_db.to_db();
         let author = fake_agent_pubkey_1();
-
-        // Genesis
-        fake_genesis(db.clone(), test_dht.to_db(), keystore.clone())
-            .await
-            .unwrap();
 
         let dna_def = DnaDefFixturator::new(Unpredictable).next().unwrap();
         let dna_def_hashed = DnaDefHashed::from_content_sync(dna_def.clone());
         let dna_hash = dna_def_hashed.hash.clone();
 
-        let workspace = SourceChainWorkspace::new(
-            db.clone(),
-            test_dht.to_db(),
-            test_cache.to_db(),
-            keystore,
+        // Genesis into the shared DhtStore so the init workflow's cascade reads
+        // resolve the agent's own chain locally (the cascade is now
+        // DhtStore-backed; `fake_genesis` would discard its own DhtStore).
+        let dht_store = holochain_state::test_utils::test_dht_store(dna_hash.clone()).await;
+        holochain_state::source_chain::genesis(
+            dht_store.clone(),
+            keystore.clone(),
+            dna_hash.clone(),
             author.clone(),
+            None,
         )
         .await
         .unwrap();
-        let mut ribosome = MockRibosomeT::new();
 
-        // Setup the ribosome mock
-        ribosome
-            .expect_run_init()
-            .returning(move |_workspace, _invocation| Ok(InitResult::Pass));
-        ribosome
-            .expect_run_validate()
-            .returning(move |_, _| Ok(ValidateResult::Valid));
-        ribosome
-            .expect_dna_def_hashed()
-            .return_const(dna_def_hashed.clone());
+        let workspace = SourceChainWorkspace::new(dht_store, keystore, author.clone())
+            .await
+            .unwrap();
+        let ribosome = MockRibosomeBuilder::new()
+            .with_init_handler(|_, _| Ok(InitCallbackResult::Pass))
+            .with_validate_handler(|_, _| Ok(ValidateCallbackResult::Valid))
+            .build()
+            .await
+            .unwrap();
 
         let db_dir = test_db_dir();
         let config = SweetConductorConfig::standard().tune_network_config(|nc| {
             nc.disable_bootstrap = true;
-            nc.signal_url = url2::Url2::parse("ws://dummy.url");
         });
         let conductor_handle = Conductor::builder()
             .config(config.into())
             .with_data_root_path(db_dir.path().to_path_buf().into())
-            .test(&[])
+            .test()
             .await
             .unwrap();
         let integrate_dht_ops_trigger = TriggerSender::new();
+        let publish_dht_ops_trigger = TriggerSender::new();
 
         let args = InitializeZomesWorkflowArgs {
             ribosome,
@@ -221,6 +218,7 @@ mod tests {
             signal_tx: broadcast::channel(1).0,
             cell_id: CellId::new(dna_hash.clone(), author.clone()),
             integrate_dht_ops_trigger: integrate_dht_ops_trigger.0.clone(),
+            publish_dht_ops_trigger: publish_dht_ops_trigger.0.clone(),
         };
         let keystore = fixt!(MetaLairClient);
         let mut network = MockHolochainP2pDnaT::new();
@@ -236,8 +234,8 @@ mod tests {
         // Check init is added to the workspace
         let scratch = workspace.source_chain().snapshot().unwrap();
         assert_matches!(
-            scratch.actions().next().unwrap().action(),
-            Action::InitZomesComplete(_)
+            scratch.actions().next().unwrap().action().data,
+            ActionData::InitZomesComplete(_)
         );
     }
 
@@ -268,7 +266,10 @@ mod tests {
         //   record committed during init()
         assert_matches!(
             source_chain.query(Default::default()).await.unwrap()[4].action(),
-            Action::InitZomesComplete(_)
+            Action {
+                data: ActionData::InitZomesComplete(_),
+                ..
+            }
         );
     }
 

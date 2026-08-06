@@ -70,7 +70,7 @@ pub struct GetLinksRequestOptions {
 ///
 /// Fields tagged with `[Network]` are network-level controls.
 /// Fields tagged with `[Remote]` are controls that will be forwarded to the
-/// remote agent processing this `GetLinks` request.
+/// remote agent processing this `GetAgentActivity` request.
 #[derive(Debug, Clone)]
 pub struct GetActivityOptions {
     /// The base network options to use for this call.
@@ -101,6 +101,44 @@ impl Default for GetActivityOptions {
             include_warrants: true,
             include_full_records: false,
             get_options: Default::default(),
+        }
+    }
+}
+
+/// Options for a multi-peer agent activity request.
+///
+/// Unlike [`GetActivityOptions`], which races peers and returns the first
+/// non-empty response, these options control a fan-out that returns every
+/// peer's response independently.
+#[derive(Debug, Clone)]
+pub struct GetActivityMultiOptions {
+    /// Fan out to up to this many authorities near the agent's DHT
+    /// location.
+    pub target_peer_count: u8,
+    /// Number of non-empty responses required for the call to succeed.
+    ///
+    /// The fan-out stops gathering as soon as this many peers have
+    /// answered with data. If fewer arrive before the timeout, the call
+    /// fails with [`HolochainP2pError::InsufficientResponses`] rather
+    /// than returning a short vector. Must be at least 1 and no greater
+    /// than `target_peer_count`.
+    pub required_responses: u8,
+    /// Overall timeout for gathering responses, also applied to each
+    /// per-peer request.
+    ///
+    /// When `None`, the conductor's default request timeout is used.
+    pub timeout_ms: Option<u64>,
+    /// Options forwarded to each remote agent processing the request.
+    pub remote_options: event::GetActivityOptions,
+}
+
+impl Default for GetActivityMultiOptions {
+    fn default() -> Self {
+        Self {
+            target_peer_count: 3,
+            required_responses: 2,
+            timeout_ms: None,
+            remote_options: Default::default(),
         }
     }
 }
@@ -222,6 +260,17 @@ pub trait HcP2p: 'static + Send + Sync + std::fmt::Debug + Any {
         to_agent_list: Vec<(AgentPubKey, ExternIO, Signature)>,
     ) -> BoxFut<'_, HolochainP2pResult<()>>;
 
+    /// Similar to `send_remote_signal` but bypasses the WASM when receiving the signal on the
+    /// target conductors.
+    fn send_remote_signal_direct(
+        &self,
+        dna_hash: DnaHash,
+        agents: Vec<AgentPubKey>,
+        signal: Vec<u8>,
+        from_agent: AgentPubKey,
+        signature: Signature,
+    ) -> BoxFut<'_, HolochainP2pResult<()>>;
+
     /// Publish data to the correct neighborhood.
     fn publish(
         &self,
@@ -230,7 +279,6 @@ pub trait HcP2p: 'static + Send + Sync + std::fmt::Debug + Any {
         source: AgentPubKey,
         op_hash_list: Vec<DhtOpHash>,
         timeout_ms: Option<u64>,
-        reflect_ops: Option<Vec<DhtOp>>,
     ) -> BoxFut<'_, HolochainP2pResult<()>>;
 
     /// Publish a countersigning op.
@@ -281,16 +329,44 @@ pub trait HcP2p: 'static + Send + Sync + std::fmt::Debug + Any {
         zome_call_origin: Option<(ZomeName, FunctionName)>,
     ) -> BoxFut<'_, HolochainP2pResult<Vec<AgentActivityResponse>>>;
 
+    /// Get agent activity from multiple authorities on the DHT.
+    ///
+    /// Fans out to up to `target_peer_count` authorities near the agent's
+    /// DHT location and gathers non-empty responses until
+    /// `options.required_responses` have arrived, each paired with the
+    /// peer that produced it. No merging or first-response racing is
+    /// performed, leaving callers free to apply their own cross-peer
+    /// agreement rules.
+    ///
+    /// Fails with [`HolochainP2pError::InsufficientResponses`] when fewer
+    /// than `options.required_responses` non-empty responses arrive in
+    /// time, and with [`HolochainP2pError::InvalidRequest`] when the
+    /// options are contradictory (see [`GetActivityMultiOptions`]).
+    fn get_agent_activity_multi(
+        &self,
+        dna_hash: DnaHash,
+        agent: AgentPubKey,
+        query: ChainQueryFilter,
+        options: GetActivityMultiOptions,
+    ) -> BoxFut<'_, HolochainP2pResult<Vec<(AgentPubKey, AgentActivityResponse)>>>;
+
     /// A remote node is requesting agent activity from us.
     /// Optional zome call origin for metrics attribution.
     fn must_get_agent_activity(
         &self,
         dna_hash: DnaHash,
         author: AgentPubKey,
-        filter: holochain_zome_types::chain::ChainFilter,
+        filter: ChainFilter,
         options: NetworkRequestOptions,
         zome_call_origin: Option<(ZomeName, FunctionName)>,
     ) -> BoxFut<'_, HolochainP2pResult<Vec<MustGetAgentActivityResponse>>>;
+
+    /// Check if an agent was recently online in this network.
+    fn was_agent_recently_online(
+        &self,
+        dna_hash: DnaHash,
+        agent: AgentPubKey,
+    ) -> BoxFut<'_, HolochainP2pResult<bool>>;
 
     /// Send a validation receipt to a remote node.
     fn send_validation_receipts(
@@ -339,8 +415,8 @@ pub trait HcP2p: 'static + Send + Sync + std::fmt::Debug + Any {
     /// Query if an agent is blocked.
     fn is_blocked(&self, target: BlockTargetId) -> BoxFut<'_, HolochainP2pResult<bool>>;
 
-    /// Get the conductor database getter.
-    fn conductor_db_getter(&self) -> crate::GetDbConductor;
+    /// Get the conductor store getter.
+    fn conductor_store_getter(&self) -> crate::GetConductorStore;
 }
 
 /// Trait-object HcP2p

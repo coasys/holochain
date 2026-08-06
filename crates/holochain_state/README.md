@@ -11,11 +11,11 @@
 <!-- cargo-rdme start -->
 
 The Holochain state crate provides helpers and abstractions for working
-with the `holochain_sqlite` crate.
+with Holochain's persistent data stores.
 
 ### Reads
-The main abstraction for creating data read queries is the `Query` trait.
-This can be implemented to make constructing complex queries easier.
+The [`DhtStore`] and [`DhtStoreRead`] types are the main abstractions for
+reading data, combining database access with the in-memory scratch space.
 
 The [`source_chain`] module provides the `SourceChain` type,
 which is the abstraction for working with chains of actions.
@@ -23,8 +23,7 @@ which is the abstraction for working with chains of actions.
 The [`host_fn_workspace`] module provides abstractions for reading data during workflows.
 
 ### Writes
-The [`mutations`] module is the complete set of functions
-for writing data to sqlite in holochain.
+The [`mutations`] module provides error types for state write operations.
 
 ### In-memory
 The [`scratch`] module provides the `Scratch` type for
@@ -32,8 +31,5 @@ reading and writing data in memory that is not visible anywhere else.
 
 The SourceChain type uses the Scratch for in-memory operations which
 can be flushed to the database.
-
-The Query trait allows combining arbitrary database SQL queries with
-the scratch space so reads can union across the database and in-memory data.
 
 <!-- cargo-rdme end -->

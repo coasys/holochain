@@ -1,7 +1,10 @@
 use holo_hash::AgentPubKey;
+use holo_hash::DhtOpHash;
 use holo_hash::DnaHash;
+pub use holochain_state_types::SourceChainCursor;
 use holochain_state_types::SourceChainDump;
-use holochain_types::dht_op::DhtOp;
+use holochain_types::op::DhtOp;
+use holochain_types::prelude::{OpValidity, Timestamp};
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
@@ -53,14 +56,84 @@ pub struct FullIntegrationStateDump {
     /// Ops waiting to be integrated.
     pub integration_limbo: Vec<DhtOp>,
 
-    /// Ops that are integrated.
-    /// This includes rejected.
+    /// Ops that are integrated (includes rejected).
     pub integrated: Vec<DhtOp>,
 
-    /// RowId for the latest DhtOp that we have seen
-    /// Useful for subsequent calls to `FullStateDump`
-    /// to return only what they haven't seen
-    pub dht_ops_cursor: u64,
+    /// Cursor marking the last DHT op selected across all lifecycle buckets.
+    /// Pass it to a subsequent `FullStateDump` to resume strictly after it.
+    /// `None` when the page selected no DHT ops.
+    pub dht_ops_cursor: Option<DhtOpsCursor>,
+}
+
+/// Pagination cursor for all DHT ops in a [`FullIntegrationStateDump`].
+///
+/// `(when_received, hash)`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DhtOpsCursor {
+    /// Microsecond received timestamp of the last op selected.
+    pub when_received: i64,
+    /// Hash of the last op selected (tie-breaks ops sharing a timestamp).
+    pub hash: DhtOpHash,
+}
+
+/// Lifecycle timings for one DHT op in the DHT arc this conductor is currently
+/// holding for a DNA.
+///
+/// The DHT database is shared by every cell running the same DNA, so a dump
+/// covers every op this conductor holds for that DNA rather than only the ops
+/// of one agent running the DNA.
+///
+/// Ops that are still in a validation limbo report `when_integrated: None`
+/// and `validation_status: None`. `locally_validated` is only recorded for
+/// integrated chain ops; it is `None` for limbo ops and for warrants. A
+/// `Some(false)` value means the op was inserted by the cache rather than
+/// validated by this node, which is why its integration time can equal its
+/// received time.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct OpTimingDump {
+    /// Hash of the DHT op these timings describe.
+    pub op_hash: DhtOpHash,
+    /// When the op was received by this conductor.
+    pub when_received: Timestamp,
+    /// When the op was integrated, or `None` while it is still in limbo.
+    pub when_integrated: Option<Timestamp>,
+    /// When validation of the op was abandoned, where recorded. An abandoned
+    /// op stays in limbo and will not integrate.
+    pub abandoned_at: Option<Timestamp>,
+    /// Whether the op was accepted or rejected, or `None` while validation
+    /// has not concluded.
+    pub validation_status: Option<OpValidity>,
+    /// Whether this node validated the op itself, where recorded.
+    pub locally_validated: Option<bool>,
+}
+
+/// One page of op timings for a DNA, ordered by `(when_received, op_hash)`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct OpTimingsDump {
+    /// Timings for the ops selected by this page, oldest received first.
+    pub timings: Vec<OpTimingDump>,
+    /// Cursor marking the last op selected by this page.
+    ///
+    /// Pass it to a subsequent `DumpOpTimings` request to resume strictly
+    /// after it. `None` when the page selected no ops.
+    pub cursor: Option<OpTimingsCursor>,
+}
+
+/// Exclusive pagination cursor for [`OpTimingsDump`].
+///
+/// `(when_received, hash)`. The hash breaks ties between ops that share a
+/// received timestamp, which is common because received times are stamped per
+/// batch of incoming ops rather than per op.
+///
+/// This duplicates the shape of [`DhtOpsCursor`] on purpose: the two dumps
+/// select different op sets and page through them independently, so their
+/// cursors are not interchangeable and must stay separate types.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct OpTimingsCursor {
+    /// Microsecond received timestamp of the last op selected.
+    pub when_received: i64,
+    /// Hash of the last op selected (tie-breaks ops sharing a timestamp).
+    pub hash: DhtOpHash,
 }
 
 /// State dump of all the peer info
@@ -94,7 +167,7 @@ impl std::fmt::Display for JsonDump {
         writeln!(f, "Number of other peers in p2p store: {num_other_peers},")?;
         writeln!(
             f,
-            "Records authored: {}, Ops published: {}",
+            "Records returned: {}, Ops published: {}",
             s.records.len(),
             s.published_ops_count
         )

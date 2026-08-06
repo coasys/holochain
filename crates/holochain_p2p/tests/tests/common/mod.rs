@@ -2,6 +2,8 @@ use ::fixt::fixt;
 use holo_hash::fixt::ActionHashFixturator;
 use holochain_p2p::event::*;
 use holochain_p2p::*;
+use holochain_types::fixt::CreateLinkAction;
+use holochain_types::op::ChainOp;
 use holochain_types::prelude::*;
 use kitsune2_api::*;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -53,10 +55,28 @@ impl HcP2pHandler for Handler {
         })
     }
 
+    fn handle_remote_signal_direct(
+        &self,
+        _dna_hash: DnaHash,
+        _to_agent: AgentPubKey,
+        signal: Vec<u8>,
+        _from_agent: AgentPubKey,
+        _signature: Signature,
+    ) -> BoxFut<'_, HolochainP2pResult<()>> {
+        Box::pin(async move {
+            let respond = format!(
+                "got_remote_signal_direct: {}",
+                String::from_utf8_lossy(&signal),
+            );
+            self.calls.lock().unwrap().push(respond.clone());
+            Ok(())
+        })
+    }
+
     fn handle_publish(
         &self,
         _dna_hash: DnaHash,
-        _ops: Vec<holochain_types::dht_op::DhtOp>,
+        _ops: Vec<(holochain_types::op::DhtOp, bool)>,
     ) -> BoxFut<'_, HolochainP2pResult<()>> {
         Box::pin(async move {
             self.calls.lock().unwrap().push("publish".into());
@@ -88,13 +108,14 @@ impl HcP2pHandler for Handler {
     ) -> BoxFut<'_, HolochainP2pResult<WireLinkOps>> {
         Box::pin(async move {
             self.calls.lock().unwrap().push("get_links".into());
+            let action = fixt!(Action, CreateLinkAction);
             Ok(WireLinkOps {
-                creates: vec![WireCreateLink::condense_base_only(
-                    fixt!(CreateLink),
-                    fixt!(Signature),
+                creates: vec![Judged::new(
+                    SignedAction::new(action, fixt!(Signature)),
                     ValidationStatus::Valid,
                 )],
                 deletes: Vec::new(),
+                warrants: Vec::new(),
             })
         })
     }
@@ -140,7 +161,7 @@ impl HcP2pHandler for Handler {
         _dna_hash: DnaHash,
         _to_agent: AgentPubKey,
         _author: AgentPubKey,
-        _filter: holochain_zome_types::chain::ChainFilter,
+        _filter: ChainFilter,
     ) -> BoxFut<'_, HolochainP2pResult<MustGetAgentActivityResponse>> {
         Box::pin(async move {
             self.calls
@@ -189,8 +210,8 @@ pub(crate) async fn spawn_test_bootstrap(
     // We have mixed features between ring and aws_lc so the "lookup by crate features" doesn't
     // return a default.
     // If this is called twice due to parallel tests, ignore result, because it'll fail.
-    #[cfg(feature = "transport-iroh")]
     let _ = rustls::crypto::ring::default_provider().install_default();
+
     let mut config = kitsune2_bootstrap_srv::Config::testing();
     config.listen_address_list = vec![SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))];
 

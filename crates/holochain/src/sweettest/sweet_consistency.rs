@@ -1,8 +1,9 @@
 //! Methods for awaiting consistency between cells of the same DNA
 
 use super::*;
+use crate::conductor::wire_rows_to_ops;
 use crate::prelude::*;
-use holochain_sqlite::error::DatabaseError;
+use holochain_state::dht_store::DhtStoreRead;
 use std::{
     collections::HashSet,
     time::{Duration, Instant},
@@ -51,9 +52,9 @@ pub async fn await_consistency_s<'a, I: IntoIterator<Item = &'a SweetCell>>(
     cells: I,
 ) -> Result<(), String> {
     #[allow(clippy::type_complexity)]
-    let all_cell_dbs: Vec<(AgentPubKey, DbRead<DbKindDht>)> = cells
+    let all_cell_dbs: Vec<(AgentPubKey, DhtStoreRead)> = cells
         .into_iter()
-        .map(|c| (c.agent_pubkey().clone(), c.dht_db().clone().into()))
+        .map(|c| (c.agent_pubkey().clone(), c.dht_store().as_read()))
         .collect();
     let all_cell_dbs: Vec<_> = all_cell_dbs.iter().map(|c| (&c.0, &c.1)).collect();
     await_op_integration(&all_cell_dbs[..], timeout.into().into_duration()).await
@@ -62,89 +63,133 @@ pub async fn await_consistency_s<'a, I: IntoIterator<Item = &'a SweetCell>>(
 #[derive(Clone, Debug)]
 struct DhtOpRow {
     hash: DhtOpHash,
-    op_type: DhtOpType,
+    op_type: String,
     action_seq: u32,
     author: AgentPubKey,
-    when_integrated: Option<Timestamp>,
+    when_integrated: i64,
+}
+
+/// A `CreateEntry` op whose entry is `Hidden` references a private entry. The
+/// entry is withheld from all peers, so this op only ever exists on the author
+/// (reconstructed from the dump without its entry blob). Such ops must not
+/// enter the cross-node consistency comparison.
+fn is_author_local_private_store_entry(op: &DhtOp) -> bool {
+    matches!(
+        op,
+        DhtOp::ChainOp(chain_op) if matches!(**chain_op, ChainOp::CreateEntry(_, OpEntry::Hidden))
+    )
+}
+
+/// Read the integrated ops a node holds, as `(hash, row)` pairs for reporting.
+///
+/// "Integrated" follows the store semantics: locally-validated chain ops,
+/// GET-cached copies excluded. **Warrants are deliberately excluded** — they
+/// are not guaranteed to reach every node (zero-arc nodes, gossip timing), so
+/// requiring cross-node warrant consistency here would hang; warrant
+/// propagation is asserted separately by the warrant tests. **Private
+/// `CreateEntry` ops are also excluded** — a private entry never leaves its
+/// author, so its `CreateEntry` op only ever exists on the authoring node;
+/// including it would put a hash in the comparison set that no peer can hold
+/// and consistency could never be reached. This mirrors the SQL-level filter
+/// on `ops_to_publish_for_wire`. Ops are reconstructed into `DhtOp`s so
+/// their hashes match across nodes.
+async fn integrated_op_rows(dht_store: &DhtStoreRead) -> Result<Vec<DhtOpRow>, String> {
+    let dump_rows = dht_store
+        .integrated_chain_ops_for_dump(None, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    // Reconstruct each row on its own so its `when_integrated` stays paired with
+    // the op: `wire_rows_to_ops` drops rows that fail to rebuild, so
+    // zipping its output against the original list could misalign.
+    Ok(dump_rows
+        .into_iter()
+        .flat_map(|row| {
+            let when_integrated = row.when_integrated;
+            wire_rows_to_ops(vec![row.wire], vec![])
+                .into_iter()
+                .map(move |op| (op, when_integrated))
+        })
+        .filter(|(op, _)| !is_author_local_private_store_entry(op))
+        .map(|(op, when_integrated)| {
+            let (op_type, action_seq, author) = match &op {
+                DhtOp::ChainOp(chain_op) => {
+                    let action = chain_op.signed_action().data();
+                    (
+                        format!("{:?}", chain_op.op_type()),
+                        action.action_seq(),
+                        action.author().clone(),
+                    )
+                }
+                DhtOp::WarrantOp(warrant_op) => {
+                    ("Warrant".to_string(), 0, warrant_op.author.clone())
+                }
+            };
+            let hashed = DhtOpHashed::from_content_sync(op);
+            DhtOpRow {
+                hash: hashed.hash,
+                op_type,
+                action_seq,
+                author,
+                when_integrated,
+            }
+        })
+        .collect())
 }
 
 /// Wait for all cell envs to reach consistency, meaning that every op
 /// published by every cell has been integrated by every node.
 async fn await_op_integration(
-    cells: &[(&AgentPubKey, &impl ReadAccess<DbKindDht>)],
+    cells: &[(&AgentPubKey, &DhtStoreRead)],
     timeout: Duration,
 ) -> Result<(), String> {
     let start = Instant::now();
-    // Declare op hash lists here so they can be accessed for reporting after timeout.
-    let mut rows_per_db = Vec::new();
     let result = tokio::time::timeout(timeout, async {
         'compare_dbs_loop: loop {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            // Create query for each DHT DB.
-            let queries = cells.iter().map(|(_, dht_db)| {
-                dht_db.read_async(|txn| {
-                    let mut stmt = txn
-                        .prepare(
-                            "\
-                            SELECT DhtOp.hash, DhtOp.type, DhtOp.when_integrated, Action.seq, Action.author
-                            FROM DhtOp
-                            JOIN Action ON DhtOp.action_hash = Action.hash",
-                        )
-                        .unwrap();
-                    let mut rows = stmt.query([]).unwrap();
-                    let mut values = Vec::new();
-                    while let Some(row) = rows.next().unwrap() {
-                        let hash = row.get_unwrap::<_, DhtOpHash>(0);
-                        let op_type = row.get_unwrap::<_, DhtOpType>(1);
-                        let when_integrated = row.get_unwrap::<_, Option<Timestamp>>(2);
-                        let action_seq = row.get_unwrap::<_, u32>(3);
-                        let author = row.get_unwrap::<_, AgentPubKey>(4);
-                        values.push(DhtOpRow {
-                            hash,
-                            op_type,
-                            action_seq,
-                            author,
-                            when_integrated,
-                        });
-                    }
-                    Ok::<_, DatabaseError>(values)
-                })
-            });
-            // Execute queries in parallel.
-            rows_per_db = futures::future::join_all(queries)
+
+            // If any node still has ops awaiting validation or integration,
+            // consistency cannot have been reached; sleep and retry.
+            for (_, dht_store) in cells.iter() {
+                let (validation_limbo, integration_limbo, _) = dht_store
+                    .limbo_state_counts()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if validation_limbo > 0 || integration_limbo > 0 {
+                    tracing::trace!("Unintegrated op found, sleeping...");
+                    continue 'compare_dbs_loop;
+                }
+            }
+
+            // Read the integrated ops for each node in parallel.
+            let queries = cells
+                .iter()
+                .map(|(_, dht_store)| integrated_op_rows(dht_store));
+            let rows_per_db = futures::future::join_all(queries)
                 .await
                 .into_iter()
-                .collect::<Result<_, _>>()
-                .unwrap();
+                .collect::<Result<Vec<_>, String>>()?;
+
             // Build a set of all op hashes and create lists of hashes for each DHT DB.
             let mut all_hashes = HashSet::new();
             let mut hash_lists = Vec::new();
-            for (index, dht_op_rows) in rows_per_db
-                .clone()
-                .into_iter()
-                .enumerate() {
-                    tracing::debug!(
-                        "Agent {} with key {} has {} ops in their DHT DB",
-                        index,
-                        cells[index].0,
-                        dht_op_rows.len()
-                    );
-                    let mut hash_list = Vec::new();
-                    for row in dht_op_rows {
-                        // If any op is not yet integrated, continue to the next loop iteration.
-                        if row.when_integrated.is_none() {
-                            tracing::trace!("Unintegrated op found, sleeping...");
-                            continue 'compare_dbs_loop;
-                        }
-                        hash_list.push(row.hash.clone());
-                        all_hashes.insert(row.hash);
-                    }
-                    hash_lists.push(hash_list);
+            for (index, dht_op_rows) in rows_per_db.into_iter().enumerate() {
+                tracing::debug!(
+                    "Agent {} with key {} has {} ops in their DHT store",
+                    index,
+                    cells[index].0,
+                    dht_op_rows.len()
+                );
+                let mut hash_list = Vec::new();
+                for row in dht_op_rows {
+                    hash_list.push(row.hash.clone());
+                    all_hashes.insert(row.hash);
                 }
-            // All ops currently in the DHT DBs have been integrated.
-            // Check if all ops are in all DHT DBs.
+                hash_lists.push(hash_list);
+            }
+            // All ops currently in the DHT stores have been integrated.
+            // Check if all ops are in all DHT stores.
 
-            // If each DHT DB contains all hashes, consistency is reached.
+            // If each DHT store contains all hashes, consistency is reached.
             if hash_lists
                 .iter()
                 .all(|hash_list| all_hashes.iter().all(|hash| hash_list.contains(hash)))
@@ -153,38 +198,63 @@ async fn await_op_integration(
                 break;
             } else {
                 // Otherwise some ops haven't made it to all agents yet.
-                tracing::debug!("Not all op hashes were found in all DHT DBs after {:?}.", start.elapsed());
+                tracing::debug!(
+                    "Not all op hashes were found in all DHT stores after {:?}.",
+                    start.elapsed()
+                );
             }
         }
+        Ok::<_, String>(())
     })
     .await;
 
-    if result.is_err() {
+    // A timeout (the outer `Err`) or an internal store error (the inner `Err`)
+    // both mean consistency was not reached.
+    let consistent = matches!(result, Ok(Ok(())));
+
+    if !consistent {
         // Print a report now that consistency hasn't been reached.
+        //
+        // Re-read each node's state fresh rather than relying on whatever the
+        // wait loop left behind. The loop only records integrated rows once
+        // every node has integrated them. Reporting the limbo counts alongside
+        // the integrated.
         println!("\nConsistency not reached.\n");
-        for (index, mut rows) in rows_per_db.into_iter().enumerate() {
+        for (index, (_, dht_store)) in cells.iter().enumerate() {
+            let (validation_limbo, integration_limbo, integrated) =
+                match dht_store.limbo_state_counts().await {
+                    Ok(counts) => counts,
+                    Err(e) => {
+                        println!(
+                            "Agent {} with key {}: failed to read integration state: {e}",
+                            index, cells[index].0
+                        );
+                        continue;
+                    }
+                };
+            println!(
+                "Agent {} with key {}: {} in validation limbo, {} in integration limbo, {} integrated",
+                index, cells[index].0, validation_limbo, integration_limbo, integrated
+            );
+
+            let mut rows = match integrated_op_rows(dht_store).await {
+                Ok(rows) => rows,
+                Err(e) => {
+                    println!("  failed to read integrated ops: {e}");
+                    continue;
+                }
+            };
             // Sort rows by author first, then action sequence.
             rows.sort_by_key(|row| (row.author.clone(), row.action_seq));
+            println!("The following ops are in the DHT store:");
             println!(
-                "Agent {} with key {} has the following ops in the DHT DB:",
-                index, cells[index].0
-            );
-            println!(
-                "{:53}  {:10}  {:21}  {:53}  {:10}",
-                "Author", "Action seq", "Op type", "Op hash", "Integrated"
+                "{:53}  {:10}  {:28}  {:53}  {:20}",
+                "Author", "Action seq", "Op type", "Op hash", "When integrated"
             );
             for row in rows {
-                let chain_op_type = match row.op_type {
-                    DhtOpType::Chain(chain_op_type) => chain_op_type,
-                    _ => panic!("Warrant ops must not be in the DHT database"),
-                };
                 println!(
-                    "{:53}  {:10}  {:21}  {:53}  {:10}",
-                    row.author,
-                    row.action_seq,
-                    chain_op_type.to_string(),
-                    row.hash,
-                    row.when_integrated.is_some()
+                    "{:53}  {:10}  {:28}  {:53}  {:20}",
+                    row.author, row.action_seq, row.op_type, row.hash, row.when_integrated,
                 );
             }
             println!();
@@ -203,26 +273,19 @@ mod tests {
         test_utils::retry_fn_until_timeout,
     };
     use ::fixt::fixt;
-    use hdk::prelude::{ActionFixturator, SignatureFixturator};
+    use hdk::prelude::SignatureFixturator;
     use holo_hash::ActionHash;
     use holochain_serialized_bytes::SerializedBytes;
-    use holochain_state::prelude::insert_op_dht;
-    use holochain_types::dht_op::{ChainOp, DhtOpHashed};
+    use holochain_types::op::{ChainOp, DhtOp, DhtOpHashed};
     use holochain_wasm_test_utils::TestWasm;
-    use holochain_zome_types::{
-        action::ChainTopOrdering,
-        entry::{AppEntryBytes, AppEntryDefLocation, CreateInput, EntryDefLocation},
-        entry_def::{EntryDef, EntryVisibility},
-        zome::inline_zome::InlineIntegrityZome,
-        Entry,
+    use holochain_zome_types::fixt::ActionFixturator;
+    use holochain_zome_types::prelude::{
+        AppEntryBytes, AppEntryDefLocation, ChainTopOrdering, CreateInput, Entry, EntryDef,
+        EntryDefLocation, EntryVisibility, InlineIntegrityZome, SignedAction,
     };
     use serde::{Deserialize, Serialize};
 
     #[tokio::test(flavor = "multi_thread")]
-    #[cfg_attr(
-        not(feature = "transport-iroh"),
-        ignore = "requires Iroh transport for stability"
-    )]
     async fn consistency_reached() {
         holochain_trace::test_run();
         let mut conductors = SweetConductorBatch::standard(2).await;
@@ -273,10 +336,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[cfg_attr(
-        not(feature = "transport-iroh"),
-        ignore = "requires Iroh transport for stability"
-    )]
     async fn consistency_reached_with_private_entry() {
         holochain_trace::test_run();
         let mut conductors = SweetConductorBatch::standard(2).await;
@@ -313,10 +372,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[cfg_attr(
-        not(feature = "transport-iroh"),
-        ignore = "requires Iroh transport for stability"
-    )]
     async fn consistency_not_reached_when_ops_not_synced() {
         holochain_trace::test_run();
         // No bootstrap service.
@@ -340,9 +395,11 @@ mod tests {
             || async {
                 conductors[0]
                     .all_ops_integrated(dna_file.dna_hash())
+                    .await
                     .unwrap()
                     && conductors[1]
                         .all_ops_integrated(dna_file.dna_hash())
+                        .await
                         .unwrap()
             },
             Some(5000),
@@ -375,12 +432,17 @@ mod tests {
             .await
             .unwrap();
 
-        let op = ChainOp::RegisterAgentActivity(fixt!(Signature), fixt!(Action));
-        let unintegrated_op = DhtOpHashed::from_content_sync(op);
+        // This arbitrary op only needs to exist unvalidated in limbo.
+        let action = fixt!(Action);
+        let op = ChainOp::AgentActivity(SignedAction::new(action, fixt!(Signature)));
+        let unintegrated_op = DhtOpHashed::from_content_sync(DhtOp::from(op));
+        // Stage the op into the DHT store's validation limbo so it is present
+        // but not integrated.
         conductors[0]
-            .get_dht_db(dna_file.dna_hash())
+            .get_dht_store(dna_file.dna_hash())
             .unwrap()
-            .test_write(move |txn| insert_op_dht(txn, &unintegrated_op, 0, None))
+            .record_incoming_ops(vec![(unintegrated_op, false)])
+            .await
             .unwrap();
 
         // Unintegrated op will prevent consistency.

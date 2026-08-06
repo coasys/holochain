@@ -5,6 +5,7 @@
 
 use super::error::WorkflowError;
 use super::error::WorkflowResult;
+use crate::conductor::api::CellConductorApiT;
 use crate::core::ribosome::guest_callback::genesis_self_check::v1::GenesisSelfCheckHostAccessV1;
 use crate::core::ribosome::guest_callback::genesis_self_check::v1::GenesisSelfCheckInvocationV1;
 use crate::core::ribosome::guest_callback::genesis_self_check::v2::GenesisSelfCheckHostAccessV2;
@@ -12,46 +13,37 @@ use crate::core::ribosome::guest_callback::genesis_self_check::v2::GenesisSelfCh
 use crate::core::ribosome::guest_callback::genesis_self_check::{
     GenesisSelfCheckHostAccess, GenesisSelfCheckInvocation, GenesisSelfCheckResult,
 };
-use crate::{conductor::api::CellConductorApiT, core::ribosome::RibosomeT};
+use crate::core::ribosome::Ribosome;
 use derive_more::Constructor;
-use holochain_sqlite::prelude::*;
+use holochain_state::dht_store::DhtStore;
+use holochain_state::prelude::StateQueryResult;
 use holochain_state::source_chain;
 use holochain_types::prelude::*;
-use rusqlite::named_params;
 use std::sync::Arc;
 
 /// The struct which implements the genesis Workflow
 #[derive(Constructor)]
-pub struct GenesisWorkflowArgs<Ribosome>
-where
-    Ribosome: RibosomeT + 'static,
-{
+pub struct GenesisWorkflowArgs {
     cell_id: CellId,
     membrane_proof: Option<MembraneProof>,
     ribosome: Ribosome,
 }
 
 // #[cfg_attr(feature = "instrument", tracing::instrument(skip(workspace, api, args)))]
-pub async fn genesis_workflow<Api: CellConductorApiT, Ribosome>(
+pub async fn genesis_workflow<Api: CellConductorApiT>(
     mut workspace: GenesisWorkspace,
     api: Api,
-    args: GenesisWorkflowArgs<Ribosome>,
-) -> WorkflowResult<()>
-where
-    Ribosome: RibosomeT + 'static,
-{
+    args: GenesisWorkflowArgs,
+) -> WorkflowResult<()> {
     genesis_workflow_inner(&mut workspace, args, api).await?;
     Ok(())
 }
 
-async fn genesis_workflow_inner<Api: CellConductorApiT, Ribosome>(
+async fn genesis_workflow_inner<Api: CellConductorApiT>(
     workspace: &mut GenesisWorkspace,
-    args: GenesisWorkflowArgs<Ribosome>,
+    args: GenesisWorkflowArgs,
     api: Api,
-) -> WorkflowResult<()>
-where
-    Ribosome: RibosomeT + 'static,
-{
+) -> WorkflowResult<()> {
     let GenesisWorkflowArgs {
         cell_id,
         membrane_proof,
@@ -70,7 +62,7 @@ where
         modifiers: DnaModifiers { properties, .. },
         integrity_zomes,
         ..
-    } = &ribosome.dna_def_hashed().content;
+    } = &ribosome.dna_def().content;
     let dna_info = DnaInfoV1 {
         zome_names: integrity_zomes.iter().map(|(n, _)| n.clone()).collect(),
         name: name.clone(),
@@ -107,8 +99,7 @@ where
     }
 
     source_chain::genesis(
-        workspace.vault.clone(),
-        workspace.dht_db.clone(),
+        workspace.dht_store.clone(),
         api.keystore().clone(),
         cell_id.dna_hash().clone(),
         cell_id.agent_pubkey().clone(),
@@ -121,39 +112,17 @@ where
 
 /// The workspace for Genesis
 pub struct GenesisWorkspace {
-    vault: DbWrite<DbKindAuthored>,
-    dht_db: DbWrite<DbKindDht>,
+    dht_store: DhtStore,
 }
 
 impl GenesisWorkspace {
     /// Constructor
-    pub fn new(env: DbWrite<DbKindAuthored>, dht_db: DbWrite<DbKindDht>) -> Self {
-        Self { vault: env, dht_db }
+    pub fn new(dht_store: DhtStore) -> Self {
+        Self { dht_store }
     }
 
-    pub async fn has_genesis(&self, author: AgentPubKey) -> DatabaseResult<bool> {
-        let count = self
-            .vault
-            .read_async(move |txn| {
-                let count: u32 = txn.query_row(
-                    "
-                SELECT
-                COUNT(Action.hash)
-                FROM Action
-                JOIN DhtOp ON DhtOp.action_hash = Action.hash
-                WHERE
-                Action.author = :author
-                LIMIT 3
-                ",
-                    named_params! {
-                        ":author": author,
-                    },
-                    |row| row.get(0),
-                )?;
-                DatabaseResult::Ok(count)
-            })
-            .await?;
-        Ok(count >= 3)
+    pub async fn has_genesis(&self, author: AgentPubKey) -> StateQueryResult<bool> {
+        self.dht_store.as_read().has_genesis(&author).await
     }
 }
 
@@ -161,37 +130,69 @@ impl GenesisWorkspace {
 mod tests {
     use super::*;
     use crate::conductor::api::MockCellConductorApiT;
-    use crate::core::ribosome::MockRibosomeT;
+    use crate::core::ribosome::mock_ribosome::MockRibosomeBuilder;
     use holochain_keystore::test_keystore;
-    use holochain_state::prelude::test_dht_db;
-    use holochain_state::{prelude::test_authored_db, source_chain::SourceChain};
+    use holochain_state::source_chain::SourceChain;
     use holochain_trace;
     use holochain_types::test_utils::fake_agent_pubkey_1;
     use holochain_types::test_utils::fake_dna_file;
-    use holochain_zome_types::Action;
+    use holochain_zome_types::prelude::{Action, ActionData};
     use matches::assert_matches;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn has_genesis() {
+        holochain_trace::test_run();
+        let keystore = test_keystore();
+        let dna = fake_dna_file("b");
+        let author = fake_agent_pubkey_1();
+        let dht_store = holochain_state::test_utils::test_dht_store(dna.dna_hash().clone()).await;
+
+        let workspace = GenesisWorkspace::new(dht_store.clone());
+
+        // Before genesis the store has none of the author's actions.
+        assert!(!workspace.has_genesis(author.clone()).await.unwrap());
+
+        let mut api = MockCellConductorApiT::new();
+        api.expect_keystore().return_const(keystore.clone());
+        let ribosome = MockRibosomeBuilder::new_with_dna_def(dna.dna_def_hashed().clone())
+            .with_genesis_self_check_handler(|_, _| Ok(GenesisSelfCheckResult::Valid))
+            .build()
+            .await
+            .unwrap();
+        let args = GenesisWorkflowArgs {
+            cell_id: CellId::new(dna.dna_hash().clone(), author.clone()),
+            membrane_proof: None,
+            ribosome,
+        };
+        genesis_workflow(workspace, api, args).await.unwrap();
+
+        // After genesis the store has the three genesis actions, so a fresh
+        // workspace over the same store reports genesis complete.
+        let workspace = GenesisWorkspace::new(dht_store);
+        assert!(workspace.has_genesis(author).await.unwrap());
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn genesis_initializes_source_chain() {
         holochain_trace::test_run();
-        let test_db = test_authored_db();
-        let dht_db = test_dht_db();
         let keystore = test_keystore();
-        let vault = test_db.to_db();
         let dna = fake_dna_file("a");
         let author = fake_agent_pubkey_1();
 
+        let dht_store = holochain_state::test_utils::test_dht_store(dna.dna_hash().clone()).await;
+
         {
-            let workspace = GenesisWorkspace::new(vault.clone(), dht_db.to_db());
+            let workspace = GenesisWorkspace::new(dht_store.clone());
 
             let mut api = MockCellConductorApiT::new();
             api.expect_keystore().return_const(keystore.clone());
-            let mut ribosome = MockRibosomeT::new();
-            ribosome
-                .expect_run_genesis_self_check()
-                .returning(|_, _| Ok(GenesisSelfCheckResult::Valid));
             let dna_def = DnaDefHashed::from_content_sync(dna.dna_def().clone());
-            ribosome.expect_dna_def_hashed().return_const(dna_def);
+            let ribosome = MockRibosomeBuilder::new_with_dna_def(dna_def)
+                .with_genesis_self_check_handler(|_, _| Ok(GenesisSelfCheckResult::Valid))
+                .build()
+                .await
+                .unwrap();
+
             let args = GenesisWorkflowArgs {
                 cell_id: CellId::new(dna.dna_hash().clone(), author.clone()),
                 membrane_proof: None,
@@ -201,10 +202,10 @@ mod tests {
         }
 
         {
-            let source_chain =
-                SourceChain::new(vault.clone(), dht_db.to_db(), keystore, author.clone())
-                    .await
-                    .unwrap();
+            let dht_store = dht_store;
+            let source_chain = SourceChain::new(dht_store, keystore, author.clone())
+                .await
+                .unwrap();
             let actions = source_chain
                 .query(Default::default())
                 .await
@@ -216,9 +217,18 @@ mod tests {
             assert_matches!(
                 actions.as_slice(),
                 [
-                    Action::Dna(_),
-                    Action::AgentValidationPkg(_),
-                    Action::Create(_)
+                    Action {
+                        data: ActionData::Dna(_),
+                        ..
+                    },
+                    Action {
+                        data: ActionData::AgentValidationPkg(_),
+                        ..
+                    },
+                    Action {
+                        data: ActionData::Create(_),
+                        ..
+                    }
                 ]
             );
         }

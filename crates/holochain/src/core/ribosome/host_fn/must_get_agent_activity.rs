@@ -1,12 +1,10 @@
 use crate::core::ribosome::host_fn::cascade_from_call_context;
-use crate::core::ribosome::CallContext;
 use crate::core::ribosome::HostContext;
 use crate::core::ribosome::HostFnAccess;
 use crate::core::ribosome::RibosomeError;
-use crate::core::ribosome::RibosomeT;
+use crate::core::ribosome::{CallContext, Ribosome};
 use holochain_cascade::CascadeImpl;
 use holochain_p2p::actor::NetworkRequestOptions;
-use holochain_state::mutations::insert_op_cache;
 use holochain_types::prelude::*;
 use holochain_wasmer_host::prelude::*;
 use std::sync::Arc;
@@ -17,10 +15,10 @@ use wasmer::RuntimeError;
     tracing::instrument(skip(_ribosome, call_context))
 )]
 pub fn must_get_agent_activity(
-    _ribosome: Arc<impl RibosomeT>,
+    _ribosome: Arc<Ribosome>,
     call_context: Arc<CallContext>,
     input: MustGetAgentActivityInput,
-) -> Result<Vec<RegisterAgentActivity>, RuntimeError> {
+) -> Result<Vec<AgentActivity>, RuntimeError> {
     tracing::debug!("begin must_get_agent_activity");
     let ret = match HostFnAccess::from(&call_context.host_context()) {
         HostFnAccess {
@@ -64,19 +62,14 @@ pub fn must_get_agent_activity(
                 use MustGetAgentActivityResponse::*;
 
                 let result: Result<_, RuntimeError> = match (result, &call_context.host_context) {
-                    (Activity {activity, warrants}, _) => {
-                        if !warrants.is_empty() {
-                            if let Some(db) = cascade.cache() {
-                                db.write_async(|txn| {
-                                    for warrant in warrants {
-                                        insert_op_cache(txn, &DhtOpHashed::from_content_sync(warrant))?;
-                                    }
-                                    crate::conductor::error::ConductorResult::Ok(())
-                                }).await.map_err(|e| -> RuntimeError { wasm_error!(e).into() })?;
-                            }
-                        }
-                        Ok(activity)},
-                    (IncompleteChain | ChainTopNotFound(_), HostContext::Init(_)) => {
+                    (Activity {activity, warrants: _}, _) => Ok(activity),
+                    (
+                        IncompleteChain
+                        | ChainTopNotFound(_)
+                        | UntilHashMissing(_)
+                        | UntilTimestampIndeterminate(_),
+                        HostContext::Init(_),
+                    ) => {
                         Err(wasm_error!(WasmErrorInner::HostShortCircuit(
                             holochain_serialized_bytes::encode(
                                 &ExternIO::encode(InitCallbackResult::UnresolvedDependencies(
@@ -88,7 +81,13 @@ pub fn must_get_agent_activity(
                         ))
                         .into())
                     }
-                    (IncompleteChain | ChainTopNotFound(_), HostContext::Validate(_)) => {
+                    (
+                        IncompleteChain
+                        | ChainTopNotFound(_)
+                        | UntilHashMissing(_)
+                        | UntilTimestampIndeterminate(_),
+                        HostContext::Validate(_),
+                    ) => {
                         Err(wasm_error!(WasmErrorInner::HostShortCircuit(
                             holochain_serialized_bytes::encode(
                                 &ExternIO::encode(ValidateCallbackResult::UnresolvedDependencies(
@@ -108,8 +107,20 @@ pub fn must_get_agent_activity(
                         "must_get_agent_activity is missing action {missing_action} for author {author} and filter {chain_filter:?}"
                     )))
                     .into()),
-                    (EmptyRange, _) => Err(wasm_error!(WasmErrorInner::Host(format!(
-                        "must_get_agent_activity chain has produced an invalid range because the range is empty for author {author} and filter {chain_filter:?}"
+                    (UntilHashMissing(missing_action), _) => Err(wasm_error!(WasmErrorInner::Host(format!(
+                        "must_get_agent_activity is missing until hash {missing_action} for author {author} and filter {chain_filter:?}"
+                    )))
+                    .into()),
+                    (UntilTimestampIndeterminate(missing_timestamp), _) => Err(wasm_error!(WasmErrorInner::Host(format!(
+                        "must_get_agent_activity is missing until timestamp {missing_timestamp} for author {author} and filter {chain_filter:?}"
+                    )))
+                    .into()),
+                    (UntilHashAfterChainHead(until_hash), _) => Err(wasm_error!(WasmErrorInner::Host(format!(
+                        "must_get_agent_activity until_hash {until_hash} has action sequence after chain_top for author {author} and filter {chain_filter:?}"
+                    )))
+                    .into()),
+                    (UntilTimestampGreaterThanChainHead(until_timestamp), _) => Err(wasm_error!(WasmErrorInner::Host(format!(
+                        "must_get_agent_activity until_timestamp {until_timestamp} is greater than chain_top timestamp for author {author} and filter {chain_filter:?}"
                     )))
                     .into()),
                 };
@@ -175,6 +186,8 @@ pub mod test {
             .await;
     }
 
+    // Excluded under `wasmer-wasmi` until https://github.com/wasmerio/wasmer/issues/6397 is fixed.
+    #[cfg(not(feature = "wasmer-wasmi"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn ribosome_must_get_agent_activity() {
         holochain_trace::test_run();
@@ -248,9 +261,9 @@ pub mod test {
             )
             .await;
 
-        let filter = ChainFilter::new(c.clone()).until_hash(a.clone());
+        let filter = ChainFilter::until_hash(c.clone(), a.clone());
 
-        let r: Vec<RegisterAgentActivity> = conductor
+        let r: Vec<AgentActivity> = conductor
             .call(
                 &alice,
                 "call_must_get_agent_activity",

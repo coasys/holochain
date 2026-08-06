@@ -72,7 +72,7 @@ impl DnaBundle {
         let integrity_zomes = data[0]
             .iter()
             .map(|(zome_name, hash, _, dependencies)| {
-                let zome_def = ZomeDef::Wasm(WasmZome {
+                let zome_def = ZomeDef::Wasm(WasmZomeDef {
                     wasm_hash: hash.clone(),
                     dependencies: dependencies.clone(),
                 });
@@ -82,7 +82,7 @@ impl DnaBundle {
         let coordinator_zomes = data[1]
             .iter()
             .map(|(zome_name, hash, _, dependencies)| {
-                let zome_def = ZomeDef::Wasm(WasmZome {
+                let zome_def = ZomeDef::Wasm(WasmZomeDef {
                     wasm_hash: hash.clone(),
                     dependencies: dependencies.clone(),
                 });
@@ -190,20 +190,18 @@ impl DnaBundle {
                     .map(|name| ZomeDependency { name })
                     .collect();
 
-                // The wasm hash will be None here for inline zomes and we should
-                // not be allowed to build a manifest in the first place given that
-                // we cannot bundle inline zomes since they are not serializable.
-                match zome.wasm_hash(&name).ok() {
-                    None => panic!("Cannot construct a valid dna manifest from a DnaDef containing inline zomes!"),
-                    Some(hash) => {
-                        let hash = WasmHashB64::from(hash);
-                        ZomeManifest {
-                            name: name.clone(),
-                            hash: Some(hash),
-                            path: format!("{name}.wasm"),
-                            dependencies: Some(dependencies),
-                        }
-                    }
+                // The hash will be an inline hash here for inline zomes and we should
+                // not be allowed to build a manifest from that.
+                if holo_hash::hash_type::Zome::Inline.get_prefix() == zome.zome_hash().hash_type().get_prefix() {
+                    panic!("Cannot construct a valid dna manifest from a DnaDef containing inline zomes!")
+                }
+
+                let hash = WasmHashB64::from(WasmHash::from_raw_39(zome.zome_hash().into_inner()));
+                ZomeManifest {
+                    name: name.clone(),
+                    hash: Some(hash),
+                    path: format!("{name}.wasm"),
+                    dependencies: Some(dependencies),
                 }
             })
             .collect();
@@ -219,20 +217,18 @@ impl DnaBundle {
                     .map(|name| ZomeDependency { name })
                     .collect();
 
-                // The wasm hash will be None here for inline zomes and we should
-                // not be allowed to build a manifest in the first place given that
-                // we cannot bundle inline zomes since they are not serializable.
-                match zome.wasm_hash(&name).ok() {
-                    None => panic!("Cannot construct a valid dna manifest from a DnaDef containing inline zomes!"),
-                    Some(hash) => {
-                        let hash = WasmHashB64::from(hash);
-                        ZomeManifest {
-                            name: name.clone(),
-                            hash: Some(hash),
-                            path: format!("{name}.wasm"),
-                            dependencies: Some(dependencies),
-                        }
-                    }
+                // The hash will be an inline hash here for inline zomes and we should
+                // not be allowed to build a manifest from that.
+                if holo_hash::hash_type::Zome::Inline.get_prefix() == zome.zome_hash().hash_type().get_prefix() {
+                    panic!("Cannot construct a valid dna manifest from a DnaDef containing inline zomes!")
+                }
+
+                let hash = WasmHashB64::from(WasmHash::from_raw_39(zome.zome_hash().into_inner()));
+                ZomeManifest {
+                    name: name.clone(),
+                    hash: Some(hash),
+                    path: format!("{name}.wasm"),
+                    dependencies: Some(dependencies),
                 }
             })
             .collect();
@@ -304,7 +300,7 @@ mod tests {
             name: "name".into(),
             integrity: IntegrityManifest {
                 network_seed: Some("original network seed".to_string()),
-                properties: Some(serde_yaml::Value::Null.into()),
+                properties: Some(yaml_serde::Value::Null.into()),
                 zomes: vec![
                     ZomeManifest {
                         name: "zome1".into(),
@@ -356,7 +352,7 @@ mod tests {
         assert_eq!(dna_file.code().len(), 2);
 
         // - Check that properties and UUID can be overridden
-        let properties: YamlProperties = serde_yaml::Value::from(42).into();
+        let properties: YamlProperties = yaml_serde::Value::from(42).into();
         let bundle: DnaBundle = Bundle::new(manifest.try_into().unwrap(), resources)
             .unwrap()
             .into();

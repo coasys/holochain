@@ -1,5 +1,5 @@
 ---
-default_semver_increment_mode: !pre_minor dev
+default_semver_increment_mode: !pre_patch rc
 ---
 # Changelog
 
@@ -7,10 +7,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## \[Unreleased\]
 
-### Added
+## 0.7.0
 
-- Added `ConductorNetworkState` type and `AdminRequest::GetNetworkState` / `AdminRequest::AwaitCellNetworkReady` endpoints so external clients can query or wait for cell network readiness over the admin WebSocket. [\#5647](https://github.com/holochain/holochain/pull/5647)
-- Added `SpaceNetworkOverride` struct and optional `space_overrides` field to `NetworkConfig`, allowing per-DNA-space bootstrap and signal server configuration in the conductor config. Existing configs without this field continue to work unchanged.
+## 0.7.0-rc.5
+
+## 0.7.0-rc.4
+
+## 0.7.0-rc.3
+
+## 0.7.0-rc.2
+
+## 0.7.0-rc.1
+
+## 0.7.0-rc.0
+
+## 0.7.0-dev.31
+
+## 0.7.0-dev.30
+
+## 0.7.0-dev.29
+
+## 0.7.0-dev.28
+
+## 0.7.0-dev.27
+
+## 0.7.0-dev.26
+
+## 0.7.0-dev.25
+
+## 0.7.0-dev.24
+
+## 0.7.0-dev.23
+
+## 0.7.0-dev.22
+
+## 0.7.0-dev.21
+
+## 0.7.0-dev.20
+
+## 0.7.0-dev.19
+
+## 0.7.0-dev.18
+
+## 0.7.0-dev.17
+
+## 0.7.0-dev.16
 
 ## 0.7.0-dev.15
 

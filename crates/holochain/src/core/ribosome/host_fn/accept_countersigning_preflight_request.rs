@@ -1,7 +1,7 @@
 use crate::core::ribosome::CallContext;
 use crate::core::ribosome::HostFnAccess;
 use crate::core::ribosome::RibosomeError;
-use crate::core::ribosome::RibosomeT;
+use crate::core::ribosome::Ribosome;
 use holochain_types::prelude::*;
 use holochain_wasmer_host::prelude::*;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use wasmer::RuntimeError;
     tracing::instrument(skip(_ribosome, call_context))
 )]
 pub fn accept_countersigning_preflight_request<'a>(
-    _ribosome: Arc<impl RibosomeT>,
+    _ribosome: Arc<Ribosome>,
     call_context: Arc<CallContext>,
     input: PreflightRequest,
 ) -> Result<PreflightRequestAcceptance, RuntimeError> {
@@ -73,6 +73,7 @@ pub mod wasm_test {
     use hdk::prelude::*;
     use holochain_nonce::fresh_nonce;
     use holochain_state::source_chain::SourceChainError;
+    use holochain_zome_types::query::AgentActivityStatus;
     use holochain_wasm_test_utils::TestWasm;
     use holochain_zome_types::zome_io::ZomeCallParams;
     use matches::assert_matches;
@@ -155,7 +156,7 @@ pub mod wasm_test {
         let _: ActionHash = conductors[1].call(&alice, "create_a_thing", ()).await;
         let _: ActionHash = conductors[1].call(&bob, "create_a_thing", ()).await;
 
-        let alice_agent_activity_alice_observed_before: AgentActivity = conductors[1]
+        let alice_agent_activity_alice_observed_before: AgentActivityStatus = conductors[1]
             .call(
                 &alice,
                 "get_agent_activity",
@@ -163,10 +164,11 @@ pub mod wasm_test {
                     agent_pubkey: alice_cell.agent_pubkey().clone(),
                     chain_query_filter: ChainQueryFilter::new(),
                     activity_request: ActivityRequest::Full,
+                    get_options: GetOptions::default(),
                 },
             )
             .await;
-        let alice_agent_activity_bob_observed_before: AgentActivity = conductors[1]
+        let alice_agent_activity_bob_observed_before: AgentActivityStatus = conductors[1]
             .call(
                 &bob,
                 "get_agent_activity",
@@ -174,10 +176,11 @@ pub mod wasm_test {
                     agent_pubkey: alice_cell.agent_pubkey().clone(),
                     chain_query_filter: ChainQueryFilter::new(),
                     activity_request: ActivityRequest::Full,
+                    get_options: GetOptions::default(),
                 },
             )
             .await;
-        let bob_agent_activity_alice_observed_before: AgentActivity = conductors[1]
+        let bob_agent_activity_alice_observed_before: AgentActivityStatus = conductors[1]
             .call(
                 &alice,
                 "get_agent_activity",
@@ -185,10 +188,11 @@ pub mod wasm_test {
                     agent_pubkey: bob_cell.agent_pubkey().clone(),
                     chain_query_filter: ChainQueryFilter::new(),
                     activity_request: ActivityRequest::Full,
+                    get_options: GetOptions::default(),
                 },
             )
             .await;
-        let bob_agent_activity_bob_observed_before: AgentActivity = conductors[1]
+        let bob_agent_activity_bob_observed_before: AgentActivityStatus = conductors[1]
             .call(
                 &bob,
                 "get_agent_activity",
@@ -196,6 +200,7 @@ pub mod wasm_test {
                     agent_pubkey: bob_cell.agent_pubkey().clone(),
                     chain_query_filter: ChainQueryFilter::new(),
                     activity_request: ActivityRequest::Full,
+                    get_options: GetOptions::default(),
                 },
             )
             .await;
@@ -332,7 +337,7 @@ pub mod wasm_test {
         );
 
         // At this point Alice's session entry is a liability so can't exist.
-        let alice_agent_activity_alice_observed_after: AgentActivity = conductors[1]
+        let alice_agent_activity_alice_observed_after: AgentActivityStatus = conductors[1]
             .call(
                 &alice,
                 "get_agent_activity",
@@ -340,10 +345,11 @@ pub mod wasm_test {
                     agent_pubkey: alice_cell.agent_pubkey().clone(),
                     chain_query_filter: ChainQueryFilter::new(),
                     activity_request: ActivityRequest::Full,
+                    get_options: GetOptions::default(),
                 },
             )
             .await;
-        let alice_agent_activity_bob_observed_after: AgentActivity = conductors[1]
+        let alice_agent_activity_bob_observed_after: AgentActivityStatus = conductors[1]
             .call(
                 &bob,
                 "get_agent_activity",
@@ -351,10 +357,11 @@ pub mod wasm_test {
                     agent_pubkey: alice_cell.agent_pubkey().clone(),
                     chain_query_filter: ChainQueryFilter::new(),
                     activity_request: ActivityRequest::Full,
+                    get_options: GetOptions::default(),
                 },
             )
             .await;
-        let bob_agent_activity_alice_observed_after: AgentActivity = conductors[1]
+        let bob_agent_activity_alice_observed_after: AgentActivityStatus = conductors[1]
             .call(
                 &alice,
                 "get_agent_activity",
@@ -362,10 +369,11 @@ pub mod wasm_test {
                     agent_pubkey: bob_cell.agent_pubkey().clone(),
                     chain_query_filter: ChainQueryFilter::new(),
                     activity_request: ActivityRequest::Full,
+                    get_options: GetOptions::default(),
                 },
             )
             .await;
-        let bob_agent_activity_bob_observed_after: AgentActivity = conductors[1]
+        let bob_agent_activity_bob_observed_after: AgentActivityStatus = conductors[1]
             .call(
                 &bob,
                 "get_agent_activity",
@@ -373,6 +381,7 @@ pub mod wasm_test {
                     agent_pubkey: bob_cell.agent_pubkey().clone(),
                     chain_query_filter: ChainQueryFilter::new(),
                     activity_request: ActivityRequest::Full,
+                    get_options: GetOptions::default(),
                 },
             )
             .await;
@@ -686,7 +695,7 @@ pub mod wasm_test {
         expect_chain_locked(thing_fail_create_alice);
 
         // The countersigned entry does NOT appear in alice's activity yet.
-        let alice_activity_pre: AgentActivity = conductors[1]
+        let alice_activity_pre: AgentActivityStatus = conductors[1]
             .call(
                 &alice,
                 "get_agent_activity",
@@ -694,6 +703,7 @@ pub mod wasm_test {
                     agent_pubkey: alice_cell.agent_pubkey().clone(),
                     chain_query_filter: ChainQueryFilter::new(),
                     activity_request: ActivityRequest::Full,
+                    get_options: GetOptions::from(GetStrategy::Local),
                 },
             )
             .await;
@@ -746,7 +756,7 @@ pub mod wasm_test {
 
         // Entry get must not error.
         if let Some((countersigned_entry_hash_bob, _)) =
-            countersigned_action_bob.action().entry_data()
+            countersigned_action_bob.hashed.content.entry_data()
         {
             let _countersigned_entry_bob: EntryHashed = conductors[1]
                 .call(&bob, "must_get_entry", countersigned_entry_hash_bob)
@@ -760,7 +770,7 @@ pub mod wasm_test {
             .call(&bob, "must_get_valid_record", countersigned_action_hash_bob)
             .await;
 
-        let alice_activity: AgentActivity = conductors[1]
+        let alice_activity: AgentActivityStatus = conductors[1]
             .call(
                 &alice,
                 "get_agent_activity",
@@ -768,6 +778,7 @@ pub mod wasm_test {
                     agent_pubkey: alice_cell.agent_pubkey().clone(),
                     chain_query_filter: ChainQueryFilter::new(),
                     activity_request: ActivityRequest::Full,
+                    get_options: GetOptions::from(GetStrategy::Local),
                 },
             )
             .await;
@@ -779,10 +790,10 @@ pub mod wasm_test {
         assert_eq!(alice_activity.valid_activity.len(), 7);
         assert_eq!(
             &alice_activity.valid_activity[5].1,
-            countersigned_action_alice.action_address(),
+            countersigned_action_alice.as_hash(),
         );
 
-        let bob_activity: AgentActivity = conductors[1]
+        let bob_activity: AgentActivityStatus = conductors[1]
             .call(
                 &bob,
                 "get_agent_activity",
@@ -790,13 +801,14 @@ pub mod wasm_test {
                     agent_pubkey: bob_cell.agent_pubkey().clone(),
                     chain_query_filter: ChainQueryFilter::new(),
                     activity_request: ActivityRequest::Full,
+                    get_options: GetOptions::from(GetStrategy::Local),
                 },
             )
             .await;
         assert_eq!(bob_activity.valid_activity.len(), 7);
         assert_eq!(
             &bob_activity.valid_activity[5].1,
-            countersigned_action_bob.action_address(),
+            countersigned_action_bob.as_hash(),
         );
     }
 
@@ -961,7 +973,7 @@ pub mod wasm_test {
         expect_chain_locked(thing_fail_create_alice);
 
         // The countersigned entry does NOT appear in alice's activity yet.
-        let alice_activity_pre: AgentActivity = conductor
+        let alice_activity_pre: AgentActivityStatus = conductor
             .call(
                 &alice,
                 "get_agent_activity",
@@ -969,6 +981,7 @@ pub mod wasm_test {
                     agent_pubkey: alice_pubkey.clone(),
                     chain_query_filter: ChainQueryFilter::new(),
                     activity_request: ActivityRequest::Full,
+                    get_options: GetOptions::default(),
                 },
             )
             .await;
@@ -1021,7 +1034,7 @@ pub mod wasm_test {
 
         // Entry get must not error.
         if let Some((countersigned_entry_hash_bob, _)) =
-            countersigned_action_bob.action().entry_data()
+            countersigned_action_bob.hashed.content.entry_data()
         {
             let _countersigned_entry_bob: EntryHashed = conductor
                 .call(&bob, "must_get_entry", countersigned_entry_hash_bob)
@@ -1035,7 +1048,7 @@ pub mod wasm_test {
             .call(&bob, "must_get_valid_record", countersigned_action_hash_bob)
             .await;
 
-        let alice_activity: AgentActivity = conductor
+        let alice_activity: AgentActivityStatus = conductor
             .call(
                 &alice,
                 "get_agent_activity",
@@ -1043,6 +1056,7 @@ pub mod wasm_test {
                     agent_pubkey: alice_pubkey.clone(),
                     chain_query_filter: ChainQueryFilter::new(),
                     activity_request: ActivityRequest::Full,
+                    get_options: GetOptions::default(),
                 },
             )
             .await;
@@ -1052,10 +1066,10 @@ pub mod wasm_test {
         assert_eq!(alice_activity.valid_activity.len(), 8);
         assert_eq!(
             &alice_activity.valid_activity[6].1,
-            countersigned_action_alice.action_address(),
+            countersigned_action_alice.as_hash(),
         );
 
-        let bob_activity: AgentActivity = conductor
+        let bob_activity: AgentActivityStatus = conductor
             .call(
                 &bob,
                 "get_agent_activity",
@@ -1063,13 +1077,14 @@ pub mod wasm_test {
                     agent_pubkey: bob_pubkey.clone(),
                     chain_query_filter: ChainQueryFilter::new(),
                     activity_request: ActivityRequest::Full,
+                    get_options: GetOptions::default(),
                 },
             )
             .await;
         assert_eq!(bob_activity.valid_activity.len(), 6);
         assert_eq!(
             &bob_activity.valid_activity[4].1,
-            countersigned_action_bob.action_address(),
+            countersigned_action_bob.as_hash(),
         );
     }
 
@@ -1109,7 +1124,7 @@ pub mod wasm_test {
 
         if force_init {
             // Run any arbitrary zome call for bob to force him to run init
-            let _: AgentActivity = conductor
+            let _: AgentActivityStatus = conductor
                 .call(
                     &bob,
                     "get_agent_activity",
@@ -1117,6 +1132,7 @@ pub mod wasm_test {
                         agent_pubkey: bob_pubkey.clone(),
                         chain_query_filter: ChainQueryFilter::new(),
                         activity_request: ActivityRequest::Full,
+                        get_options: GetOptions::from(GetStrategy::Local),
                     },
                 )
                 .await;
@@ -1175,7 +1191,7 @@ pub mod wasm_test {
             .await;
 
         // The countersigned entry does NOT appear in alice's activity yet.
-        let alice_activity_pre: AgentActivity = conductor
+        let alice_activity_pre: AgentActivityStatus = conductor
             .call(
                 &alice,
                 "get_agent_activity",
@@ -1183,11 +1199,12 @@ pub mod wasm_test {
                     agent_pubkey: alice_pubkey.clone(),
                     chain_query_filter: ChainQueryFilter::new(),
                     activity_request: ActivityRequest::Full,
+                    get_options: GetOptions::from(GetStrategy::Local),
                 },
             )
             .await;
         // Nor bob's.
-        let bob_activity_pre: AgentActivity = conductor
+        let bob_activity_pre: AgentActivityStatus = conductor
             .call(
                 &alice,
                 "get_agent_activity",
@@ -1195,6 +1212,7 @@ pub mod wasm_test {
                     agent_pubkey: bob_pubkey.clone(),
                     chain_query_filter: ChainQueryFilter::new(),
                     activity_request: ActivityRequest::Full,
+                    get_options: GetOptions::from(GetStrategy::Local),
                 },
             )
             .await;
@@ -1211,7 +1229,7 @@ pub mod wasm_test {
         await_consistency([&alice_cell, &bob_cell]).await.unwrap();
 
         // Now the action appears in alice's activty.
-        let alice_activity: AgentActivity = conductor
+        let alice_activity: AgentActivityStatus = conductor
             .call(
                 &alice,
                 "get_agent_activity",
@@ -1219,11 +1237,12 @@ pub mod wasm_test {
                     agent_pubkey: alice_pubkey.clone(),
                     chain_query_filter: ChainQueryFilter::new(),
                     activity_request: ActivityRequest::Full,
+                    get_options: GetOptions::from(GetStrategy::Local),
                 },
             )
             .await;
         // And bob's.
-        let bob_activity: AgentActivity = conductor
+        let bob_activity: AgentActivityStatus = conductor
             .call(
                 &alice,
                 "get_agent_activity",
@@ -1231,6 +1250,7 @@ pub mod wasm_test {
                     agent_pubkey: bob_pubkey.clone(),
                     chain_query_filter: ChainQueryFilter::new(),
                     activity_request: ActivityRequest::Full,
+                    get_options: GetOptions::from(GetStrategy::Local),
                 },
             )
             .await;
@@ -1282,7 +1302,7 @@ pub mod wasm_test {
                 .unwrap();
 
             // The countersigned entry does NOT appear in alice's activity yet.
-            let alice_activity_pre: AgentActivity = bob_conductor
+            let alice_activity_pre: AgentActivityStatus = bob_conductor
                 .call(
                     &bob,
                     "get_agent_activity",
@@ -1290,11 +1310,12 @@ pub mod wasm_test {
                         agent_pubkey: alice_pubkey.clone(),
                         chain_query_filter: ChainQueryFilter::new(),
                         activity_request: ActivityRequest::Full,
+                        get_options: GetOptions::default(),
                     },
                 )
                 .await;
             // Nor bob's.
-            let bob_activity_pre: AgentActivity = alice_conductor
+            let bob_activity_pre: AgentActivityStatus = alice_conductor
                 .call(
                     &alice,
                     "get_agent_activity",
@@ -1302,6 +1323,7 @@ pub mod wasm_test {
                         agent_pubkey: bob_pubkey.clone(),
                         chain_query_filter: ChainQueryFilter::new(),
                         activity_request: ActivityRequest::Full,
+                        get_options: GetOptions::default(),
                     },
                 )
                 .await;
@@ -1376,7 +1398,7 @@ pub mod wasm_test {
                 .unwrap();
 
             // Now the action appears in alice's activty.
-            let alice_activity: AgentActivity = bob_conductor
+            let alice_activity: AgentActivityStatus = bob_conductor
                 .call(
                     &bob,
                     "get_agent_activity",
@@ -1384,12 +1406,13 @@ pub mod wasm_test {
                         agent_pubkey: alice_pubkey.clone(),
                         chain_query_filter: ChainQueryFilter::new(),
                         activity_request: ActivityRequest::Full,
+                        get_options: GetOptions::default(),
                     },
                 )
                 .await;
 
             // And bob's.
-            let bob_activity: AgentActivity = alice_conductor
+            let bob_activity: AgentActivityStatus = alice_conductor
                 .call(
                     &alice,
                     "get_agent_activity",
@@ -1397,6 +1420,7 @@ pub mod wasm_test {
                         agent_pubkey: bob_pubkey.clone(),
                         chain_query_filter: ChainQueryFilter::new(),
                         activity_request: ActivityRequest::Full,
+                        get_options: GetOptions::default(),
                     },
                 )
                 .await;
@@ -1475,7 +1499,7 @@ pub mod wasm_test {
                 .await;
 
             // The countersigned entry does NOT appear in alice's activity yet.
-            let alice_activity_pre: AgentActivity = bob_conductor
+            let alice_activity_pre: AgentActivityStatus = bob_conductor
                 .call(
                     &bob,
                     "get_agent_activity",
@@ -1483,11 +1507,12 @@ pub mod wasm_test {
                         agent_pubkey: alice_pubkey.clone(),
                         chain_query_filter: ChainQueryFilter::new(),
                         activity_request: ActivityRequest::Full,
+                        get_options: GetOptions::default(),
                     },
                 )
                 .await;
             // Nor bob's.
-            let bob_activity_pre: AgentActivity = alice_conductor
+            let bob_activity_pre: AgentActivityStatus = alice_conductor
                 .call(
                     &alice,
                     "get_agent_activity",
@@ -1495,6 +1520,7 @@ pub mod wasm_test {
                         agent_pubkey: bob_pubkey.clone(),
                         chain_query_filter: ChainQueryFilter::new(),
                         activity_request: ActivityRequest::Full,
+                        get_options: GetOptions::default(),
                     },
                 )
                 .await;
@@ -1510,7 +1536,7 @@ pub mod wasm_test {
 
             // Now the action DOES NOT appear in alice's activty, due to the
             // partition blocking the enzyme push.
-            let alice_activity: AgentActivity = bob_conductor
+            let alice_activity: AgentActivityStatus = bob_conductor
                 .call(
                     &bob,
                     "get_agent_activity",
@@ -1518,11 +1544,12 @@ pub mod wasm_test {
                         agent_pubkey: alice_pubkey.clone(),
                         chain_query_filter: ChainQueryFilter::new(),
                         activity_request: ActivityRequest::Full,
+                        get_options: GetOptions::default(),
                     },
                 )
                 .await;
             // Same for bob's.
-            let bob_activity: AgentActivity = alice_conductor
+            let bob_activity: AgentActivityStatus = alice_conductor
                 .call(
                     &alice,
                     "get_agent_activity",
@@ -1530,6 +1557,7 @@ pub mod wasm_test {
                         agent_pubkey: bob_pubkey.clone(),
                         chain_query_filter: ChainQueryFilter::new(),
                         activity_request: ActivityRequest::Full,
+                        get_options: GetOptions::default(),
                     },
                 )
                 .await;

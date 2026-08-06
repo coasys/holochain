@@ -1,9 +1,8 @@
 use crate::conductor::api::error::ConductorApiError;
 use crate::conductor::error::ConductorError;
 use crate::core::ribosome::guest_callback::post_commit::PostCommitHostAccess;
-use crate::core::ribosome::HostFnAccess;
+use crate::core::ribosome::{HostFnAccess, Ribosome};
 use crate::core::ribosome::RibosomeError;
-use crate::core::ribosome::RibosomeT;
 use crate::core::ribosome::ZomeCallParamsSigned;
 use crate::core::ribosome::{CallContext, HostContext, ZomeCallHostAccess};
 use futures::future::join_all;
@@ -14,7 +13,7 @@ use std::sync::Arc;
 use wasmer::RuntimeError;
 
 pub fn call(
-    ribosome: Arc<impl RibosomeT>,
+    ribosome: Arc<Ribosome>,
     call_context: Arc<CallContext>,
     inputs: Vec<Call>,
 ) -> Result<Vec<ZomeCallResponse>, RuntimeError> {
@@ -95,7 +94,7 @@ pub fn call(
 }
 
 async fn execute_call(
-    ribosome: Arc<impl RibosomeT>,
+    ribosome: Arc<Ribosome>,
     call_context: Arc<CallContext>,
     input: Call,
     fork: bool,
@@ -124,7 +123,7 @@ async fn execute_call(
             let zome_call_params = ZomeCallParams {
                 provenance: provenance.clone(),
                 cell_id: CellId::new(
-                    ribosome.dna_def_hashed().as_hash().clone(),
+                    ribosome.dna_def().as_hash().clone(),
                     target_agent.clone(),
                 ),
                 zome_name,
@@ -265,11 +264,9 @@ pub mod wasm_test {
     use holochain_types::prelude::*;
     use holochain_wasm_test_utils::TestWasm;
     use matches::assert_matches;
-    use rusqlite::named_params;
 
     use crate::test_utils::new_zome_call_params;
     use crate::test_utils::RibosomeTestFixture;
-    use holochain_sqlite::prelude::DatabaseResult;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn call_test() {
@@ -345,22 +342,15 @@ pub mod wasm_test {
                 .decode()
                 .unwrap();
 
-        // Check alice's source chain contains the new value
-        let has_hash: bool = handle
-            .get_spaces()
-            .get_or_create_authored_db(alice.dna_hash(), alice.agent_pubkey().clone())
-            .unwrap()
-            .read_async(move |txn| -> DatabaseResult<bool> {
-                Ok(txn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM DhtOp WHERE action_hash = :hash)",
-                    named_params! {
-                        ":hash": action_hash
-                    },
-                    |row| row.get(0),
-                )?)
-            })
+        // Check alice's source chain contains the new value by looking the
+        // action up in the DhtStore.
+        let has_hash = alice
+            .dht_store()
+            .as_read()
+            .retrieve_action(&action_hash)
             .await
-            .unwrap();
+            .unwrap()
+            .is_some();
         assert!(has_hash);
     }
 
@@ -394,20 +384,15 @@ pub mod wasm_test {
             )
             .await;
 
-        // Check alice's source chain contains the new value
-        let has_hash: bool = alice
-            .authored_db()
-            .read_async(move |txn| -> DatabaseResult<bool> {
-                Ok(txn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM DhtOp WHERE action_hash = :hash)",
-                    named_params! {
-                        ":hash": action_hash
-                    },
-                    |row| row.get(0),
-                )?)
-            })
+        // Check alice's source chain contains the new value by looking the
+        // action up in the DhtStore.
+        let has_hash = alice
+            .dht_store()
+            .as_read()
+            .retrieve_action(&action_hash)
             .await
-            .unwrap();
+            .unwrap()
+            .is_some();
         assert!(has_hash);
     }
 

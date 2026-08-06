@@ -1,48 +1,40 @@
 use super::sys_validation_workflow;
 use super::validation_deps::SysValDeps;
-use super::validation_query::get_ops_to_app_validate;
 use super::SysValidationWorkspace;
 use crate::conductor::space::TestSpace;
 use crate::core::queue_consumer::TriggerReceiver;
 use crate::core::queue_consumer::TriggerSender;
 use crate::core::queue_consumer::WorkComplete;
-use crate::prelude::AgentValidationPkgFixturator;
-use crate::prelude::CreateFixturator;
 use crate::prelude::SignatureFixturator;
 use fixt::*;
-use hdk::prelude::Dna as HdkDna;
 use holo_hash::fixt::AgentPubKeyFixturator;
 use holo_hash::AgentPubKey;
 use holo_hash::DhtOpHash;
 use holo_hash::DnaHash;
 use holo_hash::HasHash;
 use holochain_keystore::MetaLairClient;
+use holochain_keystore::{SignedActionHashedExt, WarrantOpExt};
 use holochain_p2p::MockHolochainP2pDnaT;
-use holochain_sqlite::db::DbKindCache;
-use holochain_sqlite::db::DbKindDht;
-use holochain_sqlite::db::DbKindT;
-use holochain_sqlite::db::DbWrite;
 use holochain_state::mutations::StateMutationResult;
-use holochain_types::dht_op::ChainOp;
-use holochain_types::dht_op::DhtOp;
-use holochain_types::dht_op::DhtOpHashed;
-use holochain_types::dht_op::WireOps;
-use holochain_types::record::SignedActionHashedExt;
+use holochain_timestamp::Timestamp;
+use holochain_types::op::ChainOp;
+use holochain_types::op::DhtOp;
+use holochain_types::op::DhtOpHashed;
+use holochain_types::op::OpEntry;
 use holochain_types::record::WireRecordOps;
-use holochain_zome_types::action::ActionHashed;
-use holochain_zome_types::action::AppEntryDef;
-use holochain_zome_types::action::EntryType;
-use holochain_zome_types::dna_def::{DnaDef, DnaDefHashed};
-use holochain_zome_types::entry_def::EntryVisibility;
-use holochain_zome_types::judged::Judged;
-use holochain_zome_types::record::SignedActionHashed;
-use holochain_zome_types::timestamp::Timestamp;
-use holochain_zome_types::Action;
+use holochain_types::wire_ops::WireOps;
+use holochain_zome_types::fixt::{
+    ActionFixturator, AgentValidationPkgAction, CreateAction, DnaAction,
+};
+use holochain_zome_types::prelude::{
+    Action, ActionData, AppEntryDef, DnaDef, DnaDefHashed, Entry, EntryType, EntryVisibility,
+    Judged, SignedAction, SignedActionHashed,
+};
 use std::collections::HashSet;
 use std::sync::Arc;
 use {
     hdk::prelude::AppEntryBytesFixturator, holo_hash::HashableContentExtSync,
-    holochain_serialized_bytes::SerializedBytes, holochain_zome_types::Entry,
+    holochain_serialized_bytes::SerializedBytes,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -57,17 +49,15 @@ async fn validate_op_with_no_dependency() {
         .return_once(|| Ok(vec![kitsune2_api::DhtArc::Empty]));
     test_case.actual_network = Some(network);
 
-    let dna_action = HdkDna {
-        author: fixt!(AgentPubKey),
-        timestamp: Timestamp::now(),
-        hash: test_case.dna_hash(),
-    };
-    let op = ChainOp::RegisterAgentActivity(fixt!(Signature), Action::Dna(dna_action));
+    let mut dna_action = fixt!(Action, DnaAction);
+    dna_action.header.author = fixt!(AgentPubKey);
+    dna_action.header.timestamp = Timestamp::now();
+    if let ActionData::Dna(d) = &mut dna_action.data {
+        d.dna_hash = test_case.dna_hash();
+    }
+    let op = ChainOp::AgentActivity(SignedAction::new(dna_action, fixt!(Signature)));
 
-    let op_hash = test_case
-        .save_op_to_db(test_case.dht_db_handle(), op.into())
-        .await
-        .unwrap();
+    let op_hash = test_case.save_op_to_dht(op.into()).await.unwrap();
 
     test_case.run().await;
 
@@ -78,47 +68,47 @@ async fn validate_op_with_no_dependency() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn validate_op_with_dependency_held_in_cache() {
+async fn validate_op_with_dependency_held_in_dht_store() {
     holochain_trace::test_run();
 
     let mut test_case = TestCase::new().await;
 
-    // Previous op, to go in the cache
-    let mut prev_create_action = fixt!(Create);
-    prev_create_action.author = test_case.agent.clone();
-    prev_create_action.action_seq = 10;
-    prev_create_action.entry_type = EntryType::App(AppEntryDef {
+    // Previous op — a *held dependency*, not an op under validation. "Held
+    // locally" means cached in the DhtStore (`save_chain_op_as_cached` →
+    // `cache_chain_ops`), so `retrieve_action` finds it but it is NOT queued for
+    // sys validation. (Seeding it via `save_op_to_dht`/`record_incoming_ops`
+    // would put it in limbo, so sys validation would try to validate the
+    // dependency itself and fetch *its* prev_action from the network.)
+    let mut prev_create_action = fixt!(Action, CreateAction);
+    prev_create_action.header.author = test_case.agent.clone();
+    prev_create_action.header.action_seq = 10;
+    *prev_create_action.entry_type_mut().unwrap() = EntryType::App(AppEntryDef {
         entry_index: 0.into(),
         zome_index: 0.into(),
         visibility: EntryVisibility::Public,
     });
-    let previous_action = test_case
-        .sign_action(Action::Create(prev_create_action.clone()))
-        .await;
+    let previous_action = test_case.sign_action(prev_create_action.clone()).await;
     let previous_op =
-        ChainOp::RegisterAgentActivity(fixt!(Signature), Action::Create(prev_create_action)).into();
+        ChainOp::AgentActivity(SignedAction::new(prev_create_action, fixt!(Signature)));
     test_case
-        .save_op_to_db(test_case.cache_db_handle(), previous_op)
+        .save_chain_op_as_cached(previous_op)
         .await
         .unwrap();
 
     // Op to validate, to go in the dht database
-    let mut create_action = fixt!(Create);
-    create_action.author = previous_action.action().author().clone();
-    create_action.action_seq = previous_action.action().action_seq() + 1;
-    create_action.prev_action = previous_action.as_hash().clone();
-    create_action.timestamp = Timestamp::now();
-    create_action.entry_type = EntryType::App(AppEntryDef {
+    let mut create_action = fixt!(Action, CreateAction);
+    create_action.header.author = previous_action.action().author().clone();
+    create_action.header.action_seq = previous_action.action().action_seq() + 1;
+    create_action.header.prev_action = Some(previous_action.as_hash().clone());
+    create_action.header.timestamp = Timestamp::now();
+    *create_action.entry_type_mut().unwrap() = EntryType::App(AppEntryDef {
         entry_index: 0.into(),
         zome_index: 0.into(),
         visibility: EntryVisibility::Public,
     });
-    let op = ChainOp::RegisterAgentActivity(fixt!(Signature), Action::Create(create_action)).into();
+    let op = ChainOp::AgentActivity(SignedAction::new(create_action, fixt!(Signature))).into();
 
-    let op_hash = test_case
-        .save_op_to_db(test_case.dht_db_handle(), op)
-        .await
-        .unwrap();
+    let op_hash = test_case.save_op_to_dht(op).await.unwrap();
 
     let mut network = MockHolochainP2pDnaT::default();
     network
@@ -141,39 +131,37 @@ async fn validate_op_with_dependency_not_held() {
     let mut test_case = TestCase::new().await;
 
     // Previous op, to be fetched from the network
-    let mut prev_create_action = fixt!(Create);
-    prev_create_action.author = test_case.agent.clone();
-    prev_create_action.action_seq = 10;
-    prev_create_action.entry_type = EntryType::App(AppEntryDef {
+    let mut prev_create_action = fixt!(Action, CreateAction);
+    prev_create_action.header.author = test_case.agent.clone();
+    prev_create_action.header.action_seq = 10;
+    *prev_create_action.entry_type_mut().unwrap() = EntryType::App(AppEntryDef {
         entry_index: 0.into(),
         zome_index: 0.into(),
         visibility: EntryVisibility::Public,
     });
-    let previous_action = test_case
-        .sign_action(Action::Create(prev_create_action.clone()))
-        .await;
+    let previous_action = test_case.sign_action(prev_create_action).await;
 
     // Op to validate, to go in the dht database
-    let mut create_action = fixt!(Create);
-    create_action.author = previous_action.action().author().clone();
-    create_action.action_seq = previous_action.action().action_seq() + 1;
-    create_action.prev_action = previous_action.as_hash().clone();
-    create_action.timestamp = Timestamp::now();
-    create_action.entry_type = EntryType::App(AppEntryDef {
+    let mut create_action = fixt!(Action, CreateAction);
+    create_action.header.author = previous_action.action().author().clone();
+    create_action.header.action_seq = previous_action.action().action_seq() + 1;
+    create_action.header.prev_action = Some(previous_action.as_hash().clone());
+    create_action.header.timestamp = Timestamp::now();
+    *create_action.entry_type_mut().unwrap() = EntryType::App(AppEntryDef {
         entry_index: 0.into(),
         zome_index: 0.into(),
         visibility: EntryVisibility::Public,
     });
-    let op = ChainOp::RegisterAgentActivity(fixt!(Signature), Action::Create(create_action)).into();
+    let op = ChainOp::AgentActivity(SignedAction::new(create_action, fixt!(Signature))).into();
 
-    let op_hash = test_case
-        .save_op_to_db(test_case.dht_db_handle(), op)
-        .await
-        .unwrap();
+    let op_hash = test_case.save_op_to_dht(op).await.unwrap();
 
     let mut network = MockHolochainP2pDnaT::default();
     let mut ops: WireRecordOps = WireRecordOps::new();
-    ops.action = Some(Judged::valid(previous_action.clone().into()));
+    ops.action = Some(Judged::valid(SignedAction::new(
+        previous_action.action().clone(),
+        previous_action.signature.clone(),
+    )));
     let response = WireOps::Record(ops);
     network
         .expect_get()
@@ -208,32 +196,25 @@ async fn validate_op_with_dependency_not_found_on_the_dht() {
     let mut test_case = TestCase::new().await;
 
     // Previous op, to be referenced but not found on the dht
-    let mut validation_package_action = fixt!(AgentValidationPkg);
-    validation_package_action.author = test_case.agent.clone();
-    validation_package_action.action_seq = 10;
-    let previous_action = test_case
-        .sign_action(Action::AgentValidationPkg(
-            validation_package_action.clone(),
-        ))
-        .await;
+    let mut validation_package_action = fixt!(Action, AgentValidationPkgAction);
+    validation_package_action.header.author = test_case.agent.clone();
+    validation_package_action.header.action_seq = 10;
+    let previous_action = test_case.sign_action(validation_package_action).await;
 
     // Op to validate, to go in the dht database
-    let mut create_action = fixt!(Create);
-    create_action.author = previous_action.action().author().clone();
-    create_action.action_seq = previous_action.action().action_seq() + 1;
-    create_action.prev_action = previous_action.as_hash().clone();
-    create_action.timestamp = Timestamp::now();
-    create_action.entry_type = EntryType::App(AppEntryDef {
+    let mut create_action = fixt!(Action, CreateAction);
+    create_action.header.author = previous_action.action().author().clone();
+    create_action.header.action_seq = previous_action.action().action_seq() + 1;
+    create_action.header.prev_action = Some(previous_action.as_hash().clone());
+    create_action.header.timestamp = Timestamp::now();
+    *create_action.entry_type_mut().unwrap() = EntryType::App(AppEntryDef {
         entry_index: 0.into(),
         zome_index: 0.into(),
         visibility: EntryVisibility::Public,
     });
-    let op = ChainOp::RegisterAgentActivity(fixt!(Signature), Action::Create(create_action)).into();
+    let op = ChainOp::AgentActivity(SignedAction::new(create_action, fixt!(Signature))).into();
 
-    test_case
-        .save_op_to_db(test_case.dht_db_handle(), op)
-        .await
-        .unwrap();
+    test_case.save_op_to_dht(op).await.unwrap();
 
     let mut network = MockHolochainP2pDnaT::new();
     // Just return an empty response, nothing found for the request
@@ -266,41 +247,36 @@ async fn validate_op_with_wrong_sequence_number_rejected_and_not_forwarded_to_ap
     let mut test_case = TestCase::new().await;
     test_case.with_network_behaviour(network);
 
-    // Previous op, to be found in the cache
-    let mut validation_package_action = fixt!(AgentValidationPkg);
-    validation_package_action.author = test_case.agent.clone();
-    validation_package_action.action_seq = 10;
+    // Previous op — a *held dependency*, cached in the DhtStore (not queued for
+    // sys validation). See the note in `validate_op_with_dependency_held_in_dht_store`.
+    let mut validation_package_action = fixt!(Action, AgentValidationPkgAction);
+    validation_package_action.header.author = test_case.agent.clone();
+    validation_package_action.header.action_seq = 10;
     let previous_action = test_case
-        .sign_action(Action::AgentValidationPkg(
-            validation_package_action.clone(),
-        ))
+        .sign_action(validation_package_action.clone())
         .await;
-    let previous_op = ChainOp::RegisterAgentActivity(
+    let previous_op = ChainOp::AgentActivity(SignedAction::new(
+        validation_package_action,
         fixt!(Signature),
-        Action::AgentValidationPkg(validation_package_action),
-    )
-    .into();
+    ));
     test_case
-        .save_op_to_db(test_case.cache_db_handle(), previous_op)
+        .save_chain_op_as_cached(previous_op)
         .await
         .unwrap();
 
     // Op to validate, to go in the dht database
-    let mut create_action = fixt!(Create);
-    create_action.author = previous_action.action().author().clone();
-    create_action.action_seq = previous_action.action().action_seq() + 31;
-    create_action.prev_action = previous_action.as_hash().clone();
-    create_action.timestamp = Timestamp::now();
-    create_action.entry_type = EntryType::App(AppEntryDef {
+    let mut create_action = fixt!(Action, CreateAction);
+    create_action.header.author = previous_action.action().author().clone();
+    create_action.header.action_seq = previous_action.action().action_seq() + 31;
+    create_action.header.prev_action = Some(previous_action.as_hash().clone());
+    create_action.header.timestamp = Timestamp::now();
+    *create_action.entry_type_mut().unwrap() = EntryType::App(AppEntryDef {
         entry_index: 0.into(),
         zome_index: 0.into(),
         visibility: EntryVisibility::Public,
     });
-    let op = ChainOp::RegisterAgentActivity(fixt!(Signature), Action::Create(create_action)).into();
-    test_case
-        .save_op_to_db(test_case.dht_db_handle(), op)
-        .await
-        .unwrap();
+    let op = ChainOp::AgentActivity(SignedAction::new(create_action, fixt!(Signature))).into();
+    test_case.save_op_to_dht(op).await.unwrap();
 
     test_case.run().await;
 
@@ -328,25 +304,23 @@ async fn validate_valid_warrant_with_cached_dependency() {
     let warrant_agent = test_case.keystore.new_sign_keypair_random().await.unwrap();
 
     // Warranted op, to be found in the cache
-    let mut create = fixt!(Create);
+    let mut create = fixt!(Action, CreateAction);
     let entry = Entry::App(fixt!(AppEntryBytes));
-    create.author = bad_agent.clone();
-    create.entry_hash = entry.to_hash();
-    create.entry_type = EntryType::App(AppEntryDef {
+    create.header.author = bad_agent.clone();
+    *create.entry_hash_mut().unwrap() = entry.to_hash();
+    *create.entry_type_mut().unwrap() = EntryType::App(AppEntryDef {
         entry_index: 0.into(),
         zome_index: 0.into(),
         visibility: EntryVisibility::Public,
     });
-    create.action_seq = 0; // Not allowed to have a 0 seq number for a Create
-    let warranted_action = test_case.sign_action(Action::Create(create.clone())).await;
-    let warranted_op = ChainOp::StoreRecord(
-        fixt!(Signature),
-        Action::Create(create),
-        crate::prelude::RecordEntry::Present(entry),
-    )
-    .into();
+    create.header.action_seq = 0; // Not allowed to have a 0 seq number for a Create
+    let warranted_action = test_case.sign_action(create.clone()).await;
+    let warranted_op = ChainOp::CreateRecord(
+        SignedAction::new(create, fixt!(Signature)),
+        OpEntry::Present(entry),
+    );
     test_case
-        .save_op_to_db(test_case.cache_db_handle(), warranted_op)
+        .save_chain_op_as_cached(warranted_op)
         .await
         .unwrap();
 
@@ -354,18 +328,15 @@ async fn validate_valid_warrant_with_cached_dependency() {
         .create_and_sign_warrant(
             &warranted_action,
             &warrant_agent,
-            holochain_zome_types::op::ChainOpType::StoreRecord,
+            holochain_zome_types::op::ChainOpType::CreateRecord,
         )
         .await
         .unwrap();
 
-    let warrant_op_hash = DhtOpHashed::from_content_sync(warrant_op.clone()).hash;
+    let warrant_op_hash = DhtOpHashed::from_content_sync(DhtOp::from((*warrant_op).clone())).hash;
 
     test_case
-        .save_op_to_db(
-            test_case.dht_db_handle(),
-            DhtOp::WarrantOp(warrant_op.into()),
-        )
+        .save_op_to_dht(DhtOp::from((*warrant_op).clone()))
         .await
         .unwrap();
 
@@ -383,6 +354,7 @@ async fn validate_valid_warrant_with_cached_dependency() {
 
     let status = test_case
         .get_warrant_validation_outcome(warrant_op_hash)
+        .await
         .unwrap();
 
     assert!(
@@ -411,23 +383,26 @@ async fn validate_valid_warrant_with_fetched_dependency() {
     let warrant_agent = test_case.keystore.new_sign_keypair_random().await.unwrap();
 
     // Warranted op, to be fetched from the network
-    let mut create = fixt!(Create);
+    let mut create = fixt!(Action, CreateAction);
     let entry = Entry::App(fixt!(AppEntryBytes));
-    create.author = bad_agent.clone();
-    create.entry_hash = entry.to_hash();
-    create.entry_type = EntryType::App(AppEntryDef {
+    create.header.author = bad_agent.clone();
+    *create.entry_hash_mut().unwrap() = entry.to_hash();
+    *create.entry_type_mut().unwrap() = EntryType::App(AppEntryDef {
         entry_index: 0.into(),
         zome_index: 0.into(),
         visibility: EntryVisibility::Public,
     });
-    create.action_seq = 0; // Not allowed to have a 0 seq number for a Create
-    let warranted_action = test_case.sign_action(Action::Create(create.clone())).await;
+    create.header.action_seq = 0; // Not allowed to have a 0 seq number for a Create
+    let warranted_action = test_case.sign_action(create).await;
 
     network.expect_get().return_once({
         let warranted_action = warranted_action.clone();
         move |_hash, _, _| {
             let mut ops: WireRecordOps = WireRecordOps::new();
-            ops.action = Some(Judged::valid(warranted_action.clone().into()));
+            ops.action = Some(Judged::valid(SignedAction::new(
+                warranted_action.action().clone(),
+                warranted_action.signature.clone(),
+            )));
             ops.entry = Some(entry);
             let response = WireOps::Record(ops);
             Ok(vec![response])
@@ -440,18 +415,15 @@ async fn validate_valid_warrant_with_fetched_dependency() {
         .create_and_sign_warrant(
             &warranted_action,
             &warrant_agent,
-            holochain_zome_types::op::ChainOpType::StoreRecord,
+            holochain_zome_types::op::ChainOpType::CreateRecord,
         )
         .await
         .unwrap();
 
-    let warrant_op_hash = DhtOpHashed::from_content_sync(warrant_op.clone()).hash;
+    let warrant_op_hash = DhtOpHashed::from_content_sync(DhtOp::from((*warrant_op).clone())).hash;
 
     test_case
-        .save_op_to_db(
-            test_case.dht_db_handle(),
-            DhtOp::WarrantOp(warrant_op.into()),
-        )
+        .save_op_to_dht(DhtOp::from((*warrant_op).clone()))
         .await
         .unwrap();
 
@@ -471,6 +443,7 @@ async fn validate_valid_warrant_with_fetched_dependency() {
 
     let status = test_case
         .get_warrant_validation_outcome(warrant_op_hash)
+        .await
         .unwrap();
 
     assert!(
@@ -500,45 +473,38 @@ async fn reject_invalid_warrant() {
     let bad_warrant_agent = test_case.keystore.new_sign_keypair_random().await.unwrap();
 
     // Valid op, to be found in the DHT database
-    let mut create = fixt!(Create);
+    let mut create = fixt!(Action, CreateAction);
     let entry = Entry::app(SerializedBytes::default()).unwrap();
-    create.author = good_agent.clone();
-    create.entry_hash = entry.to_hash();
-    create.entry_type = EntryType::App(AppEntryDef {
+    create.header.author = good_agent.clone();
+    *create.entry_hash_mut().unwrap() = entry.to_hash();
+    *create.entry_type_mut().unwrap() = EntryType::App(AppEntryDef {
         entry_index: 0.into(),
         zome_index: 0.into(),
         visibility: EntryVisibility::Public,
     });
-    create.action_seq = 30;
-    let valid_action = test_case.sign_action(Action::Create(create.clone())).await;
-    let valid_op = ChainOp::StoreRecord(
-        fixt!(Signature),
-        Action::Create(create),
-        crate::prelude::RecordEntry::Present(entry),
+    create.header.action_seq = 30;
+    let valid_action = test_case.sign_action(create.clone()).await;
+    let valid_op = ChainOp::CreateRecord(
+        SignedAction::new(create, fixt!(Signature)),
+        OpEntry::Present(entry),
     );
-    let valid_op_hash = DhtOpHashed::from_content_sync(valid_op.clone()).hash;
-    test_case
-        .save_op_to_db(test_case.dht_db_handle(), valid_op.into())
-        .await
-        .unwrap();
+    let valid_op_hash = DhtOpHashed::from_content_sync(DhtOp::from(valid_op.clone())).hash;
+    test_case.save_op_to_dht(valid_op.into()).await.unwrap();
 
     // Invalid warrant against a valid action
     let warrant_op = test_case
         .create_and_sign_warrant(
             &valid_action,
             &bad_warrant_agent,
-            holochain_zome_types::op::ChainOpType::StoreRecord,
+            holochain_zome_types::op::ChainOpType::CreateRecord,
         )
         .await
         .unwrap();
 
-    let warrant_op_hash = DhtOpHashed::from_content_sync(warrant_op.clone()).hash;
+    let warrant_op_hash = DhtOpHashed::from_content_sync(DhtOp::from((*warrant_op).clone())).hash;
 
     test_case
-        .save_op_to_db(
-            test_case.dht_db_handle(),
-            DhtOp::WarrantOp(warrant_op.into()),
-        )
+        .save_op_to_dht(DhtOp::from((*warrant_op).clone()))
         .await
         .unwrap();
 
@@ -546,41 +512,40 @@ async fn reject_invalid_warrant() {
     let work_complete = test_case.run().await;
     assert!(matches!(work_complete, WorkComplete::Incomplete(_)));
 
-    // Check that the dependency got sys validated
-    let (stage, state) = holochain_state::validation_db::get_dht_op_validation_state(
-        &test_case.dht_db_handle().into(),
-        valid_action.as_hash().clone(),
-        holochain_zome_types::op::ChainOpType::StoreRecord,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(matches!(
-        stage,
-        Some(holochain_state::validation_db::ValidationStage::SysValidated)
-    ));
-    assert!(state.is_none());
-
-    // Mark the sys validated dependency as valid because this test can't run the app validation workflow.
-    test_case
-        .dht_db_handle()
-        .write_async(move |txn| -> StateMutationResult<()> {
-            holochain_state::mutations::set_validation_status(
-                txn,
-                &valid_op_hash,
-                holochain_zome_types::prelude::ValidationStatus::Valid,
-            )?;
-            holochain_state::mutations::set_when_integrated(txn, &valid_op_hash, Timestamp::now())?;
-            Ok(())
-        })
+    // Check that the dependency got sys validated: it should no longer be
+    // pending sys-validation in the DHT store, and must not yet carry a
+    // terminal (app/integration) outcome.
+    let dht_store = &test_case.test_space.space.dht_store;
+    let pending = dht_store
+        .as_read()
+        .ops_pending_sys_validation(100)
         .await
         .unwrap();
+    assert!(
+        !pending.iter().any(|op| op.as_hash() == &valid_op_hash),
+        "dependency op should no longer be pending sys-validation"
+    );
+    assert!(dht_store
+        .as_read()
+        .op_validation_status(
+            valid_action.as_hash(),
+            holochain_zome_types::op::ChainOpType::CreateRecord,
+        )
+        .await
+        .unwrap()
+        .is_none());
+
+    // Mark the sys-validated dependency as valid in the DHT store (this test
+    // can't run the app-validation + integration workflows), so the warrant-
+    // dependency readiness check sees a terminal outcome.
+    test_case.mark_dep_valid_in_store(&valid_op_hash).await;
 
     // Validate the warrant itself
     test_case.run().await;
 
     let status = test_case
         .get_warrant_validation_outcome(warrant_op_hash)
+        .await
         .unwrap();
 
     assert!(
@@ -610,58 +575,39 @@ async fn validate_warrant_with_validated_dependency() {
     let bad_warrant_agent = test_case.keystore.new_sign_keypair_random().await.unwrap();
 
     // Valid op, to be found in the DHT database
-    let mut create = fixt!(Create);
+    let mut create = fixt!(Action, CreateAction);
     let entry = Entry::App(fixt!(AppEntryBytes));
-    create.author = good_agent.clone();
-    create.entry_hash = entry.to_hash();
-    create.entry_type = EntryType::App(AppEntryDef {
+    create.header.author = good_agent.clone();
+    *create.entry_hash_mut().unwrap() = entry.to_hash();
+    *create.entry_type_mut().unwrap() = EntryType::App(AppEntryDef {
         entry_index: 0.into(),
         zome_index: 0.into(),
         visibility: EntryVisibility::Public,
     });
-    create.action_seq = 30;
-    let valid_action = test_case.sign_action(Action::Create(create.clone())).await;
-    let valid_op = ChainOp::StoreRecord(
-        fixt!(Signature),
-        Action::Create(create),
-        crate::prelude::RecordEntry::Present(entry),
+    create.header.action_seq = 30;
+    let valid_action = test_case.sign_action(create.clone()).await;
+    let valid_op = ChainOp::CreateRecord(
+        SignedAction::new(create, fixt!(Signature)),
+        OpEntry::Present(entry),
     );
-    let valid_op_hash = DhtOpHashed::from_content_sync(valid_op.clone()).hash;
-    test_case
-        .save_op_to_db(test_case.dht_db_handle(), valid_op.into())
-        .await
-        .unwrap();
-    test_case
-        .test_space
-        .space
-        .dht_db
-        .test_write(move |txn| -> StateMutationResult<()> {
-            holochain_state::mutations::set_validation_status(
-                txn,
-                &valid_op_hash,
-                holochain_zome_types::prelude::ValidationStatus::Valid,
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    let valid_op_hash = DhtOpHashed::from_content_sync(DhtOp::from(valid_op.clone())).hash;
+    test_case.save_op_to_dht(valid_op.into()).await.unwrap();
+    test_case.mark_dep_valid_in_store(&valid_op_hash).await;
 
     // Invalid warrant against a valid action
     let warrant_op = test_case
         .create_and_sign_warrant(
             &valid_action,
             &bad_warrant_agent,
-            holochain_zome_types::op::ChainOpType::StoreRecord,
+            holochain_zome_types::op::ChainOpType::CreateRecord,
         )
         .await
         .unwrap();
 
-    let warrant_op_hash = DhtOpHashed::from_content_sync(warrant_op.clone()).hash;
+    let warrant_op_hash = DhtOpHashed::from_content_sync(DhtOp::from((*warrant_op).clone())).hash;
 
     test_case
-        .save_op_to_db(
-            test_case.dht_db_handle(),
-            DhtOp::WarrantOp(warrant_op.into()),
-        )
+        .save_op_to_dht(DhtOp::from((*warrant_op).clone()))
         .await
         .unwrap();
 
@@ -672,6 +618,7 @@ async fn validate_warrant_with_validated_dependency() {
     // Get the warrant validation outcome
     let status = test_case
         .get_warrant_validation_outcome(warrant_op_hash)
+        .await
         .unwrap();
 
     assert!(
@@ -701,42 +648,35 @@ async fn avoid_duplicate_warrant() {
     let other_warrant_agent = test_case.keystore.new_sign_keypair_random().await.unwrap();
 
     // Invalid op
-    let mut create = fixt!(Create);
+    let mut create = fixt!(Action, CreateAction);
     let entry = Entry::App(fixt!(AppEntryBytes));
-    create.author = bad_agent.clone();
-    create.entry_hash = entry.to_hash();
-    create.entry_type = EntryType::App(AppEntryDef {
+    create.header.author = bad_agent.clone();
+    *create.entry_hash_mut().unwrap() = entry.to_hash();
+    *create.entry_type_mut().unwrap() = EntryType::App(AppEntryDef {
         entry_index: 0.into(),
         zome_index: 0.into(),
         visibility: EntryVisibility::Public,
     });
-    create.action_seq = 0; // Not allowed for a create op
-    let valid_action = test_case.sign_action(Action::Create(create.clone())).await;
-    let invalid_op = ChainOp::StoreRecord(
-        fixt!(Signature),
-        Action::Create(create),
-        crate::prelude::RecordEntry::Present(entry),
+    create.header.action_seq = 0; // Not allowed for a create op
+    let valid_action = test_case.sign_action(create.clone()).await;
+    let invalid_op = ChainOp::CreateRecord(
+        SignedAction::new(create, fixt!(Signature)),
+        OpEntry::Present(entry),
     );
-    test_case
-        .save_op_to_db(test_case.dht_db_handle(), invalid_op.into())
-        .await
-        .unwrap();
+    test_case.save_op_to_dht(invalid_op.into()).await.unwrap();
 
     // Valid warrant against the invalid action
     let warrant_op = test_case
         .create_and_sign_warrant(
             &valid_action,
             &warrant_agent,
-            holochain_zome_types::op::ChainOpType::StoreRecord,
+            holochain_zome_types::op::ChainOpType::CreateRecord,
         )
         .await
         .unwrap();
-    let warrant_op_hash = DhtOpHashed::from_content_sync(warrant_op.clone()).hash;
+    let warrant_op_hash = DhtOpHashed::from_content_sync(DhtOp::from((*warrant_op).clone())).hash;
     test_case
-        .save_op_to_db(
-            test_case.dht_db_handle(),
-            DhtOp::WarrantOp(warrant_op.into()),
-        )
+        .save_op_to_dht(DhtOp::from((*warrant_op).clone()))
         .await
         .unwrap();
 
@@ -750,6 +690,7 @@ async fn avoid_duplicate_warrant() {
     // Get the warrant validation outcome
     let status = test_case
         .get_warrant_validation_outcome(warrant_op_hash)
+        .await
         .unwrap();
 
     assert!(
@@ -761,25 +702,12 @@ async fn avoid_duplicate_warrant() {
     );
 
     // Check that no new warrant was issued
-    let authored_warrants = test_case
-        .get_authored_warrants(
-            &test_case
-                .test_space
-                .space
-                .get_or_create_authored_db(other_warrant_agent.clone())
-                .unwrap(),
-            other_warrant_agent.clone(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        0,
-        authored_warrants.len(),
-        "No new warrant should have been issued"
-    );
-
     let dht_warrants = test_case
-        .get_authored_warrants(&test_case.dht_db_handle(), other_warrant_agent.clone())
+        .test_space
+        .space
+        .dht_store
+        .as_read()
+        .warrants_by_author(other_warrant_agent.clone())
         .await
         .unwrap();
     assert_eq!(
@@ -790,7 +718,11 @@ async fn avoid_duplicate_warrant() {
 
     // Check that the original warrant is still present
     let dht_warrants = test_case
-        .get_authored_warrants(&test_case.dht_db_handle(), warrant_agent.clone())
+        .test_space
+        .space
+        .dht_store
+        .as_read()
+        .warrants_by_author(warrant_agent.clone())
         .await
         .unwrap();
     assert_eq!(
@@ -841,16 +773,8 @@ impl TestCase {
         self.dna_hash.hash.clone()
     }
 
-    fn dht_db_handle(&self) -> DbWrite<DbKindDht> {
-        self.test_space.space.dht_db.clone()
-    }
-
-    fn cache_db_handle(&self) -> DbWrite<DbKindCache> {
-        self.test_space.space.cache_db.clone()
-    }
-
     async fn sign_action(&self, action: Action) -> SignedActionHashed {
-        let action_hashed = ActionHashed::from_content_sync(action);
+        let action_hashed = holo_hash::HoloHashed::from_content_sync(action);
         SignedActionHashed::sign(&self.keystore, action_hashed)
             .await
             .unwrap()
@@ -861,24 +785,78 @@ impl TestCase {
         self
     }
 
-    async fn save_op_to_db<T: DbKindT>(
-        &self,
-        db: DbWrite<T>,
-        op: DhtOp,
-    ) -> StateMutationResult<DhtOpHash> {
-        let op = DhtOpHashed::from_content_sync(op);
+    /// Write a chain op to the DHT store as a cached (not locally-validated)
+    /// row, so it is visible to `move_warranted_op_to_limbo`.
+    async fn save_chain_op_as_cached(&self, chain_op: ChainOp) -> StateMutationResult<DhtOpHash> {
+        let op_hash = DhtOpHashed::from_content_sync(DhtOp::ChainOp(Box::new(chain_op.clone())))
+            .as_hash()
+            .clone();
 
-        let test_op_hash = op.as_hash().clone();
-        db.write_async({
-            move |txn| -> StateMutationResult<()> {
-                holochain_state::mutations::insert_op_untyped(txn, &op, 0)?;
-                Ok(())
+        // Build the RenderedOps first so we can pass it to cache_chain_ops.
+        let action = chain_op.signed_action().data().clone();
+        let signature = chain_op.signed_action().signature().clone();
+        let op_type = chain_op.op_type();
+        let entry = match chain_op.op_entry() {
+            Some(OpEntry::Present(e)) => {
+                Some(holochain_zome_types::prelude::EntryHashed::from_content_sync(e.clone()))
             }
-        })
-        .await
-        .unwrap();
+            _ => None,
+        };
 
-        Ok(test_op_hash)
+        let rendered_op =
+            holochain_types::wire_ops::RenderedOp::new(action, signature, None, op_type)
+                .expect("render op for test fixture");
+        let rendered_ops = holochain_types::wire_ops::RenderedOps {
+            entry,
+            ops: vec![rendered_op],
+            warrant: None,
+        };
+
+        self.test_space
+            .space
+            .dht_store
+            .cache_chain_ops(&rendered_ops)
+            .await?;
+
+        Ok(op_hash)
+    }
+
+    /// Write an op to the DHT store so that `ops_pending_sys_validation`
+    /// returns it.
+    async fn save_op_to_dht(&self, op: DhtOp) -> StateMutationResult<DhtOpHash> {
+        let op_hashed = DhtOpHashed::from_content_sync(op);
+        let hash = op_hashed.as_hash().clone();
+
+        // Write to the DHT store so that `ops_pending_sys_validation` returns it.
+        self.test_space
+            .space
+            .dht_store
+            .record_incoming_ops(vec![(op_hashed, false)])
+            .await
+            .unwrap();
+
+        Ok(hash)
+    }
+
+    /// Record a terminal Valid outcome for `op_hash` directly in the DHT store
+    /// limbo (sys + app accepted). These unit tests run only the sys-validation
+    /// workflow, so they can't drive a dependency all the way through
+    /// app-validation + integration; this seeds the decided outcome the
+    /// warrant-dependency readiness check (`op_validation_status`) reads.
+    async fn mark_dep_valid_in_store(&self, op_hash: &DhtOpHash) {
+        use holochain_state::dht_store::{AppOutcome, SysOutcome};
+        self.test_space
+            .space
+            .dht_store
+            .record_chain_op_sys_validation_outcomes(vec![(op_hash.clone(), SysOutcome::Accepted)])
+            .await
+            .unwrap();
+        self.test_space
+            .space
+            .dht_store
+            .record_app_validation_outcomes(vec![(op_hash.clone(), AppOutcome::Accepted)])
+            .await
+            .unwrap();
     }
 
     async fn create_and_sign_warrant(
@@ -898,6 +876,7 @@ impl TestCase {
                             warranted_action.signature.clone(),
                         ),
                         chain_op_type,
+                        reason: "test warrant".into(),
                     },
                 ),
                 issuing_agent.clone(),
@@ -914,12 +893,7 @@ impl TestCase {
 
     async fn run_as_agent(&mut self, agent: &AgentPubKey) -> WorkComplete {
         let workspace = SysValidationWorkspace::new(
-            self.test_space
-                .space
-                .get_or_create_authored_db(agent.clone())
-                .unwrap(),
-            self.test_space.space.dht_db.clone(),
-            self.test_space.space.cache_db.clone(),
+            self.test_space.space.dht_store.clone(),
             self.dna_hash.hash.clone(),
             std::time::Duration::from_secs(10),
         );
@@ -958,7 +932,11 @@ impl TestCase {
 
     /// This provides a quick and reliable way to check that ops have been sys validated
     async fn get_ops_pending_app_validation(&self) -> HashSet<DhtOpHash> {
-        get_ops_to_app_validate(&self.dht_db_handle().into())
+        self.test_space
+            .space
+            .dht_store
+            .as_read()
+            .ops_pending_app_validation(10_000)
             .await
             .unwrap()
             .into_iter()
@@ -986,83 +964,17 @@ impl TestCase {
         .is_some());
     }
 
-    fn get_warrant_validation_outcome(
+    async fn get_warrant_validation_outcome(
         &self,
         warrant_op_hash: DhtOpHash,
     ) -> holochain_state::prelude::StateQueryResult<
         Option<holochain_zome_types::prelude::ValidationStatus>,
     > {
-        self.dht_db_handle().test_read(
-            move |txn| -> holochain_state::prelude::StateQueryResult<
-                Option<holochain_zome_types::prelude::ValidationStatus>,
-            > {
-                let status = txn.query_row(
-                    r#"
-            SELECT
-              DhtOp.validation_status
-            FROM
-              DhtOp
-              JOIN Warrant ON DhtOp.action_hash = Warrant.hash
-            WHERE
-              DhtOp.hash = :hash
-            "#,
-                    rusqlite::named_params! {
-                        ":hash": &warrant_op_hash,
-                    },
-                    |row| row.get::<_, Option<holochain_zome_types::prelude::ValidationStatus>>(0),
-                )?;
-
-                Ok(status)
-            },
-        )
-    }
-
-    async fn get_authored_warrants<T: DbKindT>(
-        &self,
-        db: &holochain_sqlite::prelude::DbRead<T>,
-        author: AgentPubKey,
-    ) -> holochain_state::prelude::StateQueryResult<Vec<holochain_types::warrant::WarrantOp>> {
-        db.read_async(
-            move |txn| -> holochain_state::prelude::StateQueryResult<
-                Vec<holochain_types::warrant::WarrantOp>,
-            > {
-                let mut stmt = txn.prepare(
-                    r#"
-            SELECT
-                Warrant.blob as action_blob,
-                Warrant.author as author,
-                NULL as entry_blob,
-                DhtOp.type as dht_type,
-                DhtOp.hash as dht_hash,
-                DhtOp.num_validation_attempts,
-                DhtOp.op_order
-            FROM DhtOp
-                JOIN Warrant ON DhtOp.action_hash = Warrant.hash
-            WHERE
-                Warrant.author = :author
-            "#,
-                )?;
-
-                let mut rows = stmt.query(rusqlite::named_params! {
-                    ":author": author,
-                })?;
-
-                let mut ops = Vec::new();
-                while let Ok(Some(row)) = rows.next() {
-                    let op = holochain_state::query::map_sql_dht_op(true, "dht_type", row)?;
-                    let hash = row.get("dht_hash")?;
-                    ops.push(DhtOpHashed::with_pre_hashed(op, hash))
-                }
-
-                Ok(ops
-                    .into_iter()
-                    .filter_map(|o| match o.content {
-                        DhtOp::WarrantOp(warrant_op) => Some(*warrant_op),
-                        _ => None,
-                    })
-                    .collect())
-            },
-        )
-        .await
+        self.test_space
+            .space
+            .dht_store
+            .as_read()
+            .warrant_validation_status(&warrant_op_hash)
+            .await
     }
 }

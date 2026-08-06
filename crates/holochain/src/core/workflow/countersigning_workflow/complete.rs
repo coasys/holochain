@@ -1,31 +1,21 @@
 use crate::conductor::space::Space;
 use crate::core::queue_consumer::TriggerSender;
-use crate::core::ribosome::weigh_placeholder;
 use crate::core::workflow::{WorkflowError, WorkflowResult};
-use holo_hash::{ActionHash, AgentPubKey, DhtOpHash, EntryHash};
-use holochain_keystore::{AgentPubKeyExt, MetaLairClient};
+use holo_hash::{ActionHash, AgentPubKey, EntryHash};
+use holochain_keystore::AgentPubKeyExt;
 use holochain_p2p::DynHolochainP2pDna;
-use holochain_sqlite::db::ReadAccess;
-use holochain_sqlite::error::DatabaseResult;
-use holochain_state::integrate::authored_ops_to_dht_db_without_check;
-use holochain_state::mutations;
 use holochain_state::prelude::*;
 use holochain_timestamp::Timestamp;
-use holochain_types::dht_op::ChainOp;
 use holochain_zome_types::prelude::SignedAction;
-use rusqlite::{named_params, Transaction};
 
 pub(crate) async fn inner_countersigning_session_complete(
     space: Space,
     network: DynHolochainP2pDna,
-    keystore: MetaLairClient,
     author: AgentPubKey,
     signed_actions: Vec<SignedAction>,
     integration_trigger: TriggerSender,
     publish_trigger: TriggerSender,
 ) -> WorkflowResult<Option<EntryHash>> {
-    let authored_db = space.get_or_create_authored_db(author.clone())?;
-
     // Using iterators is fine in this function as there can only be a maximum of 8 actions.
     let (this_cells_action_hash, entry_hash) = match signed_actions
         .iter()
@@ -33,49 +23,50 @@ pub(crate) async fn inner_countersigning_session_complete(
         .and_then(|sa| {
             sa.entry_hash()
                 .cloned()
-                .map(|eh| (ActionHash::with_data_sync(sa), eh))
+                .map(|eh| (ActionHash::with_data_sync(sa.data()), eh))
         }) {
         Some(a) => a,
         None => return Ok(None),
     };
 
+    // Read the chain lock from the DhtStore. It isn't necessarily for the
+    // current session; we can't check that until we have the session data.
+    let chain_lock = space
+        .dht_store
+        .as_read()
+        .get_chain_lock(author.clone())
+        .await?;
+
+    // Read the current countersigning session from the DhtStore. A `Some`
+    // result guarantees the `CounterSign` entry is present in the store, so no
+    // separate entry-presence check is needed.
+    let maybe_current_session = space
+        .dht_store
+        .as_read()
+        .current_countersigning_session(&author)
+        .await?;
+
     // Do a quick check to see if this entry hash matches the current locked session, so we don't
     // check signatures unless there is an active session.
-    let reader_closure = {
-        let entry_hash = entry_hash.clone();
-        let author = author.clone();
-        move |txn: &Txn<DbKindAuthored>| {
-            // This chain lock isn't necessarily for the current session, we can't check that until later.
-            if let Some((session_record, cs_entry_hash, session_data)) =
-                current_countersigning_session(txn)?
-            {
-                let lock_subject = session_data.preflight_request.fingerprint()?;
-
-                let chain_lock = holochain_state::chain_lock::get_chain_lock(txn, &author)?;
-                if let Some(chain_lock) = chain_lock {
-                    // This is the case where we have already locked the chain for another session and are
-                    // receiving another signature bundle from a different session. We don't need this, so
-                    // it's safe to short circuit.
-                    if cs_entry_hash != entry_hash || chain_lock.subject() != lock_subject {
-                        return SourceChainResult::Ok(None);
-                    }
-
-                    let transaction: holochain_state::prelude::CascadeTxnWrapper = txn.into();
-
-                    // Ensure that the entry is present in the database.
-                    // We've looked up the session as a Record, but that permits the entry to be
-                    // missing. The cs_entry_hash is stored on the action rather than being a
-                    // guarantee that the action is present.
-                    if transaction.contains_entry(&entry_hash)? {
-                        return Ok(Some((session_record, session_data)));
-                    }
+    let maybe_matched_session = match maybe_current_session {
+        Some((_session_record, cs_entry_hash, session_data)) => {
+            let lock_subject = session_data.preflight_request.fingerprint()?;
+            match &chain_lock {
+                // This is the case where we have already locked the chain for another session and are
+                // receiving another signature bundle from a different session. We don't need this, so
+                // it's safe to short circuit.
+                Some(chain_lock)
+                    if cs_entry_hash == entry_hash && chain_lock.subject() == lock_subject =>
+                {
+                    Some(session_data)
                 }
+                _ => None,
             }
-            SourceChainResult::Ok(None)
         }
+        None => None,
     };
 
-    let (session_record, session_data) = match authored_db.read_async(reader_closure).await? {
+    let session_data = match maybe_matched_session {
         Some(cs) => cs,
         None => {
             // If there is no active session then we can short circuit.
@@ -88,15 +79,15 @@ pub(crate) async fn inner_countersigning_session_complete(
     let mut i_am_an_author = false;
     for sa in &signed_actions {
         if !sa
-            .action()
+            .data()
             .author()
-            .verify_signature(sa.signature(), sa.action())
+            .verify_signature(sa.signature(), sa.data())
             .await?
         {
             tracing::warn!("Invalid signature found: {:?}", sa);
             return Ok(None);
         }
-        if sa.action().author() == &author {
+        if sa.data().author() == &author {
             i_am_an_author = true;
         }
     }
@@ -114,13 +105,12 @@ pub(crate) async fn inner_countersigning_session_complete(
     // Hash actions.
     let incoming_actions: Vec<_> = signed_actions
         .iter()
-        .map(ActionHash::with_data_sync)
+        .map(|sa| ActionHash::with_data_sync(sa.data()))
         .collect();
 
     let mut integrity_check_passed = false;
 
-    let weight = weigh_placeholder();
-    let stored_actions = session_data.build_action_set(entry_hash, weight)?;
+    let stored_actions = build_action_set(&session_data, entry_hash)?;
     if stored_actions.len() == incoming_actions.len() {
         tracing::debug!("Have the right number of actions");
 
@@ -143,9 +133,6 @@ pub(crate) async fn inner_countersigning_session_complete(
 
     reveal_countersigning_session(
         space,
-        network.clone(),
-        keystore,
-        session_record,
         &author,
         this_cells_action_hash,
         integration_trigger,
@@ -155,11 +142,10 @@ pub(crate) async fn inner_countersigning_session_complete(
 
     // Publish other signers agent activity ops to their agent activity authorities.
     for sa in signed_actions {
-        let (action, signature) = sa.into();
-        if *action.author() == author {
+        if *sa.data().author() == author {
             continue;
         }
-        let op = ChainOp::RegisterAgentActivity(signature, action);
+        let op = ChainOp::AgentActivity(sa);
         let basis = op.dht_basis();
         if let Err(e) = network.publish_countersign(basis, op).await {
             tracing::error!(
@@ -180,12 +166,8 @@ pub(crate) async fn inner_countersigning_session_complete(
     Ok(Some(session_data.preflight_request.app_entry_hash))
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn reveal_countersigning_session(
     space: Space,
-    network: DynHolochainP2pDna,
-    keystore: MetaLairClient,
-    session_record: Record,
     author: &AgentPubKey,
     this_cells_action_hash: ActionHash,
     integration_trigger: TriggerSender,
@@ -204,105 +186,79 @@ async fn apply_success_state_changes(
     this_cells_action_hash: ActionHash,
     integration_trigger: TriggerSender,
 ) -> Result<(), WorkflowError> {
-    let authored_db = space.get_or_create_authored_db(author.clone())?;
-    let dht_db = space.dht_db.clone();
-
-    // Unlock the chain and remove the withhold publish flag from all ops in this session.
-    let this_cell_actions_op_basis_hashes = authored_db
-        .write_async({
-            let author = author.clone();
-            move |txn| -> SourceChainResult<Vec<DhtOpHash>> {
-                // All checks have passed so unlock the chain.
-                mutations::unlock_chain(txn, &author)?;
-                // Update ops to publish.
-                txn.execute(
-                    "UPDATE DhtOp SET withhold_publish = NULL WHERE action_hash = :action_hash",
-                    named_params! {
-                        ":action_hash": this_cells_action_hash,
-                    },
-                )
-                .map_err(holochain_state::prelude::StateMutationError::from)?;
-
-                // Load the op hashes for this session so that we can publish them.
-                Ok(get_countersigning_op_hashes(txn, this_cells_action_hash)?)
-            }
-        })
+    // Load the op hashes for this session so that we can publish them. The
+    // session's withhold-publish flag is cleared on the DhtStore below via
+    // `clear_op_withhold_publishes`.
+    let this_cell_actions_op_basis_hashes = space
+        .dht_store
+        .as_read()
+        .chain_op_hashes_for_action(this_cells_action_hash)
         .await?;
 
-    // If all signatures are valid (above) and i signed then i must have
-    // validated it previously so i now agree that i authored it.
-    // TODO: perhaps this should be `authored_ops_to_dht_db`, i.e. the arc check should
-    //       be performed, because we may not be an authority for these ops
-    authored_ops_to_dht_db_without_check(
-        this_cell_actions_op_basis_hashes,
-        authored_db.into(),
-        dht_db,
-    )
-    .await?;
+    // All checks have passed so unlock the chain. The withhold-publish flag is
+    // cleared on the DhtStore below via `clear_op_withhold_publishes`.
+    space
+        .dht_store
+        .release_chain_lock(author)
+        .await
+        .map_err(WorkflowError::from)?;
+
+    space
+        .dht_store
+        .clear_op_withhold_publishes(this_cell_actions_op_basis_hashes)
+        .await
+        .map_err(WorkflowError::from)?;
 
     integration_trigger.trigger(&"integrate countersigning_success");
 
     Ok(())
 }
 
-fn get_countersigning_op_hashes(
-    txn: &mut Transaction,
-    this_cells_action_hash: ActionHash,
-) -> DatabaseResult<Vec<DhtOpHash>> {
-    Ok(txn
-        .prepare("SELECT basis_hash, hash FROM DhtOp WHERE action_hash = :action_hash")?
-        .query_map(
-            named_params! {
-                ":action_hash": this_cells_action_hash
-            },
-            |row| {
-                let hash: DhtOpHash = row.get("hash")?;
-                Ok(hash)
-            },
-        )?
-        .collect::<Result<Vec<_>, _>>()?)
-}
-
 /// When the workflow has attempted to resolve a countersigning session but wasn't able to find a deterministic answer by querying peer state,
 /// the session becomes unresolved and can be forcefully completed and published anyway.
 pub(super) async fn force_publish_countersigning_session(
     space: Space,
-    network: DynHolochainP2pDna,
-    keystore: MetaLairClient,
     integration_trigger: TriggerSender,
     publish_trigger: TriggerSender,
     cell_id: CellId,
     preflight_request: PreflightRequest,
 ) -> WorkflowResult<bool> {
-    // Query database for current countersigning session.
-    let reader_closure = {
-        let author = cell_id.agent_pubkey().clone();
-        let preflight_request = preflight_request.clone();
-        move |txn: &Txn<DbKindAuthored>| {
-            // This chain lock isn't necessarily for the current session, we can't check that until later.
-            if let Some((session_record, _, session_data)) = current_countersigning_session(txn)? {
-                let lock_subject = session_data.preflight_request.fingerprint()?;
-                if lock_subject != preflight_request.fingerprint()? {
-                    return SourceChainResult::Ok(None);
-                }
+    // Read the chain lock from the DhtStore. It isn't necessarily for the
+    // current session; we can't check that until we have the session data.
+    let chain_lock = space
+        .dht_store
+        .as_read()
+        .get_chain_lock(cell_id.agent_pubkey().clone())
+        .await?;
 
-                let chain_lock = holochain_state::chain_lock::get_chain_lock(txn, &author)?;
-                if let Some(chain_lock) = chain_lock {
+    // Read the current countersigning session from the DhtStore.
+    let maybe_current_session = space
+        .dht_store
+        .as_read()
+        .current_countersigning_session(cell_id.agent_pubkey())
+        .await?;
+
+    let maybe_session_record = match maybe_current_session {
+        Some((session_record, _, session_data)) => {
+            let lock_subject = session_data.preflight_request.fingerprint()?;
+            if lock_subject != preflight_request.fingerprint()? {
+                None
+            } else {
+                match &chain_lock {
                     // This is the case where we have already locked the chain for another session and are
                     // receiving another signature bundle from a different session. We don't need this, so
                     // it's safe to short circuit.
-                    if chain_lock.subject() != lock_subject {
-                        return SourceChainResult::Ok(None);
+                    Some(chain_lock) if chain_lock.subject() == lock_subject => {
+                        Some(session_record)
                     }
-
-                    return Ok(Some(session_record));
+                    _ => None,
                 }
             }
-            SourceChainResult::Ok(None)
         }
+        None => None,
     };
-    let authored_db = space.get_or_create_authored_db(cell_id.agent_pubkey().clone())?;
-    let session_record = match authored_db.read_async(reader_closure).await? {
+
+    let session_record = match maybe_session_record {
         Some(cs) => cs,
         None => {
             // If there is no active session then we can short circuit.
@@ -315,9 +271,6 @@ pub(super) async fn force_publish_countersigning_session(
 
     reveal_countersigning_session(
         space,
-        network,
-        keystore,
-        session_record,
         cell_id.agent_pubkey(),
         this_cells_action_hash,
         integration_trigger,

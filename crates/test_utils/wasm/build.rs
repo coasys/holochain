@@ -83,7 +83,7 @@ fn build_test_wasms(
             cmd.stderr(Stdio::piped());
             cmd.env(
                 "RUSTFLAGS",
-                "-C opt-level=z --cfg getrandom_backend=\"custom\"",
+                "-C opt-level=z -C link-arg=--import-undefined --cfg getrandom_backend=\"custom\"",
             );
             cmd.arg("build")
                 .arg("--manifest-path")
@@ -137,10 +137,8 @@ fn build_test_wasms(
 
 /// Return the list of local path dependencies specified in the Cargo.toml
 fn parse_cargo_toml_local_dependency_paths() -> Vec<String> {
-    let cargo_toml: toml::Value = std::fs::read_to_string("Cargo.toml")
-        .unwrap()
-        .parse()
-        .unwrap();
+    let cargo_toml: toml::Value =
+        toml::from_str(std::fs::read_to_string("Cargo.toml").unwrap().as_str()).unwrap();
     let mut table = toml_table(cargo_toml);
 
     let deps: Vec<_> = match (

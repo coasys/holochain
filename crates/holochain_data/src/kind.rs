@@ -9,6 +9,19 @@ use holo_hash::{AgentPubKey, DnaHash};
 use holochain_zome_types::cell::CellId;
 use std::sync::Arc;
 
+/// The kind of database, used to select the appropriate migration set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DbKind {
+    /// Wasm bytecode and DNA definitions.
+    Wasm,
+    /// Conductor state, installed apps, and related metadata.
+    Conductor,
+    /// Peer metadata for a specific DNA.
+    PeerMetaStore,
+    /// DHT data for a specific DNA.
+    Dht,
+}
+
 /// Specifies the database used for authoring data by a specific cell.
 ///
 /// Each cell (DNA/Agent pair) has its own authored database.
@@ -21,6 +34,10 @@ pub struct Authored {
 impl DatabaseIdentifier for Authored {
     fn database_id(&self) -> &str {
         &self.id
+    }
+
+    fn db_kind(&self) -> DbKind {
+        todo!("Authored migrations not yet implemented")
     }
 }
 
@@ -55,12 +72,16 @@ impl DatabaseIdentifier for Dht {
     fn database_id(&self) -> &str {
         &self.id
     }
+
+    fn db_kind(&self) -> DbKind {
+        DbKind::Dht
+    }
 }
 
 impl Dht {
     /// Create a new DHT database identifier for a DNA.
     pub fn new(dna_hash: Arc<DnaHash>) -> Self {
-        let id = format!("dht-{dna_hash}");
+        let id = format!("dht-{dna_hash}.db");
         Self { dna_hash, id }
     }
 
@@ -83,7 +104,11 @@ pub struct Conductor;
 
 impl DatabaseIdentifier for Conductor {
     fn database_id(&self) -> &str {
-        "conductor"
+        "conductor.db"
+    }
+
+    fn db_kind(&self) -> DbKind {
+        DbKind::Conductor
     }
 }
 
@@ -95,7 +120,11 @@ pub struct Wasm;
 
 impl DatabaseIdentifier for Wasm {
     fn database_id(&self) -> &str {
-        "wasm"
+        "wasm.db"
+    }
+
+    fn db_kind(&self) -> DbKind {
+        DbKind::Wasm
     }
 }
 
@@ -112,12 +141,16 @@ impl DatabaseIdentifier for PeerMetaStore {
     fn database_id(&self) -> &str {
         &self.id
     }
+
+    fn db_kind(&self) -> DbKind {
+        DbKind::PeerMetaStore
+    }
 }
 
 impl PeerMetaStore {
     /// Create a new peer metadata database identifier for a DNA.
     pub fn new(dna_hash: Arc<DnaHash>) -> Self {
-        let id = format!("p2p-peer-meta-{dna_hash}");
+        let id = format!("p2p-peer-meta-{dna_hash}.db");
         Self { dna_hash, id }
     }
 

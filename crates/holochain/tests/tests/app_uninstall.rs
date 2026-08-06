@@ -1,9 +1,9 @@
 use holo_hash::{ActionHash, AgentPubKeyB64, DnaHashB64};
 use holochain::{
-    conductor::state::{AppInterfaceId, ConductorState},
     retry_until_timeout,
     sweettest::{SweetConductor, SweetDnaFile},
 };
+use holochain_conductor_api::state::{AppInterfaceId, ConductorState};
 use holochain_wasm_test_utils::TestWasm;
 use serde::{Deserialize, Serialize};
 
@@ -48,7 +48,6 @@ async fn space_removed_on_uninstall() {
             ActionHash::from_raw_36(vec![0; 36]).into(),
             cell.agent_pubkey().clone(),
             vec![],
-            None,
             None,
         )
         .await;

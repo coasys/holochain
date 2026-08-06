@@ -4,14 +4,12 @@ use crate::conductor::api::CellConductorApi;
 use crate::conductor::api::CellConductorApiT;
 use crate::conductor::api::CellConductorReadHandle;
 use crate::conductor::ConductorHandle;
-use crate::core::ribosome::host_fn;
-use crate::core::ribosome::real_ribosome::RealRibosome;
 use crate::core::ribosome::CallContext;
 use crate::core::ribosome::HostContext;
 use crate::core::ribosome::InvocationAuth;
-use crate::core::ribosome::RibosomeT;
 use crate::core::ribosome::ZomeCallHostAccess;
 use crate::core::ribosome::ZomeCallInvocation;
+use crate::core::ribosome::{host_fn, Ribosome};
 use crate::core::workflow::call_zome_function_authorized;
 use hdk::prelude::*;
 use holo_hash::ActionHash;
@@ -20,6 +18,7 @@ use holo_hash::AnyDhtHash;
 use holochain_keystore::MetaLairClient;
 use holochain_p2p::actor::GetLinksRequestOptions;
 use holochain_p2p::{HolochainP2pDna, HolochainP2pDnaT};
+use holochain_state::dht_store::DhtStore;
 use holochain_state::host_fn_workspace::SourceChainWorkspace;
 use holochain_types::prelude::*;
 use holochain_wasm_test_utils::TestWasmPair;
@@ -83,10 +82,8 @@ pub enum MaybeLinkable {
 /// can be called from Rust instead of Wasm
 #[derive(Clone)]
 pub struct HostFnCaller {
-    pub authored_db: DbWrite<DbKindAuthored>,
-    pub dht_db: DbWrite<DbKindDht>,
-    pub cache: DbWrite<DbKindCache>,
-    pub ribosome: RealRibosome,
+    pub dht_store: DhtStore,
+    pub ribosome: Ribosome,
     pub zome_path: ZomePath,
     pub network: HolochainP2pDna,
     pub keystore: MetaLairClient,
@@ -112,11 +109,7 @@ impl HostFnCaller {
         dna_file: &DnaFile,
         zome_index: usize,
     ) -> HostFnCaller {
-        let authored_db = handle
-            .get_or_create_authored_db(cell_id.dna_hash(), cell_id.agent_pubkey().clone())
-            .unwrap();
-        let dht_db = handle.get_dht_db(cell_id.dna_hash()).unwrap();
-        let cache = handle.get_cache_db(cell_id).await.unwrap();
+        let dht_store = handle.get_dht_store(cell_id.dna_hash()).unwrap();
         let keystore = handle.keystore().clone();
         let network = holochain_p2p::HolochainP2pDna::new(
             handle.holochain_p2p().clone(),
@@ -139,9 +132,7 @@ impl HostFnCaller {
         let call_zome_handle =
             CellConductorApi::new(handle.clone(), cell_id.clone()).into_call_zome_handle();
         HostFnCaller {
-            authored_db,
-            dht_db,
-            cache,
+            dht_store,
             ribosome,
             zome_path,
             network,
@@ -151,39 +142,25 @@ impl HostFnCaller {
         }
     }
 
-    pub fn authored_db(&self) -> DbWrite<DbKindAuthored> {
-        self.authored_db.clone()
-    }
-
-    pub fn dht_db(&self) -> DbWrite<DbKindDht> {
-        self.dht_db.clone()
-    }
-
     #[cfg_attr(feature = "instrument", tracing::instrument(skip(self), fields(cell_id = %self.zome_path.cell_id())))]
-    pub async fn unpack(&self) -> (Arc<RealRibosome>, Arc<CallContext>, SourceChainWorkspace) {
+    pub async fn unpack(&self) -> (Arc<Ribosome>, Arc<CallContext>, SourceChainWorkspace) {
         let HostFnCaller {
-            authored_db,
-            dht_db,
-            cache,
+            dht_store,
             network,
             keystore,
             ribosome,
             signal_tx,
             zome_path,
             call_zome_handle,
+            ..
         } = self.clone();
 
         let (cell_id, zome_name) = zome_path.into();
 
-        let workspace = SourceChainWorkspace::new(
-            authored_db,
-            dht_db,
-            cache,
-            keystore.clone(),
-            cell_id.agent_pubkey().clone(),
-        )
-        .await
-        .unwrap();
+        let workspace =
+            SourceChainWorkspace::new(dht_store, keystore.clone(), cell_id.agent_pubkey().clone())
+                .await
+                .unwrap();
         let host_access = ZomeCallHostAccess::new(
             workspace.clone().into(),
             keystore,
@@ -192,7 +169,7 @@ impl HostFnCaller {
             call_zome_handle,
         );
         let ribosome = Arc::new(ribosome);
-        let zome = ribosome.dna_def_hashed().get_zome(&zome_name).unwrap();
+        let zome = ribosome.dna_def().get_zome(&zome_name).unwrap();
         let call_context = Arc::new(CallContext::new(
             zome,
             FunctionName::new("not_sure_what_should_be_here"),
@@ -213,7 +190,7 @@ impl HostFnCaller {
         let TestWasmPair { integrity, .. } = zome.into();
         let zome_index = self
             .ribosome
-            .dna_def_hashed()
+            .dna_def()
             .integrity_zomes
             .iter()
             .position(|(z, _)| *z == integrity)
@@ -238,7 +215,7 @@ impl HostFnCaller {
         let TestWasmPair { integrity, .. } = zome.into();
         let zome_index = self
             .ribosome
-            .dna_def_hashed()
+            .dna_def()
             .integrity_zomes
             .iter()
             .position(|(z, _)| *z == integrity)
@@ -461,7 +438,7 @@ impl HostFnCaller {
         query: &ChainQueryFilter,
         request: ActivityRequest,
         options: GetOptions,
-    ) -> AgentActivity {
+    ) -> holochain_zome_types::query::AgentActivityStatus {
         let (ribosome, call_context, _) = self.unpack().await;
         let input = GetAgentActivityInput::new(agent.clone(), query.clone(), request, options);
         host_fn::get_agent_activity::get_agent_activity(ribosome, call_context, input).unwrap()

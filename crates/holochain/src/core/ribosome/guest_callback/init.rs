@@ -57,8 +57,8 @@ impl Invocation for InitInvocation {
     fn fn_components(&self) -> FnComponents {
         vec!["init".into()].into()
     }
-    fn host_input(self) -> Result<ExternIO, SerializedBytesError> {
-        ExternIO::encode(())
+    fn take_host_input(&self) -> Result<Option<ExternIO>, SerializedBytesError> {
+        ExternIO::encode(()).map(Some)
     }
     fn auth(&self) -> InvocationAuth {
         InvocationAuth::LocalCallback
@@ -213,7 +213,7 @@ mod test {
             .next()
             .unwrap();
 
-        let host_input = init_invocation.clone().host_input().unwrap();
+        let host_input = init_invocation.clone().take_host_input().unwrap().unwrap();
 
         assert_eq!(host_input, ExternIO::encode(()).unwrap(),);
     }
@@ -227,13 +227,10 @@ mod slow_tests {
     use crate::conductor::api::error::ConductorApiResult;
     use crate::conductor::CellError;
     use crate::core::ribosome::guest_callback::ValidateCallbackResult;
-    use crate::core::ribosome::RibosomeError;
-    use crate::core::ribosome::RibosomeT;
+    use crate::core::ribosome::{Ribosome, RibosomeError};
     use crate::core::workflow::WorkflowError;
     use crate::fixt::InitHostAccessFixturator;
     use crate::fixt::InitInvocationFixturator;
-    use crate::fixt::RealRibosomeFixturator;
-    use crate::fixt::Zomes;
     use crate::sweettest::SweetConductor;
     use crate::sweettest::SweetDnaFile;
     use crate::sweettest::SweetZome;
@@ -241,6 +238,7 @@ mod slow_tests {
     use ::fixt::prelude::*;
     use assert2::{assert, let_assert};
     use holo_hash::ActionHash;
+    use holochain_serialized_bytes::SerializedBytes;
     use holochain_types::app::DisableCloneCellPayload;
     use holochain_types::inline_zome::InlineZomeSet;
     use holochain_types::prelude::CreateCloneCellPayload;
@@ -252,11 +250,11 @@ mod slow_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_init_unimplemented() {
-        let ribosome = RealRibosomeFixturator::new(Zomes(vec![TestWasm::Crud]))
-            .next()
+        let ribosome = Ribosome::new_with_test_wasms(vec![TestWasm::Crud])
+            .await
             .unwrap();
         let mut init_invocation = InitInvocationFixturator::new(::fixt::Empty).next().unwrap();
-        init_invocation.dna_def = ribosome.dna_file.dna_def().clone();
+        init_invocation.dna_def = ribosome.dna_def().as_content().clone();
 
         let host_access = fixt!(InitHostAccess);
         let result = ribosome
@@ -268,11 +266,11 @@ mod slow_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_init_implemented_pass() {
-        let ribosome = RealRibosomeFixturator::new(Zomes(vec![TestWasm::InitPass]))
-            .next()
+        let ribosome = Ribosome::new_with_test_wasms(vec![TestWasm::InitPass])
+            .await
             .unwrap();
         let mut init_invocation = InitInvocationFixturator::new(::fixt::Empty).next().unwrap();
-        init_invocation.dna_def = ribosome.dna_file.dna_def().clone();
+        init_invocation.dna_def = ribosome.dna_def().as_content().clone();
 
         let host_access = fixt!(InitHostAccess);
         let result = ribosome
@@ -284,11 +282,11 @@ mod slow_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_init_implemented_fail() {
-        let ribosome = RealRibosomeFixturator::new(Zomes(vec![TestWasm::InitFail]))
-            .next()
+        let ribosome = Ribosome::new_with_test_wasms(vec![TestWasm::InitFail])
+            .await
             .unwrap();
         let mut init_invocation = InitInvocationFixturator::new(::fixt::Empty).next().unwrap();
-        init_invocation.dna_def = ribosome.dna_file.dna_def().clone();
+        init_invocation.dna_def = ribosome.dna_def().as_content().clone();
 
         let host_access = fixt!(InitHostAccess);
         let result = ribosome
@@ -303,12 +301,11 @@ mod slow_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_init_multi_implemented_fail() {
-        let ribosome =
-            RealRibosomeFixturator::new(Zomes(vec![TestWasm::InitPass, TestWasm::InitFail]))
-                .next()
-                .unwrap();
+        let ribosome = Ribosome::new_with_test_wasms(vec![TestWasm::InitPass, TestWasm::InitFail])
+            .await
+            .unwrap();
         let mut init_invocation = InitInvocationFixturator::new(::fixt::Empty).next().unwrap();
-        init_invocation.dna_def = ribosome.dna_file.dna_def().clone();
+        init_invocation.dna_def = ribosome.dna_def().as_content().clone();
 
         let host_access = fixt!(InitHostAccess);
         let result = ribosome
@@ -371,11 +368,11 @@ mod slow_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_init_implemented_invalid_params() {
-        let ribosome = RealRibosomeFixturator::new(Zomes(vec![TestWasm::InitInvalidParams]))
-            .next()
+        let ribosome = Ribosome::new_with_test_wasms(vec![TestWasm::InitInvalidParams])
+            .await
             .unwrap();
         let mut init_invocation = InitInvocationFixturator::new(::fixt::Empty).next().unwrap();
-        init_invocation.dna_def = ribosome.dna_file.dna_def().clone();
+        init_invocation.dna_def = ribosome.dna_def().as_content().clone();
 
         let host_access = fixt!(InitHostAccess);
         let err = ribosome

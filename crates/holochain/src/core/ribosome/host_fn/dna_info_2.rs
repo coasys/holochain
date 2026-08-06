@@ -1,16 +1,15 @@
-use crate::core::ribosome::CallContext;
+use crate::core::ribosome::{CallContext, Ribosome};
 use crate::core::ribosome::HostFnAccess;
 use crate::core::ribosome::RibosomeError;
-use crate::core::ribosome::RibosomeT;
 use holo_hash::HasHash;
 use holochain_types::prelude::*;
 use holochain_wasmer_host::prelude::*;
-use holochain_zome_types::info::DnaInfoV2;
+use holochain_zome_types::prelude::DnaInfoV2;
 use std::sync::Arc;
 use wasmer::RuntimeError;
 
 pub fn dna_info_2(
-    ribosome: Arc<impl RibosomeT>,
+    ribosome: Arc<Ribosome>,
     call_context: Arc<CallContext>,
     _input: (),
 ) -> Result<DnaInfoV2, RuntimeError> {
@@ -19,11 +18,11 @@ pub fn dna_info_2(
             bindings_deterministic: Permission::Allow,
             ..
         } => Ok(DnaInfoV2 {
-            name: ribosome.dna_def_hashed().name.clone(),
-            hash: ribosome.dna_def_hashed().as_hash().clone(),
-            modifiers: ribosome.dna_def_hashed().modifiers.clone(),
+            name: ribosome.dna_def().name.clone(),
+            hash: ribosome.dna_def().as_hash().clone(),
+            modifiers: ribosome.dna_def().modifiers.clone(),
             zome_names: ribosome
-                .dna_def_hashed()
+                .dna_def()
                 .integrity_zomes
                 .iter()
                 .map(|(zome_name, _zome_def)| zome_name.to_owned())
@@ -44,6 +43,7 @@ pub fn dna_info_2(
 #[cfg(test)]
 #[cfg(feature = "slow_tests")]
 pub mod test {
+    use holochain_serialized_bytes::SerializedBytes;
     use crate::sweettest::SweetConductor;
     use crate::sweettest::SweetDnaFile;
     use crate::sweettest::SweetZome;
@@ -94,7 +94,7 @@ pub mod test {
 
         let yaml = "foo: bar";
         let (conductor, alice) = test_conductor(
-            YamlProperties::new(serde_yaml::from_str(yaml).unwrap())
+            YamlProperties::new(yaml_serde::from_str(yaml).unwrap())
                 .try_into()
                 .unwrap(),
         )
@@ -113,7 +113,7 @@ pub mod test {
 
         let yaml = "foo: 1\nbar: bing";
         let (conductor, alice) = test_conductor(
-            YamlProperties::new(serde_yaml::from_str(yaml).unwrap())
+            YamlProperties::new(yaml_serde::from_str(yaml).unwrap())
                 .try_into()
                 .unwrap(),
         )
@@ -132,7 +132,7 @@ pub mod test {
 
         let yaml = "baz: \n  foo: \n   bar: 1";
         let (conductor, alice) = test_conductor(
-            YamlProperties::new(serde_yaml::from_str(yaml).unwrap())
+            YamlProperties::new(yaml_serde::from_str(yaml).unwrap())
                 .try_into()
                 .unwrap(),
         )

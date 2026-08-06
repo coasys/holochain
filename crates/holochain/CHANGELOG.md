@@ -1,5 +1,5 @@
 ---
-default_semver_increment_mode: !pre_minor dev
+default_semver_increment_mode: !pre_patch rc
 ---
 # Changelog
 
@@ -7,8 +7,147 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## Unreleased
 
-- Per-space bootstrap server overrides from conductor config are now merged into cell config overrides, with app manifest overrides taking precedence.
-- Added event-driven network readiness signaling (`NetworkReadinessEvent`, `ConductorNetworkState`, `await_cell_network_ready`, `subscribe_network_readiness`) so downstream code can wait for cells to be fully ready for network operations without retry loops or arbitrary timeouts. Readiness is also exposed over the admin WebSocket via `GetNetworkState` and `AwaitCellNetworkReady`. [\#5647](https://github.com/holochain/holochain/pull/5647)
+## 0.7.0
+
+## 0.7.0-rc.5
+
+- Add `DumpOpTimings` to the admin and app APIs, plus a matching `hc client dump-op-timings` command. It reports, for each DHT op the conductor holds for a DNA, when the op was received, when it was integrated or when its validation was abandoned, whether it was accepted or rejected, and whether this node validated it locally. The request takes a DNA hash: the DHT database is shared by every cell running the same DNA, so the dump covers the whole DHT arc this conductor is currently holding for that DNA rather than the ops of any one agent. On the app API the DNA must be one the calling app runs. Results are paginated with an exclusive cursor over received time and op hash, covering both in-flight and integrated ops. [\#5772](https://github.com/holochain/holochain/issues/5772)
+
+## 0.7.0-rc.4
+
+- Add exclusive cursor pagination and optional limits to `DumpState` and `DumpFullState`, plus matching `hc client` options. Full-state limits apply globally to integrated and limbo chain ops and warrants, ordered by receipt time and op hash. [\#5774](https://github.com/holochain/holochain/issues/5774)
+- **BREAKING CHANGE**: The `holochain::conductor::state` module has been removed. Its public types (`ConductorState`, `ConductorStateTag`, `AppInterfaceId`, and `AppInterfaceConfig`) moved to `holochain_conductor_api::state`. The unused `ConductorState::get_network_compat` method was removed. \#5737
+
+## 0.7.0-rc.3
+
+- **BREAKING CHANGE**: `holochain_types` no longer depends on `holochain_keystore`. The signing/verification extension traits and methods that lived on `holochain_types` types (`SignedActionHashedExt`, `ValidationReceipt::sign`, `WarrantOp::sign`, `ReportEntryFetchedOps::verify`) have moved to new extension traits in `holochain_keystore` (`SignedActionHashedExt`, `ValidationReceiptExt`, `WarrantOpExt`, `ReportEntryFetchedOpsExt`). `holochain_types::prelude` no longer re-exports `holochain_keystore::AgentPubKeyExt`. Downstream code using these methods must import the traits from `holochain_keystore` instead.
+- **BREAKING CHANGE** `hdi`’s `FlatOp` sub-types (`OpEntry`, `OpUpdate`, `OpDelete`, `OpRecord`, `OpActivity`, `OpLink`) now carry a `TypedAction<D>` — the action’s `ActionHeader` paired with its exact `ActionData` payload, already known from which variant you matched — instead of the fully generic `Action`. `OpUpdate::original_action_hash()`/`original_entry_hash()` remain as accessor methods (every variant has one). `OpEntry`/`OpRecord`/`OpActivity`/`OpLink` drop the equivalent `original_action_hash`/`original_entry_hash`/link `base_address`/`target_address`/`tag` fields with no replacement method — once you’ve matched the specific variant, read `action.data.<field>` directly. `agent`/`new_key`/`original_key` (the `EntryHash` → `AgentPubKey` conversions) remain as accessor methods on `OpEntry`/`OpRecord`/`OpActivity`. A new `EntryCreationData`/`TypedAction<EntryCreationData>` restores the `Create`-or-`Update` narrowing the removed `EntryCreationAction` used to provide. Integrity zomes’ `validate_*` helper signatures need updating accordingly — see the `hdi::flat_op` module docs.
+- Increase the SQLite `busy_timeout` from sqlx’s 5s default to 15s, to reduce spurious “database is locked” errors logged by queue consumer workflows under writer contention.
+- **BREAKING CHANGE**: `holochain_zome_types::query::AgentActivity`, the response type of `hdk::chain::get_agent_activity`, is renamed to `AgentActivityStatus`. This resolves a name collision with the unrelated `AgentActivity` `Op` variant struct.
+- **BREAKING CHANGE**: `holochain_integrity_types::action::CapAccess` (the `CapGrant.cap_access` column discriminant) is renamed to `CapAccessType`. This resolves a name collision with `holochain_integrity_types::capability::CapAccess`, the data-carrying grant-access type used by `ZomeCallCapGrant`, which keeps the `CapAccess` name. \#5882
+- Remove the unused `holochain_zome_types::crdt::CrdtType` placeholder type.
+- **BREAKING CHANGE**: `holochain_integrity_types` no longer re-exports its prelude (or `Entry`) at the crate root, and `holochain_zome_types` drops its own crate-root `Action`/`Entry` re-exports. In `holochain_zome_types`, modules that only re-exported `holochain_integrity_types` types (`chain`, `countersigning`, `crdt`, `genesis`, `record`, `trace`) are removed, and modules that previously re-exported their `holochain_integrity_types` counterpart wholesale (`action`, `capability`, `entry`, `entry_def`, `link`, `op`, `warrant`, `x_salsa20_poly1305`, `zome_io`, and others) no longer do so. Code that imported shared types via a module-qualified `holochain_zome_types::<module>::...` or bare `holochain_integrity_types::...` path should import from `holochain_zome_types::prelude` / `holochain_integrity_types::prelude` (or the type’s owning module) instead. `hdi`/`hdk` zome code that only uses `hdi::prelude`/`hdk::prelude` is unaffected.
+
+## 0.7.0-rc.2
+
+## 0.7.0-rc.1
+
+## 0.7.0-rc.0
+
+- Added a new `get_agent_activity_multi` p2p call (`HcP2p`, `HolochainP2pDnaT`, and a `CascadeImpl` passthrough): a multi-peer fan-out that returns each authority’s `AgentActivityResponse` independently, paired with the responding peer, for use by source-chain restore. Fails with the new `HolochainP2pError::Timeout` when fewer than `min_responses` responses arrive within the timeout. The existing `get_agent_activity` behaviour is unchanged. \#5799
+- **BREAKING CHANGE**: Removed the `transport-iroh` feature flag from `holochain`, `holochain_p2p`, `holochain_cascade`, `holochain_client`, `hc`, `hc_client`, and `hc_sandbox`. The iroh (QUIC) transport is the only network backend and is now compiled in unconditionally rather than gated behind an (on-by-default) optional feature. Downstream crates that built with `default-features = false` and explicitly listed `transport-iroh` must drop it, as the feature no longer exists.
+- Made the workspace crates’ feature flags build independently and removed unused dependencies across the workspace, trimming the dependency tree.
+- **BREAKING CHANGE** `wire_rows_to_v2_ops` is renamed to `wire_rows_to_ops` now that there is no legacy v1 op form to distinguish it from.
+- **BREAKING CHANGE** `build_chain_dht_op_v2` and `build_warrant_dht_op_v2` (in `holochain_p2p`) are renamed to `build_chain_dht_op` and `build_warrant_dht_op` now that there is no legacy v1 op-construction path to distinguish them from.
+- Disable `reqwest`’s default features, including `native-tls`, in `holochain_metrics`. We are using `rustls-tls` anyway and `native-tls` requires a non-vendored OpenSSL to be installed. \#5878
+- Implemented more graceful handling of invalid or missing `hc` subcommands. Originally the code panicked with an ambiguous “File or directory not found error”. [\#5867](https://github.com/holochain/holochain/pull/5867)
+- **BREAKING CHANGE** Remove the legacy per-variant action types now that the v2 `Action` model (`ActionHeader` + `ActionData`) is canonical. The `holochain_integrity_types::action` per-variant structs (`Create`, `Update`, `Delete`, `Dna`, `CreateLink`, `DeleteLink`, `OpenChain`, `CloseChain`, `AgentValidationPkg`, `InitZomesComplete`), the `ActionBuilder`/`ActionBuilderCommon` builder, the `EntryCreationAction`/`NewEntryAction`/`NewEntryActionRef` wrapper enums, and the `rate_limit` module (`RateWeight`/`EntryRateWeight` and the action-weight machinery) are all removed. \#5860
+- Holochain gains a new `encryption` feature to control whether its databases are encrypted or not. This replaces the previous `sqlite-encrypted` feature which no longer has any effect.
+- **BREAKING CHANGE** Remove the `holochain_sqlite` crate now that persistence has moved to `holochain_data`.
+- **BREAKING CHANGE** Databases created by Holochain have been renamed now that the legacy databases are no longer in use.
+- **BREAKING CHANGE**: `DnaStorageInfo` (returned by the `StorageInfo` admin call) drops its `authored_data_size`/`authored_data_size_on_disk` and `cache_data_size`/`cache_data_size_on_disk` fields. An agent’s source-chain data now lives in the per-DNA DHT database and is counted in `dht_data_size`/`dht_data_size_on_disk`; the separate cache figure is removed. \#5844
+
+## 0.7.0-dev.32
+
+- **BREAKING CHANGE** Compiled wasmer modules are now cached in the WASM database (a new `CompiledWasm` table) instead of in a `wasm-cache` directory under the data root. Modules are compiled on demand, persisted as serialized bytes, and rebuilt from those bytes on later loads. The `holochain::conductor::conductor::WASM_CACHE` constant and the on-disk cache directory have been removed. \#5834
+- WASM is now loaded on demand. At startup the conductor builds ribosomes only for enabled apps, and loads an app’s ribosomes when it is installed or enabled rather than for every installed cell up front. After a cell completes genesis its compiled modules are evicted from the in-memory cache (to be rebuilt from the stored serialized module on the next zome call), reducing idle memory use. \#5834
+- **BREAKING CHANGE** `Conductor::get_dna_definitions` is now `async` and reads DNA definitions from the DNA-definition store rather than from loaded ribosomes. \#5834
+- Add the `AppStatusFilter::AwaitingMemproofs` variant so `ListApps` can filter for apps that are awaiting membrane proofs. \#5834
+- **BREAKING CHANGE**: Bump Kitsune2 to `0.5.0-dev.6`.
+- **BREAKING CHANGE**: Removed the tx5/WebRTC network transport. The iroh (QUIC) transport is now the only supported network backend. The `transport-tx5-backend-go-pion` feature flag is removed from `holochain`, `holochain_p2p`, and `holochain_cascade`.
+- **BREAKING CHANGE**: Removed the `signal_url` and `webrtc_config` fields from `NetworkConfig`, which configured the tx5 signaling server and WebRTC peer-connection options. Because `NetworkConfig` rejects unknown fields, conductor config YAML that still sets `signal_url` or `webrtc_config` under `network` will now fail to parse and must be updated.
+- **BREAKING CHANGE**: `hc sandbox` no longer offers the `webrtc` network type. Only `mem` and `quic` (iroh) transports remain.
+- Removed the `hc_service_check` crate (the `hc-service-check` tool), which checked the health of tx5 network services.
+
+## 0.7.0-dev.31
+
+- Fix a queue consumer bug where the integration workflow failed with a transient `database is locked` error due to write contention, and hence had its pending work dropped with no retry.
+- Improve the sweettest consistency-check failure report when consistency is not reached.
+- **BREAKING CHANGE**: Implement the DNA migration design, adding a new `InitProperties` type to be used in the `init_properties` field on `RoleSettings::Provisioned`. The bytes are opaque to the conductor and stored in the conductor database thus never written to the DHT. They are written during the installation and are intended to seed a freshly migrated chain during `init`. They can only be retrieved from the `init` callback via the `get_init_properties` host function and its HDK wrapper. They are cleared upon a successful init or if the associated app is uninstalled. \#5827
+- **BREAKING CHANGE**: Bump Kitsune2 to `0.5.0-dev.4`.
+- Use Kitsune2’s new op publish metadata channel to pass through a validation-receipt-required flag. Published ops request a validation receipt from holders, while gossip-fetched ops no longer do. Previously every incoming op was unconditionally marked as requiring a receipt.
+- **BREAKING CHANGE**: `get_agent_activity` can now return `ChainStatus::Closed` when an agent’s source-chain head is a `CloseChain` action. `ChainStatus` is sent over the wire in agent-activity responses, so a node returning `Closed` cannot be understood by a pre-feature node. `Closed` ranks above `Valid` but below `Forked`/`Invalid`, so a chain that is also forked or invalid still reports `Forked`/`Invalid`. \#5766
+- Fix `get_agent_activity` status-only requests (`ActivityRequest::Status`) which previously always returned `ChainStatus::Empty` instead of the real chain status. \#5766
+- **BREAKING CHANGE** Inline zome definitions are no longer embedded in `DnaDef`. The `ZomeDef::Inline` variant now carries an `InlineZomeDef` (an `InlineHash` identifier plus its dependencies) instead of the executable closures. The closures are held on `DnaFile` in a new, non-serialized `inline_zomes` field (constructed via `DnaFile::new_inline`) and executed by a dedicated inline ribosome. WASM zomes are unaffected at the API level; this only changes code that builds inline-zome DNAs directly, such as tests using sweettest. \#5828
+- **BREAKING CHANGE** `ZomeDef` no longer uses the custom `untagged` serialization that encoded a Wasm zome as a bare `WasmZome`. Because the `DnaHash` is derived from the serialized integrity zomes, the hash of an otherwise-identical DNA changes with this release. There is no migration path for existing installs of Holochain, and startup errors would be expected if the data state is not cleared. \#5828
+- **BREAKING CHANGE** `WasmZome` is renamed to `WasmZomeDef`. \#5828
+- **BREAKING CHANGE** `ZomeDef::wasm_hash` (and the `IntegrityZomeDef`/`CoordinatorZomeDef` wrappers) is replaced by `zome_hash`, which returns a `ZomeHash` for both WASM and inline zomes. `DnaDef::get_wasm_zome` now returns `ZomeResult<&WasmZomeDef>`. \#5828
+- **BREAKING CHANGE** `InlineZome::uuid` is replaced by `InlineZome::hash`, which returns an `InlineHash` derived from the previous UUID via blake2b. \#5828
+- **BREAKING CHANGE** Removed `DnaWithRole::replace_dna`. \#5828
+- Add two hash types to `holo_hash`: `InlineHash` (`hash_type::Inline`, prefix `uhCsk`), which identifies an inline zome, and `ZomeHash` (`hash_type::Zome`), which is either a WASM or inline zome hash. \#5828
+- Add `DnaDef::replace_coordinators`, which swaps a DNA’s coordinator zomes while preserving install order and rejects a coordinator whose dependency does not point at an existing integrity zome with the new `ZomeError::DanglingZomeDependency`. \#5828
+- Restructure the ribosome so that the WASM, inline, and mock backends each implement a common `RibosomeImplT` trait behind a single `Ribosome` type, replacing the previous `RealRibosome`/`RibosomeT` design. This is primarily an internal change but affects custom ribosome implementations and some sweettest internals. \#5828
+
+## 0.7.0-dev.30
+
+## 0.7.0-dev.29
+
+## 0.7.0-dev.28
+
+- Make Sweettest documentation available on docs.rs.
+
+## 0.7.0-dev.27
+
+- Serve Kitsune2 gossip op-store reads — op hashes, op data, presence checks, and the slice-hash cache — from the new `holochain_data` DHT store instead of the legacy databases. Warrant storage is split into shared `Warrant` content plus `LimboWarrantOp`/`WarrantOp` metadata tables, mirroring the action/chain-op split. The `Warrant` table also persists the `InvalidChainOp` rejection reason in a queryable `reason` column (denormalized from the proof), completing the persistence the reason feature intended. \#5731
+
+## 0.7.0-dev.26
+
+- Mirror DHT-database writes from workflows and cell into the new `holochain_data` DHT store (parallel-write DHT slice).
+- Remove the `isotest` dependency from `holochain_types` and `holochain_cascade`. In `holochain_types::test_utils::chain`, the conversions between `TestChainHash` and `ActionHash` are now plain `From` impls; out-of-tree test code should use `TestChainHash::from(&action_hash)` instead of `TestChainHash::test(&action_hash)`.
+- Include a human-readable `reason` in `ChainIntegrityWarrant::InvalidChainOp` so peers receiving a warrant can see why validation rejected the op. Reasons are truncated to `MAX_WARRANT_REASON_BYTES` (512) and rejected by sys validation if oversized. The `reason` field is excluded from `PartialEq`/`Hash` to preserve warrant deduplication semantics. \#5752
+
+## 0.7.0-dev.25
+
+## 0.7.0-dev.24
+
+- **BREAKING CHANGE** switch peer metadata store from using the database from `holochain_sqlite` to using the new one defined in `holochain_state`. There is no migration path for existing installs of Holochain, and startup errors would be expected if the data state is not cleared. \#5748
+- Add peer metadata store in `holochain_state` that wraps the database added in `holochain_data`. \#5748
+- Remove the custom `ConductorStoreError` and `ConductorStoreResult` from `holochain_state`, use the `StateQueryError` and `StateQueryResult` instead.
+- Switch from `serde_yaml` to `yaml_serde`, to stay with the actively supported fork of the now deprecated library.
+
+## 0.7.0-dev.23
+
+- Added the per-DNA DHT v2 database schema and skeleton read/write API surface in `holochain_data`, with transitional DHT v2 domain types exposed across the Holochain type crates (`holochain_integrity_types`, `holochain_zome_types`, `holochain_types`). \#5743
+- Add peer metadata store database table to `holochain_data` along with full CRUD API. \#5746
+  - In the new peer metadata store database, the entries now store `expires_at` as seconds from the Unix epoch instead of microseconds and they correctly expire at the `expires_at` time instead of just after.
+- **BREAKING CHANGE** Switch from WAMR to Wasmi as the interpreter backend. This is a temporary change and Wasmi will also be replaced. Please do not use it.
+- **BREAKING CHANGE** Upgrade Wasmer from version 6 to 7, Kitsune2 from 0.4.x to 0.5.x, holochain\_serialized\_bytes to 0.0.57, Lair from 0.6.x to 0.7.x
+- **BREAKING CHANGE** Rename feature flags for Wasmer. The `wasmer_sys` feature flag is now `wasmer-sys-cranelift`. There is an additional `wasmer-sys-llvm` option. The `wasmer_wamr` feature flag is replaced by a roughly equivalent `wasmer-wasmi` feature flag which has fewer build-time requirements. The two control flags for wasmer have been renamed too, so `error_as_host` has become `error-as-host` and `wasmer_debug_memory` has become `wasmer-debug-memory`.
+- It’s no longer the case that the Wasmer backends are disallowed from being enabled together. You must enable at least one but if you build with multiple enabled, then the conductor will pick one at runtime. You can also configure which one to pick with the new `wasm_backend` conductor configuration option. It accepts `"cranelift"`, `"LLVM"` or `"wasmi"`.
+
+## 0.7.0-dev.22
+
+- **BREAKING CHANGE** switch from `holochain_sqlite`/`holochain_state` for the conductor database, to the new store defined by `holochain_data`. There is no migration path for existing installs of Holochain, and startup errors would be expected if the data state is not cleared.
+
+## 0.7.0-dev.21
+
+- **BREAKING CHANGE** `ChainFilter` is now defined via constructors `take`, `until_hash`, `until_timestamp` instead of composable builder chaining.
+- **BREAKING CHANGE** `must_get_agent_activity` error responses have changed:
+  - If the ChainFilter has a `LimitConditions::Take(0)`, then the error is now a `CascadeError::InvalidInput`.
+- **BREAKING CHANGE** `must_get_agent_activity` responses have changed:
+  - Activity results now follow the chain down from the provided `chain_top` hash, any forked actions are excluded.
+  - If the filter is `UntilHash` and that hash is not found the response is `MustGetAgentActivityResponse::UntilHashMissing`. This includes when the hash is on a dropped fork.
+  - If the filter is `UntilHash` with an until hash that has a sequence number greater than that of the ChainFilter `chain_top` action sequence, the response is `MustGetAgentActivityResponse::UntilHashAfterChainHead`.
+  - If the filter is `UntilTimestamp` and no action is found with a timestamp less than the provided timestamp and the genesis actions are not found to be after the timestamp, then the response is `MustGetAgentActivityResponse::UntilTimestampIndeterminate`. This is to ensure that responses are always deterministic.
+  - If the filter is `UntilTimestamp` with a timestamp greater than the ChainFilter `chain_top` action timestamp, the response is `MustGetAgentActivityResponse::UntilTimestampGreaterThanChainHead`.
+  - If the filter is `ToGenesis` and the chain does not reach genesis, the response is `MustGetAgentActivityResponse::IncompleteChain`.
+  - If the filter is `Take(n)` and fewer than `n` actions are available and the chain does not reach genesis, the response is `MustGetAgentActivityResponse::IncompleteChain`. Previously this could return `Activity` if no gaps were detected, but completeness cannot be guaranteed without reaching genesis.
+- Refactored `must_get_agent_activity` implementation to improve code clarity and correctness. \#5689
+
+## 0.7.0-dev.20
+
+- When Holochain attempts to prepare validation receipts but the author of the data has not been recently online, by being present in our peer store, then clear the receipt request and skip attempting to send. The author may request validation receipts again by republishing their content.
+
+## 0.7.0-dev.19
+
+## 0.7.0-dev.18
+
+- **BREAKING CHANGE:** Split combined auth material into auth material for bootstrap service and auth material for relay service.
+
+## 0.7.0-dev.17
+
+- All influxive metrics modes now automatically stamp a `host` tag on every emitted metric, defaulting to the OS hostname. Override with the `HOLOCHAIN_INFLUXIVE_HOST_TAG` environment variable. \#5686
+- Fix an issue with the Holochain configuration schema generation which caused a panic. This is now properly tested to prevent regressions. \#5683
 
 ## 0.7.0-dev.16
 
@@ -22,6 +161,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Update kitsune2 dependencies to `0.4.0-dev.3`. \#5673
 - Rewrite influxive metric collection using OpenTelemetry SDK. \#5666
+- Fixed an issue where the `on_signal` method of the client `AppWebsocket` would not handle signals for cloned cells correctly. Since Holochain now outputs signals only on connections associated with the app where they are emitted, filtering in the client is no longer necessary. \#5672
 
 ## 0.7.0-dev.14
 
@@ -955,7 +1095,7 @@ Now it serializes to
   - Performance and correctness: A feature which captured and processed ops that were discovered during validation has been removed. This had been added as an attempt to avoid deadlocks within validation but if that happens there’s a bug somewhere else. Sys validation needs to trust that Holochain will correctly manage its current arc and that we will get that data eventually through publishing or gossip. This probably wasn’t doing a lot of harm but it was uneccessary and doing database queries so it should be good to have that gone.
   - Performance: In-memory caching for sys validation dependencies. When we have to wait to validate an op because it has a missing dependency, any other actions required by that op will be held in memory rather than being refetched from the database. This has a fairly small memory footprint because actions are relatively small but saves repeatedly hitting the cascade for the same data if it takes a bit of time to find a dependency on the network.
 
-- **BREAKING* CHANGE*: The `ConductorConfig` has been updated to add a new option for configuring conductor behaviour. This should be compatible with existing conductor config YAML files but if you are creating the struct directly then you will need to include the new field. Currently this just has one setting which controls how fast the sys validation workflow will retry network gets for missing dependencies. It’s likely this option will change in the near future.
+- \**BREAKING* CHANGE\*: The `ConductorConfig` has been updated to add a new option for configuring conductor behaviour. This should be compatible with existing conductor config YAML files but if you are creating the struct directly then you will need to include the new field. Currently this just has one setting which controls how fast the sys validation workflow will retry network gets for missing dependencies. It’s likely this option will change in the near future.
 
 ## 0.3.0-beta-dev.26
 
@@ -1076,7 +1216,7 @@ Now it serializes to
 - When uninstalling an app, local data is now cleaned up where appropriate. [\#1805](https://github.com/holochain/holochain/pull/1805)
   - Detail: any time an app is uninstalled, if the removal of that app’s cells would cause there to be no cell installed which uses a given DNA, the databases for that DNA space are deleted. So, if you have an app installed twice under two different agents and uninstall one of them, no data will be removed, but if you uninstall both, then all local data will be cleaned up. If any of your data was gossiped to other peers though, it will live on in the DHT, and even be gossiped back to you if you reinstall that same app with a new agent.
 - Renames `OpType` to `FlatOp`, and `Op::to_type()` to `Op::flattened()`. Aliases for the old names still exist, so this is not a breaking change. [\#1909](https://github.com/holochain/holochain/pull/1909)
-- Fixed a [problem with validation of Ops with private entry data](https://github.com/holochain/holochain/issues/1861), where  `Op::to_type()` would fail for private `StoreEntry` ops. [\#1910](https://github.com/holochain/holochain/pull/1910)
+- Fixed a [problem with validation of Ops with private entry data](https://github.com/holochain/holochain/issues/1861), where `Op::to_type()` would fail for private `StoreEntry` ops. [\#1910](https://github.com/holochain/holochain/pull/1910)
 
 ## 0.1.0
 
@@ -1187,7 +1327,7 @@ Now it serializes to
 
 - Revert: “Add the `hdi_version_req` key:value field to the output of the `--build-info` argument” because it broke. [\#1521](https://github.com/holochain/holochain/pull/1521)
   
-  Reason: it causes a build failure of the *holochain*  crate on crates.io
+  Reason: it causes a build failure of the *holochain* crate on crates.io
 
 ## 0.0.153
 
@@ -1535,7 +1675,7 @@ The severity of these issues increases with cell concurrency, i.e. using multipl
 
 ### Removed
 
-- BREAKING:  `InstallAppDnaPayload` in admin conductor API `InstallApp` command now only accepts a hash.  Both properties and path have been removed as per deprecation warning.  Use either `RegisterDna` or `InstallAppBundle` instead. [\#665](https://github.com/holochain/holochain/pull/665)
+- BREAKING: `InstallAppDnaPayload` in admin conductor API `InstallApp` command now only accepts a hash. Both properties and path have been removed as per deprecation warning. Use either `RegisterDna` or `InstallAppBundle` instead. [\#665](https://github.com/holochain/holochain/pull/665)
 - BREAKING: `DnaSource(Path)` in conductor\_api `RegisterDna` call now must point to `DnaBundle` as created by `hc dna pack` not a `DnaFile` created by `dna_util` [\#665](https://github.com/holochain/holochain/pull/665)
 
 ### CHANGED

@@ -1,5 +1,5 @@
 ---
-default_semver_increment_mode: !pre_minor dev
+default_semver_increment_mode: !pre_patch rc
 ---
 # Changelog
 
@@ -7,7 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## \[Unreleased\]
 
-- Added `optional_url2_schema` helper to the `jsonschema` module for JSON Schema generation of `Option<Url2>` fields.
+## 0.7.0
+
+## 0.7.0-rc.1
+
+## 0.7.0-rc.0
 
 ## 0.7.0-dev.1
 

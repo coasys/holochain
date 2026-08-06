@@ -69,7 +69,7 @@ async fn call_admin() {
 
     // Make properties
     let properties = holochain_zome_types::properties::YamlProperties::new(
-        serde_yaml::from_str(
+        yaml_serde::from_str(
             r#"
 test: "example"
 how_many: 42
@@ -777,28 +777,20 @@ async fn network_stats() {
         .admin_ws_client::<AdminResponse>()
         .await;
 
-    #[cfg(feature = "transport-tx5-backend-go-pion")]
-    const EXPECT: &str = "BackendGoPion";
-    #[cfg(all(
-        feature = "transport-iroh",
-        not(feature = "transport-tx5-backend-go-pion")
-    ))]
-    const EXPECT: &str = "iroh";
-
     let req = AdminRequest::DumpNetworkStats;
     let res: AdminResponse = client.request(req).await.unwrap();
     match res {
         AdminResponse::NetworkStatsDumped(stats) => {
             println!("{stats:?}");
 
-            assert_eq!(EXPECT, stats.transport_stats.backend);
+            assert_eq!("iroh", stats.transport_stats.backend);
         }
         _ => panic!("unexpected"),
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn full_state_dump_cursor_works() {
+async fn full_state_dump_returns_all_ops() {
     holochain_trace::test_run();
 
     let mut conductor = SweetConductor::standard().await;
@@ -825,23 +817,19 @@ async fn full_state_dump_cursor_works() {
         integrated_ops_count + validation_limbo_ops_count + integration_limbo_ops_count;
     assert_eq!(7, all_dhts_ops_count);
 
-    // We are assuming we have at least one DhtOp in the Cell
-    let full_state = dump_full_state(
-        &mut client,
-        cell_id,
-        Some(full_state.integration_dump.dht_ops_cursor - 1),
-    )
-    .await
-    .unwrap();
+    // The first dump returns every DHT op and a cursor marking the last, so a
+    // follow-up dump resumes after all integrated and limbo ops.
+    let cursor = full_state.integration_dump.dht_ops_cursor;
+    assert!(cursor.is_some());
 
-    let integrated_ops_count = full_state.integration_dump.integrated.len();
-    let validation_limbo_ops_count = full_state.integration_dump.validation_limbo.len();
-    let integration_limbo_ops_count = full_state.integration_dump.integration_limbo.len();
+    let full_state = dump_full_state(&mut client, cell_id, cursor).await.unwrap();
 
-    let new_all_dht_ops_count =
-        integrated_ops_count + validation_limbo_ops_count + integration_limbo_ops_count;
-
-    assert_eq!(1, new_all_dht_ops_count);
+    // No DHT op was received after the cursor, so every bucket is empty and
+    // there is no onward cursor.
+    assert!(full_state.integration_dump.integrated.is_empty());
+    assert!(full_state.integration_dump.dht_ops_cursor.is_none());
+    assert!(full_state.integration_dump.validation_limbo.is_empty());
+    assert!(full_state.integration_dump.integration_limbo.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

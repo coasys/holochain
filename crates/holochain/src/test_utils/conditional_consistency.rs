@@ -3,12 +3,8 @@ use crate::sweettest::DurationOrSeconds;
 use crate::sweettest::SweetCell;
 use crate::test_utils::consistency::request_published_ops;
 use holo_hash::*;
-use holochain_conductor_api::IntegrationStateDump;
-use holochain_conductor_api::IntegrationStateDumps;
-use holochain_sqlite::prelude::DatabaseResult;
-use holochain_state::prelude::StateQueryResult;
-use holochain_types::prelude::*;
-use rusqlite::named_params;
+use holochain_state::dht_store::DhtStoreRead;
+use holochain_types::op::{DhtOp, DhtOpHashed};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Write;
@@ -113,17 +109,13 @@ pub async fn await_conditional_consistency<'a, I: IntoIterator<Item = (&'a Sweet
     all_cells: I,
 ) -> ConsistencyResult {
     #[allow(clippy::type_complexity)]
-    let all_cell_dbs: Vec<(
-        AgentPubKey,
-        DbRead<DbKindAuthored>,
-        Option<DbRead<DbKindDht>>,
-    )> = all_cells
+    let all_cell_dbs: Vec<(AgentPubKey, DhtStoreRead, Option<DhtStoreRead>)> = all_cells
         .into_iter()
         .map(|(c, online)| {
             (
                 c.agent_pubkey().clone(),
-                c.authored_db().clone().into(),
-                online.then(|| c.dht_db().clone().into()),
+                c.dht_store().as_read(),
+                online.then(|| c.dht_store().as_read()),
             )
         })
         .collect();
@@ -140,16 +132,18 @@ pub async fn await_conditional_consistency<'a, I: IntoIterator<Item = (&'a Sweet
 }
 
 /// Wait for all cell envs to reach consistency, meaning that every op
-/// published by every cell has been integrated by every node
-pub async fn wait_for_integration_diff_conditional<AuthorDb, DhtDb>(
-    cells: &[(&AgentPubKey, &AuthorDb, Option<&DhtDb>)],
+/// published by every cell has been integrated by every node.
+///
+/// Each cell is `(author, authored_store, online_dht_store)`. The published
+/// set is read from each cell's own DHT store (self-authored ops), and the
+/// integrated set from each online cell's DHT store. Cells with `None` for the
+/// DHT store are treated as offline: their published ops still count towards
+/// the total, but their integration is not checked.
+pub async fn wait_for_integration_diff_conditional(
+    cells: &[(&AgentPubKey, &DhtStoreRead, Option<&DhtStoreRead>)],
     timeout: Duration,
     conditions: ConsistencyConditions,
-) -> ConsistencyResult
-where
-    AuthorDb: ReadAccess<DbKindAuthored>,
-    DhtDb: ReadAccess<DbKindDht>,
-{
+) -> ConsistencyResult {
     let start = tokio::time::Instant::now();
     let mut done = HashSet::new();
     let mut integrated = vec![HashMap::<DhtOpHash, DhtOp>::new(); cells.len()];
@@ -159,9 +153,8 @@ where
     while start.elapsed() < timeout {
         if !publish_complete {
             published = HashMap::new();
-            for (_author, db, _) in cells.iter() {
-                // Providing the author is redundant
-                let p = request_published_ops(*db, None /*Some((*author).to_owned())*/)
+            for (author, authored_store, _) in cells.iter() {
+                let p = request_published_ops(authored_store, author)
                     .await
                     .unwrap()
                     .into_iter()
@@ -190,7 +183,7 @@ where
                     continue;
                 }
                 if let Some(db) = dht_db.as_ref() {
-                    integrated[i] = get_integrated_ops(*db)
+                    integrated[i] = get_integrated_ops(db)
                         .await
                         .into_iter()
                         .map(|op| {
@@ -204,7 +197,7 @@ where
                         tracing::debug!(i, "Node reached consistency");
                     } else {
                         let total_time_waited = start.elapsed();
-                        let queries = query_integration(*db).await;
+                        let queries = integration_dump(db).await.unwrap();
                         let num_integrated = integrated.len();
                         tracing::debug!(i, ?num_integrated, ?total_time_waited, counts = ?queries, "consistency-status");
                     }
@@ -276,8 +269,8 @@ where
                 published.len()
             );
         } else if integrated.len() < published.len() {
-            let db = cells[*c].2.as_ref().expect("DhtDb must be provided");
-            let integration_dump = integration_dump(*db).await.unwrap();
+            let db = cells[*c].2.as_ref().expect("DhtStore must be provided");
+            let integration_dump = integration_dump(db).await.unwrap();
 
             eprintln!(
                 "{}\nConsistency not achieved after {:?}. Expected {} ops, but only {} integrated. Report:\n\n{}\n{}\n\n{:?}",
@@ -344,162 +337,60 @@ fn diff_report(unintegrated: Vec<String>, unpublished: Vec<String>) -> String {
 
 fn display_op(op: &DhtOp) -> String {
     match op {
-        DhtOp::ChainOp(op) => format!(
-            "{} {:>3} {} {} {} ({})",
-            op.action().author(),
-            op.action().action_seq(),
-            op.to_hash(),
-            op.action().to_hash(),
-            op.get_type(),
-            op.action().action_type(),
-        ),
+        DhtOp::ChainOp(op) => {
+            let action = op.signed_action().data();
+            format!(
+                "{} {:>3} {} {} {:?} ({:?})",
+                action.author(),
+                action.action_seq(),
+                op.to_hash(),
+                action.to_hash(),
+                op.op_type(),
+                action.action_type(),
+            )
+        }
         DhtOp::WarrantOp(op) => {
-            format!("{} WARRANT ({})", op.author, op.get_type(),)
+            format!("{} WARRANT (ChainIntegrityWarrant)", op.author)
         }
     }
 }
 
-/// Wait for num_attempts * delay, or until all published ops have been integrated.
-#[cfg_attr(feature = "instrument", tracing::instrument(skip(db)))]
-pub async fn wait_for_integration<Db: ReadAccess<DbKindDht>>(
-    db: &Db,
-    num_published: usize,
-    num_attempts: usize,
-    delay: Duration,
-) -> Result<(), String> {
-    let mut num_integrated = 0;
-    for i in 0..num_attempts {
-        num_integrated = get_integrated_count(db).await;
-        if num_integrated >= num_published {
-            if num_integrated > num_published {
-                tracing::warn!("num integrated ops > num published ops, meaning you may not be accounting for all nodes in this test.
-                Consistency may not be complete.")
-            }
-            return Ok(());
-        } else {
-            let total_time_waited = delay * i as u32;
-            tracing::debug!(?num_integrated, ?total_time_waited, counts = ?query_integration(db).await, "consistency-status");
-        }
-        tokio::time::sleep(delay).await;
-    }
-
-    Err(format!(
-        "Consistency not achieved after {num_attempts} attempts. Expected {num_published} ops, but only {num_integrated} integrated.",
-    ))
-}
-
-/// Show authored data for each cell environment
-#[cfg_attr(feature = "instrument", tracing::instrument(skip(envs)))]
-pub async fn show_authored<Db: ReadAccess<DbKindAuthored>>(envs: &[&Db]) {
-    for (i, &db) in envs.iter().enumerate() {
-        db.read_async(move |txn| -> DatabaseResult<()> {
-            txn.prepare("SELECT DISTINCT Action.seq, Action.type, Action.entry_hash FROM Action JOIN DhtOp ON Action.hash = DhtOp.hash")
-            .unwrap()
-            .query_map([], |row| {
-                let action_type: String = row.get("type")?;
-                let seq: u32 = row.get("seq")?;
-                let entry: Option<EntryHash> = row.get("entry_hash")?;
-                Ok((action_type, seq, entry))
-            })
-            .unwrap()
-            .for_each(|r|{
-                let (action_type, seq, entry) = r.unwrap();
-                tracing::debug!(chain = %i, %seq, ?action_type, ?entry);
-            });
-
-            Ok(())
-        }).await.unwrap();
-    }
-}
-
-/// Get multiple db states with compact Display representation
-pub async fn get_integration_dumps<Db: ReadAccess<DbKindDht>>(
-    dbs: &[&Db],
-) -> IntegrationStateDumps {
-    let mut output = Vec::new();
-    for db in dbs {
-        let db = *db;
-        output.push(query_integration(db).await);
-    }
-    IntegrationStateDumps(output)
-}
-
-/// Show the current db state.
-pub async fn query_integration<Db: ReadAccess<DbKindDht>>(db: &Db) -> IntegrationStateDump {
-    crate::conductor::integration_dump(&db.clone().into())
+/// Get all [`DhtOps`](holochain_types::prelude::DhtOp) integrated by this node,
+/// read from the DHT store.
+///
+/// "Integrated" follows the store semantics: locally-validated chain ops
+/// (GET-cached copies excluded, rejected ops included). **Warrants are
+/// deliberately excluded** — they are not guaranteed to reach every node
+/// (zero-arc nodes, gossip timing), so requiring cross-node warrant
+/// consistency here would hang. **Private `CreateEntry` ops are also
+/// excluded** — a private entry never leaves its author, so
+/// `request_published_ops` (via `ops_to_publish_for_wire`) already omits them
+/// from the published set; the integrated set must match, or the author node
+/// could never reach consistency. Ops are reconstructed into `DhtOp`s so
+/// their hashes match the published set.
+async fn get_integrated_ops(dht_store: &DhtStoreRead) -> Vec<DhtOp> {
+    let chain = dht_store
+        .integrated_chain_ops_for_dump(None, None)
         .await
         .unwrap()
+        .into_iter()
+        .map(|row| row.wire)
+        .collect();
+    crate::conductor::wire_rows_to_ops(chain, Vec::new())
+        .into_iter()
+        .filter(|op| !is_author_local_private_store_entry(op))
+        .collect()
 }
 
-async fn get_integrated_count<Db: ReadAccess<DbKindDht>>(db: &Db) -> usize {
-    db.read_async(move |txn| -> DatabaseResult<usize> {
-        Ok(txn.query_row(
-            "SELECT COUNT(hash) FROM DhtOp WHERE DhtOp.when_integrated IS NOT NULL",
-            [],
-            |row| row.get(0),
-        )?)
-    })
-    .await
-    .unwrap()
-}
-
-/// Get count of ops that have been successfully validated but not integrated
-pub async fn get_valid_and_not_integrated_count<Db: ReadAccess<DbKindDht>>(db: &Db) -> usize {
-    db.read_async(move |txn| -> DatabaseResult<usize> {
-        Ok(txn.query_row(
-            "SELECT COUNT(hash) FROM DhtOp WHERE when_integrated IS NULL AND validation_status = :status",
-            named_params!{
-                ":status": ValidationStatus::Valid,
-            },
-            |row| row.get(0),
-        )?)
-    })
-    .await
-    .unwrap()
-}
-
-/// Get count of ops that have been successfully validated and integrated
-pub async fn get_valid_and_integrated_count<Db: ReadAccess<DbKindDht>>(db: &Db) -> usize {
-    db.read_async(move |txn| -> DatabaseResult<usize> {
-        Ok(txn.query_row(
-            "SELECT COUNT(hash) FROM DhtOp WHERE when_integrated IS NOT NULL AND validation_status = :status",
-            named_params!{
-                ":status": ValidationStatus::Valid,
-            },
-            |row| row.get(0),
-        )?)
-    })
-    .await
-    .unwrap()
-}
-
-/// Get all [`DhtOps`](holochain_types::prelude::DhtOp) integrated by this node
-pub async fn get_integrated_ops<Db: ReadAccess<DbKindDht>>(db: &Db) -> Vec<DhtOp> {
-    db.read_async(move |txn| -> StateQueryResult<Vec<DhtOp>> {
-        txn.prepare(
-            "
-            SELECT
-            DhtOp.type, 
-            Action.author as author, 
-            Action.blob as action_blob, 
-            Entry.blob as entry_blob
-            FROM DhtOp
-            JOIN
-            Action ON DhtOp.action_hash = Action.hash
-            LEFT JOIN
-            Entry ON Action.entry_hash = Entry.hash
-            WHERE
-            DhtOp.when_integrated IS NOT NULL
-            ORDER BY DhtOp.rowid ASC
-        ",
-        )
-        .unwrap()
-        .query_and_then(named_params! {}, |row| {
-            Ok(holochain_state::query::map_sql_dht_op(true, "type", row).unwrap())
-        })
-        .unwrap()
-        .collect::<StateQueryResult<_>>()
-    })
-    .await
-    .unwrap()
+/// A `CreateEntry` op whose entry is `Hidden` references a private entry, which
+/// is withheld from all peers. Such an op only ever exists on its author
+/// (reconstructed from the dump without its entry blob), so it must not enter a
+/// cross-node consistency comparison. Mirrors the SQL-level filter applied by
+/// `ops_to_publish_for_wire`.
+fn is_author_local_private_store_entry(op: &DhtOp) -> bool {
+    use holochain_types::op::{ChainOp, OpEntry};
+    matches!(
+        op,
+        DhtOp::ChainOp(chain_op) if matches!(**chain_op, ChainOp::CreateEntry(_, OpEntry::Hidden))
+    )
 }

@@ -83,21 +83,14 @@ pub async fn spawn_queue_consumer_tasks(
     space: &Space,
     conductor: ConductorHandle,
 ) -> ConductorResult<(QueueTriggers, InitialQueueTriggers)> {
-    let Space {
-        dht_db,
-        cache_db: cache,
-        ..
-    } = space;
-
     let keystore = conductor.keystore().clone();
     let dna_hash = Arc::new(cell_id.dna_hash().clone());
     let queue_consumer_map = conductor.get_queue_consumer_workflows();
-    let authored_db = space.get_or_create_authored_db(cell_id.agent_pubkey().clone())?;
 
     // Publish
     let tx_publish = spawn_publish_dht_ops_consumer(
         cell_id.clone(),
-        authored_db.clone(),
+        space.dht_store.clone(),
         conductor.clone(),
         network.clone(),
     );
@@ -108,7 +101,7 @@ pub async fn spawn_queue_consumer_tasks(
     let tx_receipt = queue_consumer_map.spawn_once_validation_receipt(dna_hash.clone(), || {
         spawn_validation_receipt_consumer(
             dna_hash.clone(),
-            dht_db.clone(),
+            space.dht_store.clone(),
             conductor.clone(),
             network.clone(),
         )
@@ -119,11 +112,10 @@ pub async fn spawn_queue_consumer_tasks(
     let tx_integration = queue_consumer_map.spawn_once_integration(dna_hash.clone(), || {
         spawn_integrate_dht_ops_consumer(
             dna_hash.clone(),
-            dht_db.clone(),
+            space.dht_store.clone(),
             conductor.task_manager(),
             tx_receipt.clone(),
             network.clone(),
-            conductor.clone(),
         )
     });
 
@@ -132,12 +124,7 @@ pub async fn spawn_queue_consumer_tasks(
     let tx_app = queue_consumer_map.spawn_once_app_validation(dna_hash.clone(), || {
         spawn_app_validation_consumer(
             dna_hash.clone(),
-            AppValidationWorkspace::new(
-                authored_db.clone(),
-                dht_db.clone(),
-                cache.clone(),
-                keystore.clone(),
-            ),
+            AppValidationWorkspace::new(space.dht_store.clone(), keystore.clone()),
             conductor.clone(),
             tx_integration.clone(),
             tx_publish.clone(),
@@ -150,9 +137,7 @@ pub async fn spawn_queue_consumer_tasks(
     let tx_sys = queue_consumer_map.spawn_once_sys_validation(dna_hash.clone(), || {
         spawn_sys_validation_consumer(
             SysValidationWorkspace::new(
-                authored_db.clone(),
-                dht_db.clone(),
-                cache.clone(),
+                space.dht_store.clone(),
                 cell_id.dna_hash().clone(),
                 conductor
                     .get_config()
@@ -324,6 +309,16 @@ impl QueueConsumerMap {
                 v.insert(ts).clone()
             }
         })
+    }
+
+    /// Drop this map's trigger senders for every queue of the given DNA.
+    ///
+    /// Once the removed cells have also dropped their copies, the consumer
+    /// workflows terminate. Used when a DNA's space is torn down so that a
+    /// later reinstall re-spawns fresh consumers bound to the new databases.
+    pub fn remove_all_for_dna(&self, dna_hash: &DnaHash) {
+        self.map
+            .share_mut(|map| map.retain(|QueueEntry(dna, _), _| dna.as_ref() != dna_hash));
     }
 }
 
@@ -700,6 +695,10 @@ pub(super) fn trigger_stream(rx: TriggerReceiver, stop: StopReceiver) -> impl St
     })))
 }
 
+/// How long to wait before re-running a workflow that failed with a non-fatal
+/// error.
+const WORKFLOW_ERROR_RETRY_DELAY: Duration = Duration::from_secs(1);
+
 async fn queue_consumer_main_task_impl<
     Fut: 'static + Send + Future<Output = WorkflowResult<WorkComplete>>,
 >(
@@ -728,7 +727,16 @@ async fn queue_consumer_main_task_impl<
                     }
                     tx.trigger(&"retrigger")
                 }
-                Err(err) => handle_workflow_error(&name, err)?,
+                Err(err) if err.workflow_should_bail() => handle_workflow_error(&name, err)?,
+                Err(err) => {
+                    // A non-fatal error like a database write error due to
+                    // multiple threads trying to write means this run consumed
+                    // its trigger but did no useful work.
+                    // Retrigger the workflow after a delay.
+                    handle_workflow_error(&name, err)?;
+                    tokio::time::sleep(WORKFLOW_ERROR_RETRY_DELAY).await;
+                    tx.trigger(&"retry after error");
+                }
                 _ => (),
             }
 

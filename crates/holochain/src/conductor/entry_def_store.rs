@@ -4,8 +4,7 @@ use super::Conductor;
 use crate::core::ribosome::guest_callback::entry_defs::EntryDefsHostAccess;
 use crate::core::ribosome::guest_callback::entry_defs::EntryDefsInvocation;
 use crate::core::ribosome::guest_callback::entry_defs::EntryDefsResult;
-use crate::core::ribosome::real_ribosome::RealRibosome;
-use crate::core::ribosome::RibosomeT;
+use crate::core::ribosome::Ribosome;
 use error::EntryDefStoreError;
 use error::EntryDefStoreResult;
 use holo_hash::*;
@@ -52,13 +51,13 @@ pub(crate) async fn get_entry_def(
 /// Get all the [EntryDef] for this dna
 #[cfg_attr(feature = "instrument", tracing::instrument(skip(ribosome)))]
 pub(crate) async fn get_entry_defs(
-    ribosome: RealRibosome,
+    ribosome: Ribosome,
 ) -> EntryDefStoreResult<Vec<(EntryDefBufferKey, EntryDef)>> {
     let invocation = EntryDefsInvocation;
 
     // Get the zomes hashes
     let zomes = ribosome
-        .dna_def_hashed()
+        .dna_def()
         .integrity_zomes
         .iter()
         .cloned()
@@ -108,10 +107,9 @@ pub(crate) async fn get_entry_defs(
 mod tests {
     use super::EntryDefBufferKey;
     use crate::conductor::Conductor;
-    use holo_hash::{fixt::AgentPubKeyFixturator, HasHash};
+    use crate::sweettest::SweetDnaFile;
     use holochain_state::prelude::test_db_dir;
     use holochain_types::prelude::*;
-    use holochain_types::test_utils::fake_dna_zomes;
     use holochain_wasm_test_utils::TestWasm;
 
     #[tokio::test(flavor = "multi_thread")]
@@ -122,14 +120,9 @@ mod tests {
         let db_dir = test_db_dir();
         let handle = Conductor::builder()
             .with_data_root_path(db_dir.path().to_path_buf().into())
-            .test(&[])
+            .test()
             .await
             .unwrap();
-
-        let dna_file = fake_dna_zomes(
-            "",
-            vec![(TestWasm::EntryDefs.into(), TestWasm::EntryDefs.into())],
-        );
 
         // Get expected entry defs
         let post_def = EntryDef {
@@ -144,28 +137,35 @@ mod tests {
             required_validations: 5.into(),
             ..Default::default()
         };
-        let dna_wasm = DnaWasmHashed::from_content(TestWasm::EntryDefs.into())
+
+        let (dna_file, _, _) =
+            SweetDnaFile::unique_from_test_wasms(vec![TestWasm::EntryDefs, TestWasm::EntryDefs])
+                .await;
+        handle
+            .clone()
+            .install_app_minimal("test".into(), None, &[(dna_file.clone(), None)], None, None)
             .await
-            .into_hash();
+            .unwrap();
 
         let post_def_key = EntryDefBufferKey {
-            zome: IntegrityZomeDef::from_hash(dna_wasm.clone()),
+            zome: IntegrityZomeDef::from_hash(WasmHash::from_raw_39(
+                dna_file.dna_def().integrity_zomes[0]
+                    .1
+                    .zome_hash()
+                    .into_inner(),
+            )),
             entry_def_position: 0.into(),
         };
         let comment_def_key = EntryDefBufferKey {
-            zome: IntegrityZomeDef::from_hash(dna_wasm),
+            zome: IntegrityZomeDef::from_hash(WasmHash::from_raw_39(
+                dna_file.dna_def().integrity_zomes[1]
+                    .1
+                    .zome_hash()
+                    .into_inner(),
+            )),
             entry_def_position: 1.into(),
         };
 
-        let fake_agent = ::fixt::fixt!(AgentPubKey);
-
-        handle
-            .register_dna_file(
-                CellId::new(dna_file.dna_hash().clone(), fake_agent),
-                dna_file,
-            )
-            .await
-            .unwrap();
         // Check entry defs are here
         assert_eq!(handle.get_entry_def(&post_def_key), Some(post_def.clone()));
         assert_eq!(
@@ -178,7 +178,12 @@ mod tests {
         // Restart conductor and check defs are still here
         let handle = Conductor::builder()
             .with_data_root_path(db_dir.path().to_path_buf().into())
-            .test(&[])
+            .test()
+            .await
+            .unwrap();
+
+        handle
+            .load_wasms_into_ribosome_for_installed_app(&"test".into())
             .await
             .unwrap();
 

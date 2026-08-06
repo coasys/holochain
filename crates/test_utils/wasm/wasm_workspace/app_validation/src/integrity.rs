@@ -21,9 +21,10 @@ pub enum LinkTypes {
 #[hdk_extern]
 pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
     match op.flattened::<EntryTypes, LinkTypes>()? {
-        FlatOp::StoreRecord(store_record) => {
+        FlatOp::CreateRecord(store_record) => {
             match store_record {
-                OpRecord::CreateLink { target_address, .. } => {
+                OpRecord::CreateLink { action, .. } => {
+                    let target_address = action.data.target_address.clone();
                     let action_hash = target_address.into_action_hash().ok_or(wasm_error!(
                         WasmErrorInner::Guest("No action hash associated with link".to_string())
                     ))?;

@@ -15,33 +15,37 @@ pub async fn spawn_holochain_p2p(
     actor::HolochainP2pActor::create(config, lair_client).await
 }
 
-/// Callback function to retrieve a peer meta database handle for a dna hash.
+/// Callback function to retrieve a peer meta store for a dna hash.
 pub type GetDbPeerMeta = Arc<
-    dyn Fn(DnaHash) -> BoxFut<'static, HolochainP2pResult<DbWrite<DbKindPeerMetaStore>>>
+    dyn Fn(
+            DnaHash,
+        ) -> BoxFut<
+            'static,
+            HolochainP2pResult<holochain_state::peer_metadata_store::PeerMetaStore>,
+        >
         + 'static
         + Send
         + Sync,
 >;
 
-/// Callback function to retrieve an op store database handle for a dna hash.
-pub type GetDbOpStore = Arc<
-    dyn Fn(DnaHash) -> BoxFut<'static, HolochainP2pResult<DbWrite<DbKindDht>>>
+/// Callback function to retrieve the per-DNA [`DhtStore`] used by the K2
+/// op-store backend.
+///
+/// The returned store is write-capable: it serves K2's reads (time-slice,
+/// `retrieve_ops`, etc.) **and** K2's writes (`store_slice_hash`).
+///
+/// [`DhtStore`]: holochain_state::DhtStore
+pub type GetDhtStore = Arc<
+    dyn Fn(DnaHash) -> BoxFut<'static, HolochainP2pResult<holochain_state::DhtStore>>
         + 'static
         + Send
         + Sync,
 >;
 
-/// Callback function to retrieve a cache database handle for a dna hash.
-pub type GetDbCache = Arc<
-    dyn Fn(DnaHash) -> BoxFut<'static, HolochainP2pResult<DbWrite<DbKindCache>>>
-        + 'static
-        + Send
-        + Sync,
+/// Callback function to retrieve a conductor store.
+pub type GetConductorStore = Arc<
+    dyn Fn() -> BoxFut<'static, holochain_state::conductor::ConductorStore> + 'static + Send + Sync,
 >;
-
-/// Callback function to retrieve a conductor database.
-pub type GetDbConductor =
-    Arc<dyn Fn() -> BoxFut<'static, DbWrite<DbKindConductor>> + 'static + Send + Sync>;
 
 /// Configure reporting.
 #[derive(Default)]
@@ -56,13 +60,13 @@ pub enum ReportConfig {
 
 /// HolochainP2p config struct.
 pub struct HolochainP2pConfig {
-    /// Callback function to retrieve a peer meta database handle for a dna hash.
+    /// Callback function to retrieve a [`holochain_state::peer_metadata_store::PeerMetaStore`] for a dna hash.
     ///
     /// **Must be set explicitly** — the [`Default`] value panics when called. Example:
     ///
     /// ```ignore
     /// get_db_peer_meta: Arc::new(move |dna_hash| {
-    ///     let res = spaces.peer_meta(&dna_hash);
+    ///     let res = spaces.peer_meta_store(&dna_hash);
     ///     Box::pin(async move { res.map_err(HolochainP2pError::other) })
     /// }),
     /// ```
@@ -73,54 +77,46 @@ pub struct HolochainP2pConfig {
     /// Default: 10 s
     pub peer_meta_pruning_interval_ms: u64,
 
-    /// Callback function to retrieve an op store database handle for a dna hash.
+    /// Callback function to retrieve the per-DNA [`DhtStore`] used by the
+    /// K2 op-store backend.
     ///
-    /// Called when a new space is created to open the DHT [`DbWrite`] for that DNA. Gossip uses
-    /// the returned handle to read and write ops for that space.
+    /// Called when a new space is created. The returned store handles all
+    /// K2 reads (time-slice, `retrieve_ops`, etc.) and writes
+    /// (`store_slice_hash`) against the `holochain_data` DHT database for
+    /// that DNA.
     ///
     /// **Must be set explicitly** — the [`Default`] value panics when called. Example:
     ///
     /// ```ignore
-    /// get_db_op_store: Arc::new(move |dna_hash| {
-    ///     let res = spaces.dht(&dna_hash);
+    /// get_dht_store: Arc::new(move |dna_hash| {
+    ///     let res = spaces.dht_store(&dna_hash);
     ///     Box::pin(async move { res.map_err(HolochainP2pError::other) })
     /// }),
     /// ```
-    pub get_db_op_store: GetDbOpStore,
-
-    /// Callback function to retrieve a cache database handle for a dna hash.
     ///
-    /// Called when a new space is created to open the cache [`DbWrite`] for that DNA.
-    /// The returned handle is used alongside [`get_db_op_store`](Self::get_db_op_store)
-    /// to report the total local op count to gossip.
+    /// [`DhtStore`]: holochain_state::DhtStore
+    pub get_dht_store: GetDhtStore,
+
+    /// Callback function to retrieve the conductor store.
     ///
     /// **Must be set explicitly** — the [`Default`] value panics when called. Example:
     ///
     /// ```ignore
-    /// get_db_cache: Arc::new(move |dna_hash| {
-    ///     let res = spaces.cache(&dna_hash);
-    ///     Box::pin(async move { res.map_err(HolochainP2pError::other) })
+    /// get_conductor_store: Arc::new(|| {
+    ///     let res = conductor_store.clone();
+    ///     Box::pin(async move { res })
     /// }),
     /// ```
-    pub get_db_cache: GetDbCache,
-
-    /// Callback function to retrieve the conductor database handle.
-    ///
-    /// **Must be set explicitly** — the [`Default`] value panics when called. Example:
-    ///
-    /// ```ignore
-    /// get_conductor_db: Arc::new(|| {
-    ///     let res = conductor_db.clone();
-    ///     Box::pin(async move { Ok(res) })
-    /// }),
-    /// ```
-    pub get_conductor_db: GetDbConductor,
+    pub get_conductor_store: GetConductorStore,
 
     /// The arc factor to apply to target arc hints.
     pub target_arc_factor: u32,
 
-    /// Authentication material if required by sbd/signal/bootstrap services.
-    pub auth_material: Option<Vec<u8>>,
+    /// Authentication material if required by the bootstrap service.
+    pub auth_material_bootstrap: Option<Vec<u8>>,
+
+    /// Authentication material if required by the relay service.
+    pub auth_material_relay: Option<Vec<u8>>,
 
     /// Configuration to pass to Kitsune2.
     ///
@@ -171,7 +167,14 @@ impl std::fmt::Debug for HolochainP2pConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut dbg = f.debug_struct("HolochainP2pConfig");
         dbg.field("compat", &self.compat);
-        dbg.field("auth_material", &self.auth_material);
+        dbg.field(
+            "auth_material_bootstrap",
+            &self.auth_material_bootstrap.as_ref().map(|_| "<redacted>"),
+        );
+        dbg.field(
+            "auth_material_relay",
+            &self.auth_material_relay.as_ref().map(|_| "<redacted>"),
+        );
         dbg.field("request_timeout", &self.request_timeout);
         dbg.field("target_arc_factor", &self.target_arc_factor);
         dbg.field("network_config", &self.network_config);
@@ -190,16 +193,15 @@ impl std::fmt::Debug for HolochainP2pConfig {
 impl Default for HolochainP2pConfig {
     /// Returns a config with placeholder values.
     ///
-    /// The database callbacks (`get_db_peer_meta`, `get_db_op_store`, `get_db_cache`,
-    /// `get_conductor_db`) all panic with `unimplemented!()` when invoked — they will
+    /// The database callbacks (`get_db_peer_meta`, `get_dht_store`,
+    /// `get_conductor_store`) all panic with `unimplemented!()` when invoked — they will
     /// be called the first time a space is created, so **always supply concrete
     /// implementations** before passing this config to [`spawn_holochain_p2p`].
     /// Use struct-update syntax rather than relying on this default entirely:
     ///
     /// ```ignore
     /// let config = HolochainP2pConfig {
-    ///     get_db_op_store: Arc::new(move |dna_hash| { ... }),
-    ///     get_db_cache: Arc::new(move |dna_hash| { ... }),
+    ///     get_dht_store: Arc::new(move |dna_hash| { ... }),
     ///     ..HolochainP2pConfig::default()
     /// };
     /// ```
@@ -207,11 +209,11 @@ impl Default for HolochainP2pConfig {
         Self {
             get_db_peer_meta: Arc::new(|_| unimplemented!()),
             peer_meta_pruning_interval_ms: 10_000,
-            get_db_op_store: Arc::new(|_| unimplemented!()),
-            get_db_cache: Arc::new(|_| unimplemented!()),
-            get_conductor_db: Arc::new(|| unimplemented!()),
+            get_dht_store: Arc::new(|_| unimplemented!()),
+            get_conductor_store: Arc::new(|| unimplemented!()),
             target_arc_factor: 1,
-            auth_material: None,
+            auth_material_bootstrap: None,
+            auth_material_relay: None,
             network_config: None,
             compat: Default::default(),
             request_timeout: Duration::from_secs(60),
@@ -227,10 +229,10 @@ impl Default for HolochainP2pConfig {
     }
 }
 
-/// See [NetworkCompatParams::proto_ver].
+/// See [`NetworkCompatParams::proto_ver`].
 pub const HCP2P_PROTO_VER: u32 = 2;
 
-/// Some parameters used as part of a protocol compatibility check during tx5 preflight
+/// Some parameters used as part of a protocol compatibility check during preflight
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NetworkCompatParams {
     /// The current protocol version. This should be incremented whenever

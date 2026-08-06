@@ -13,7 +13,7 @@ async fn check_or_run_zome_init_triggers_zome_initialization() {
 
     // Wait for integration workflow to complete
     retry_fn_until_timeout(
-        || async { conductor.all_ops_integrated(dna.dna_hash()).unwrap() },
+        || async { conductor.all_ops_integrated(dna.dna_hash()).await.unwrap() },
         None,
         None,
     )
@@ -23,7 +23,7 @@ async fn check_or_run_zome_init_triggers_zome_initialization() {
     // Take state dump before calling check_or_run_zome_init
     let before_state_dump = conductor
         .raw_handle()
-        .dump_full_cell_state(cell_id, None)
+        .dump_full_cell_state(cell_id, None, None)
         .await
         .expect("Failed to get state dump");
 
@@ -39,7 +39,7 @@ async fn check_or_run_zome_init_triggers_zome_initialization() {
 
     // Wait for integration workflow to complete
     retry_fn_until_timeout(
-        || async { conductor.all_ops_integrated(dna.dna_hash()).unwrap() },
+        || async { conductor.all_ops_integrated(dna.dna_hash()).await.unwrap() },
         None,
         None,
     )
@@ -49,7 +49,7 @@ async fn check_or_run_zome_init_triggers_zome_initialization() {
     // Take state dump after calling check_or_run_zome_init
     let after_state_dump = conductor
         .raw_handle()
-        .dump_full_cell_state(cell_id, None)
+        .dump_full_cell_state(cell_id, None, None)
         .await
         .expect("Failed to get state dump");
 
@@ -76,7 +76,7 @@ async fn check_or_run_zome_init_does_nothing_if_already_initialized() {
 
     // Wait for integration workflow to complete
     retry_fn_until_timeout(
-        || async { conductor.all_ops_integrated(dna.dna_hash()).unwrap() },
+        || async { conductor.all_ops_integrated(dna.dna_hash()).await.unwrap() },
         None,
         None,
     )
@@ -86,7 +86,7 @@ async fn check_or_run_zome_init_does_nothing_if_already_initialized() {
     // Take state dump before calling check_or_run_zome_init
     let before_state_dump = conductor
         .raw_handle()
-        .dump_full_cell_state(cell_id, None)
+        .dump_full_cell_state(cell_id, None, None)
         .await
         .expect("Failed to get state dump");
 
@@ -102,7 +102,7 @@ async fn check_or_run_zome_init_does_nothing_if_already_initialized() {
 
     // Wait for integration workflow to complete
     retry_fn_until_timeout(
-        || async { conductor.all_ops_integrated(dna.dna_hash()).unwrap() },
+        || async { conductor.all_ops_integrated(dna.dna_hash()).await.unwrap() },
         None,
         None,
     )
@@ -112,7 +112,7 @@ async fn check_or_run_zome_init_does_nothing_if_already_initialized() {
     // Take state dump after calling check_or_run_zome_init
     let after_state_dump = conductor
         .raw_handle()
-        .dump_full_cell_state(cell_id, None)
+        .dump_full_cell_state(cell_id, None, None)
         .await
         .expect("Failed to get state dump");
 

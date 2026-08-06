@@ -261,7 +261,7 @@ async fn self_validation_get_missing() {
             let invoked_must_get_action = invoked_must_get_action.clone();
             let invoked_must_get_entry = invoked_must_get_entry.clone();
             move |api, op: Op| match op {
-                Op::StoreRecord(store_record) => {
+                Op::CreateRecord(store_record) => {
                     match store_record.record.action().entry_type() {
                         Some(EntryType::App(app_entry_def)) => {
                             if app_entry_def.entry_index.0 != 1 {
@@ -481,7 +481,10 @@ async fn zero_arc_get_details_discover_updates() {
 
             false
         },
-        None,
+        // A zero-arc node fetches this over the network via direct get
+        // requests, which can exceed the 5s default on slower CI runners
+        // (notably Windows); allow some headroom to avoid flaky failures.
+        Some(15_000),
         None,
     )
     .await
@@ -507,7 +510,10 @@ async fn zero_arc_get_details_discover_updates() {
                 false
             }
         },
-        None,
+        // A zero-arc node fetches this over the network via direct get
+        // requests, which can exceed the 5s default on slower CI runners
+        // (notably Windows); allow some headroom to avoid flaky failures.
+        Some(15_000),
         None,
     )
     .await
@@ -592,7 +598,10 @@ async fn zero_arc_delete_link_get_links() {
 
             links.iter().any(|link| link.create_link_hash == link_hash)
         },
-        None,
+        // A zero-arc node fetches this over the network via direct get
+        // requests, which can exceed the 5s default on slower CI runners
+        // (notably Windows); allow some headroom to avoid flaky failures.
+        Some(15_000),
         None,
     )
     .await

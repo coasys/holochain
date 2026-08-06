@@ -1,14 +1,13 @@
-use crate::core::ribosome::CallContext;
+use crate::core::ribosome::{CallContext, Ribosome};
 use crate::core::ribosome::HostFnAccess;
 use crate::core::ribosome::RibosomeError;
-use crate::core::ribosome::RibosomeT;
 use holochain_types::prelude::*;
 use holochain_wasmer_host::prelude::*;
 use std::sync::Arc;
 use wasmer::RuntimeError;
 
 pub fn x_25519_x_salsa20_poly1305_encrypt(
-    _ribosome: Arc<impl RibosomeT>,
+    _ribosome: Arc<Ribosome>,
     call_context: Arc<CallContext>,
     input: X25519XSalsa20Poly1305Encrypt,
 ) -> Result<XSalsa20Poly1305EncryptedData, RuntimeError> {
@@ -84,7 +83,7 @@ pub mod wasm_test {
             .await;
 
         let decrypt_input =
-            holochain_zome_types::x_salsa20_poly1305::X25519XSalsa20Poly1305Decrypt::new(
+            X25519XSalsa20Poly1305Decrypt::new(
                 bob_x25519,
                 alice_x25519,
                 encrypt_output.clone(),
@@ -97,7 +96,7 @@ pub mod wasm_test {
         assert_eq!(decrypt_output, Some(data.clone()),);
 
         let bad_decrypt_input =
-            holochain_zome_types::x_salsa20_poly1305::X25519XSalsa20Poly1305Decrypt::new(
+            X25519XSalsa20Poly1305Decrypt::new(
                 carol_x25519,
                 alice_x25519,
                 encrypt_output,

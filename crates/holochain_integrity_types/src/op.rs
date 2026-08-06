@@ -1,478 +1,12 @@
 //! # Dht Operations
 
-use crate::{
-    Action, ActionHashedContainer, ActionRef, ActionType, AppEntryDef, Create, CreateLink, Delete,
-    DeleteLink, Entry, EntryType, Record, SignedActionHashed, SignedHashed, Update,
-};
-use holo_hash::{ActionHash, AgentPubKey, EntryHash, HasHash, HashableContent};
+use crate::action::conversions::WrongActionError;
+use crate::action::{Action, ActionData, ActionType, EntryType};
+use crate::entry::Entry;
+use crate::record::{Record, SignedHashed};
+use holo_hash::{ActionHash, AgentPubKey, EntryHash};
 use holochain_serialized_bytes::prelude::*;
 use holochain_timestamp::Timestamp;
-
-/// These are the operations that can be applied to Holochain data.
-/// Every [`Action`] produces a set of operations.
-/// These operations are each sent to an authority for validation.
-///
-/// # Examples
-///
-/// Validate a new entry: <https://github.com/holochain/holochain/blob/develop/crates/test_utils/wasm/wasm_workspace/validate/src/integrity.rs>
-///
-/// ## Producing Operations
-/// The following is a list of the operations that can be produced by each [`Action`]:
-/// - Every [`Action`] produces a [`Op::RegisterAgentActivity`] and a [`Op::StoreRecord`].
-/// - [`Action::Create`] also produces a [`Op::StoreEntry`].
-/// - [`Action::Update`] also produces a [`Op::StoreEntry`] and a [`Op::RegisterUpdate`].
-/// - [`Action::Delete`] also produces a [`Op::RegisterDelete`].
-/// - [`Action::CreateLink`] also produces a [`Op::RegisterCreateLink`].
-/// - [`Action::DeleteLink`] also produces a [`Op::RegisterDeleteLink`].
-///
-/// ## Authorities
-/// There are three types of authorities in Holochain:
-///
-/// #### The Action Authority
-/// This set of authorities receives the [`Op::StoreRecord`].
-/// This is where you can implement your own logic for checking
-/// that it is valid to store any of the [`Action`] variants
-/// according to your own applications rules.
-///
-/// #### The Entry Authority
-/// This set of authorities receives the [`Op::StoreEntry`].
-/// This is where you can implement your own logic for checking
-/// that it is valid to store an [`Entry`].
-/// You can think of this as the "Create" from the CRUD acronym.
-///
-/// ##### Metadata
-/// The entry authority is also responsible for storing the metadata for each entry.
-/// They receive the [`Op::RegisterUpdate`] and [`Op::RegisterDelete`].
-/// This is where you can implement your own logic for checking that it is valid to
-/// update or delete any of the [`Entry`] types defined in your application.
-/// You can think of this as the "Update" and "Delete" from the CRUD acronym.
-///
-/// They receive the [`Op::RegisterCreateLink`] and [`Op::RegisterDeleteLink`].
-/// This is where you can implement your own logic for checking that it is valid to
-/// place a link on a link base.
-///
-/// #### The Chain Authority
-/// This set of authorities receives the [`Op::RegisterAgentActivity`].
-/// This is where you can implement your own logic for checking that it is valid to
-/// add a new [`Action`] to an agent source chain.
-/// You are not validating the individual record but the entire agents source chain.
-///
-/// ##### Author
-/// When authoring a new [`Action`] to your source chain, the
-/// validation will be run from the perspective of every authority.
-///
-/// ##### A note on metadata for the Action authority.
-/// Technically speaking the Action authority also receives and validates the
-/// [`Op::RegisterUpdate`] and [`Op::RegisterDelete`] but they run the same callback
-/// as the Entry authority because it would be inconsistent to have two separate
-/// validation outcomes for these ops.
-///
-/// ## Running Validation
-/// When the `fn validate(op: Op) -> ExternResult<ValidateCallbackResult>` is called
-/// it will be passed the operation variant for the authority that is
-/// actually running the validation.
-///
-/// For example the entry authority will be passed the [`Op::StoreEntry`] operation.
-/// The operations that can be applied to Holochain data.
-/// Operations beginning with `Store` are concerned with creating and
-/// storing data.
-/// Operations beginning with `Register` are concerned with registering
-/// metadata about the data.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, SerializedBytes)]
-pub enum Op {
-    /// Stores a new [`Record`] in the DHT.
-    /// This is the act of creating a new [`Action`]
-    /// and publishing it to the DHT.
-    /// Note that not all [`Action`]s contain an [`Entry`].
-    StoreRecord(StoreRecord),
-    /// Stores a new [`Entry`] in the DHT.
-    /// This is the act of creating a either a [`Action::Create`] or
-    /// a [`Action::Update`] and publishing it to the DHT.
-    /// These actions create a new instance of an [`Entry`].
-    StoreEntry(StoreEntry),
-    /// Registers an update from an instance of an [`Entry`] in the DHT.
-    /// This is the act of creating a [`Action::Update`] and
-    /// publishing it to the DHT.
-    /// Note that the [`Action::Update`] stores an new instance
-    /// of an [`Entry`] and registers it as an update to the original [`Entry`].
-    /// This operation is only concerned with registering the update.
-    RegisterUpdate(RegisterUpdate),
-    /// Registers a deletion of an instance of an [`Entry`] in the DHT.
-    /// This is the act of creating a [`Action::Delete`] and
-    /// publishing it to the DHT.
-    RegisterDelete(RegisterDelete),
-    /// Registers a new [`Action`] on an agent source chain.
-    /// This is the act of creating any [`Action`] and
-    /// publishing it to the DHT.
-    RegisterAgentActivity(RegisterAgentActivity),
-    /// Registers a link between two [`Entry`]s.
-    /// This is the act of creating a [`Action::CreateLink`] and
-    /// publishing it to the DHT.
-    /// The authority is the entry authority for the base [`Entry`].
-    RegisterCreateLink(RegisterCreateLink),
-    /// Deletes a link between two [`Entry`]s.
-    /// This is the act of creating a [`Action::DeleteLink`] and
-    /// publishing it to the DHT.
-    /// The delete always references a specific [`Action::CreateLink`].
-    RegisterDeleteLink(RegisterDeleteLink),
-}
-
-/// Stores a new [`Record`] in the DHT.
-/// This is the act of creating a new [`Action`]
-/// and publishing it to the DHT.
-/// Note that not all [`Action`]s contain an [`Entry`].
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, SerializedBytes)]
-pub struct StoreRecord {
-    /// The [`Record`] to store.
-    pub record: Record,
-}
-
-/// Stores a new [`Entry`] in the DHT.
-/// This is the act of creating a either a [`Action::Create`] or
-/// a [`Action::Update`] and publishing it to the DHT.
-/// These actions create a new instance of an [`Entry`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, SerializedBytes)]
-pub struct StoreEntry {
-    /// The signed and hashed [`EntryCreationAction`] that creates
-    /// a new instance of the [`Entry`].
-    pub action: SignedHashed<EntryCreationAction>,
-    /// The new [`Entry`] to store.
-    pub entry: Entry,
-}
-
-/// Registers an update from an instance of an [`Entry`] in the DHT.
-/// This is the act of creating a [`Action::Update`] and
-/// publishing it to the DHT.
-/// Note that the [`Action::Update`] stores an new instance
-/// of an [`Entry`] and registers it as an update to the original [`Entry`].
-/// This operation is only concerned with registering the update.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, SerializedBytes)]
-pub struct RegisterUpdate {
-    /// The signed and hashed [`Action::Update`] that registers the update.
-    pub update: SignedHashed<Update>,
-    /// The new [`Entry`] that is being updated to.
-    /// This will be [`None`] when the [`Entry`] being
-    /// created is [`EntryVisibility::Private`](crate::entry_def::EntryVisibility::Private).
-    pub new_entry: Option<Entry>,
-}
-
-/// Registers a deletion of an instance of an [`Entry`] in the DHT.
-/// This is the act of creating a [`Action::Delete`] and
-/// publishing it to the DHT.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, SerializedBytes)]
-pub struct RegisterDelete {
-    /// The signed and hashed [`Action::Delete`] that registers the deletion.
-    pub delete: SignedHashed<Delete>,
-}
-
-/// Registers a new [`Action`] on an agent source chain.
-/// This is the act of creating any [`Action`] and
-/// publishing it to the DHT.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, SerializedBytes)]
-pub struct RegisterAgentActivity {
-    /// The signed and hashed [`Action`] that is being registered.
-    pub action: SignedActionHashed,
-    /// Entries can be cached with agent authorities if
-    /// `cached_at_agent_activity` is set to true for an entries
-    /// definitions.
-    /// If it is cached for this action then this will be some.
-    pub cached_entry: Option<Entry>,
-}
-
-impl AsRef<SignedActionHashed> for RegisterAgentActivity {
-    fn as_ref(&self) -> &SignedActionHashed {
-        &self.action
-    }
-}
-
-/// Registers a link between two [`Entry`]s.
-/// This is the act of creating a [`Action::CreateLink`] and
-/// publishing it to the DHT.
-/// The authority is the entry authority for the base [`Entry`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, SerializedBytes)]
-pub struct RegisterCreateLink {
-    /// The signed and hashed [`Action::CreateLink`] that registers the link.
-    pub create_link: SignedHashed<CreateLink>,
-}
-
-/// Deletes a link between two [`Entry`]s.
-/// This is the act of creating a [`Action::DeleteLink`] and
-/// publishing it to the DHT.
-/// The delete always references a specific [`Action::CreateLink`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, SerializedBytes)]
-pub struct RegisterDeleteLink {
-    /// The signed and hashed [`Action::DeleteLink`] that registers the deletion.
-    pub delete_link: SignedHashed<DeleteLink>,
-    /// The link that is being deleted.
-    pub create_link: CreateLink,
-}
-
-impl Op {
-    /// Get the [`AgentPubKey`] for the author of this op.
-    pub fn author(&self) -> &AgentPubKey {
-        match self {
-            Op::StoreRecord(StoreRecord { record }) => record.action().author(),
-            Op::StoreEntry(StoreEntry { action, .. }) => action.hashed.author(),
-            Op::RegisterUpdate(RegisterUpdate { update, .. }) => &update.hashed.author,
-            Op::RegisterDelete(RegisterDelete { delete, .. }) => &delete.hashed.author,
-            Op::RegisterAgentActivity(RegisterAgentActivity { action, .. }) => {
-                action.hashed.author()
-            }
-            Op::RegisterCreateLink(RegisterCreateLink { create_link }) => {
-                &create_link.hashed.author
-            }
-            Op::RegisterDeleteLink(RegisterDeleteLink { delete_link, .. }) => {
-                &delete_link.hashed.author
-            }
-        }
-    }
-    /// Get the [`Timestamp`] for when this op was created.
-    pub fn timestamp(&self) -> Timestamp {
-        match self {
-            Op::StoreRecord(StoreRecord { record }) => record.action().timestamp(),
-            Op::StoreEntry(StoreEntry { action, .. }) => *action.hashed.timestamp(),
-            Op::RegisterUpdate(RegisterUpdate { update, .. }) => update.hashed.timestamp,
-            Op::RegisterDelete(RegisterDelete { delete, .. }) => delete.hashed.timestamp,
-            Op::RegisterAgentActivity(RegisterAgentActivity { action, .. }) => {
-                action.hashed.timestamp()
-            }
-            Op::RegisterCreateLink(RegisterCreateLink { create_link }) => {
-                create_link.hashed.timestamp
-            }
-            Op::RegisterDeleteLink(RegisterDeleteLink { delete_link, .. }) => {
-                delete_link.hashed.timestamp
-            }
-        }
-    }
-    /// Get the action sequence this op.
-    pub fn action_seq(&self) -> u32 {
-        match self {
-            Op::StoreRecord(StoreRecord { record }) => record.action().action_seq(),
-            Op::StoreEntry(StoreEntry { action, .. }) => *action.hashed.action_seq(),
-            Op::RegisterUpdate(RegisterUpdate { update, .. }) => update.hashed.action_seq,
-            Op::RegisterDelete(RegisterDelete { delete, .. }) => delete.hashed.action_seq,
-            Op::RegisterAgentActivity(RegisterAgentActivity { action, .. }) => {
-                action.hashed.action_seq()
-            }
-            Op::RegisterCreateLink(RegisterCreateLink { create_link }) => {
-                create_link.hashed.action_seq
-            }
-            Op::RegisterDeleteLink(RegisterDeleteLink { delete_link, .. }) => {
-                delete_link.hashed.action_seq
-            }
-        }
-    }
-
-    /// Get the [`ActionHash`] for the previous action from this op if there is one.
-    pub fn prev_action(&self) -> Option<&ActionHash> {
-        match self {
-            Op::StoreRecord(StoreRecord { record }) => record.action().prev_action(),
-            Op::StoreEntry(StoreEntry { action, .. }) => Some(action.hashed.prev_action()),
-            Op::RegisterUpdate(RegisterUpdate { update, .. }) => Some(&update.hashed.prev_action),
-            Op::RegisterDelete(RegisterDelete { delete, .. }) => Some(&delete.hashed.prev_action),
-            Op::RegisterAgentActivity(RegisterAgentActivity { action, .. }) => {
-                action.hashed.prev_action()
-            }
-            Op::RegisterCreateLink(RegisterCreateLink { create_link }) => {
-                Some(&create_link.hashed.prev_action)
-            }
-            Op::RegisterDeleteLink(RegisterDeleteLink { delete_link, .. }) => {
-                Some(&delete_link.hashed.prev_action)
-            }
-        }
-    }
-
-    /// Get the [`ActionType`] of this op.
-    pub fn action_type(&self) -> ActionType {
-        match self {
-            Op::StoreRecord(StoreRecord { record }) => record.action().action_type(),
-            Op::StoreEntry(StoreEntry { action, .. }) => action.hashed.action_type(),
-            Op::RegisterUpdate(RegisterUpdate { .. }) => ActionType::Update,
-            Op::RegisterDelete(RegisterDelete { .. }) => ActionType::Delete,
-            Op::RegisterAgentActivity(RegisterAgentActivity { action, .. }) => {
-                action.hashed.action_type()
-            }
-            Op::RegisterCreateLink(RegisterCreateLink { .. }) => ActionType::CreateLink,
-            Op::RegisterDeleteLink(RegisterDeleteLink { .. }) => ActionType::DeleteLink,
-        }
-    }
-
-    /// Get the entry-related data for this op, if applicable
-    pub fn entry_data(&self) -> Option<(&EntryHash, &EntryType)> {
-        match self {
-            Op::StoreRecord(StoreRecord { record }) => record.action().entry_data(),
-            Op::StoreEntry(StoreEntry { action, .. }) => {
-                Some((action.hashed.entry_hash(), action.hashed.entry_type()))
-            }
-            Op::RegisterUpdate(RegisterUpdate { update, .. }) => {
-                Some((&update.hashed.entry_hash, &update.hashed.entry_type))
-            }
-            Op::RegisterAgentActivity(RegisterAgentActivity { action, .. }) => {
-                action.hashed.entry_data()
-            }
-            Op::RegisterDelete(_) | Op::RegisterCreateLink(_) | Op::RegisterDeleteLink(_) => None,
-        }
-    }
-
-    /// Get the [`ActionHash`] for this [`Op`].
-    pub fn action_hash(&self) -> &ActionHash {
-        match self {
-            Op::StoreRecord(StoreRecord { record }) => record.action_hash(),
-            Op::StoreEntry(StoreEntry { action, .. }) => action.hashed.as_hash(),
-            Op::RegisterUpdate(RegisterUpdate { update, .. }) => update.hashed.as_hash(),
-            Op::RegisterDelete(RegisterDelete { delete, .. }) => delete.hashed.as_hash(),
-            Op::RegisterAgentActivity(RegisterAgentActivity { action, .. }) => {
-                action.hashed.action_hash()
-            }
-            Op::RegisterCreateLink(RegisterCreateLink { create_link }) => {
-                create_link.hashed.as_hash()
-            }
-            Op::RegisterDeleteLink(RegisterDeleteLink { delete_link, .. }) => {
-                delete_link.hashed.as_hash()
-            }
-        }
-    }
-}
-
-/// Either a [`Action::Create`] or a [`Action::Update`].
-/// These actions both create a new instance of an [`Entry`].
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, SerializedBytes, Eq)]
-pub enum EntryCreationAction {
-    /// A [`Action::Create`] that creates a new instance of an [`Entry`].
-    Create(Create),
-    /// A [`Action::Update`] that creates a new instance of an [`Entry`].
-    Update(Update),
-}
-
-impl EntryCreationAction {
-    /// The author of this action.
-    pub fn author(&self) -> &AgentPubKey {
-        match self {
-            EntryCreationAction::Create(Create { author, .. })
-            | EntryCreationAction::Update(Update { author, .. }) => author,
-        }
-    }
-    /// The [`Timestamp`] for this action.
-    pub fn timestamp(&self) -> &Timestamp {
-        match self {
-            EntryCreationAction::Create(Create { timestamp, .. })
-            | EntryCreationAction::Update(Update { timestamp, .. }) => timestamp,
-        }
-    }
-    /// The action sequence number of this action.
-    pub fn action_seq(&self) -> &u32 {
-        match self {
-            EntryCreationAction::Create(Create { action_seq, .. })
-            | EntryCreationAction::Update(Update { action_seq, .. }) => action_seq,
-        }
-    }
-    /// The previous [`ActionHash`] of the previous action in the source chain.
-    pub fn prev_action(&self) -> &ActionHash {
-        match self {
-            EntryCreationAction::Create(Create { prev_action, .. })
-            | EntryCreationAction::Update(Update { prev_action, .. }) => prev_action,
-        }
-    }
-    /// The [`EntryType`] of the [`Entry`] being created.
-    pub fn entry_type(&self) -> &EntryType {
-        match self {
-            EntryCreationAction::Create(Create { entry_type, .. })
-            | EntryCreationAction::Update(Update { entry_type, .. }) => entry_type,
-        }
-    }
-    /// The [`EntryHash`] of the [`Entry`] being created.
-    pub fn entry_hash(&self) -> &EntryHash {
-        match self {
-            EntryCreationAction::Create(Create { entry_hash, .. })
-            | EntryCreationAction::Update(Update { entry_hash, .. }) => entry_hash,
-        }
-    }
-    /// The [`AppEntryDef`] of the [`Entry`] being created if it
-    /// is an application defined [`Entry`].
-    pub fn app_entry_def(&self) -> Option<&AppEntryDef> {
-        match self.entry_type() {
-            EntryType::App(app_entry_def) => Some(app_entry_def),
-            _ => None,
-        }
-    }
-
-    /// Returns `true` if this action creates an [`EntryType::AgentPubKey`] [`Entry`].
-    pub fn is_agent_entry_type(&self) -> bool {
-        matches!(self.entry_type(), EntryType::AgentPubKey)
-    }
-
-    /// Returns `true` if this action creates an [`EntryType::CapClaim`] [`Entry`].
-    pub fn is_cap_claim_entry_type(&self) -> bool {
-        matches!(self.entry_type(), EntryType::CapClaim)
-    }
-
-    /// Returns `true` if this action creates an [`EntryType::CapGrant`] [`Entry`].
-    pub fn is_cap_grant_entry_type(&self) -> bool {
-        matches!(self.entry_type(), EntryType::CapGrant)
-    }
-
-    /// Get the [`ActionType`] for this.
-    pub fn action_type(&self) -> ActionType {
-        match self {
-            EntryCreationAction::Create(_) => ActionType::Create,
-            EntryCreationAction::Update(_) => ActionType::Update,
-        }
-    }
-}
-
-/// Allows a [`EntryCreationAction`] to hash the same bytes as
-/// the equivalent [`Action`] variant without needing to clone the action.
-impl HashableContent for EntryCreationAction {
-    type HashType = holo_hash::hash_type::Action;
-
-    fn hash_type(&self) -> Self::HashType {
-        use holo_hash::PrimitiveHashType;
-        holo_hash::hash_type::Action::new()
-    }
-
-    fn hashable_content(&self) -> holo_hash::HashableContentBytes {
-        let h = match self {
-            EntryCreationAction::Create(create) => ActionRef::Create(create),
-            EntryCreationAction::Update(update) => ActionRef::Update(update),
-        };
-        let sb = SerializedBytes::from(UnsafeBytes::from(
-            holochain_serialized_bytes::encode(&h).expect("Could not serialize HashableContent"),
-        ));
-        holo_hash::HashableContentBytes::Content(sb)
-    }
-}
-
-impl From<EntryCreationAction> for Action {
-    fn from(e: EntryCreationAction) -> Self {
-        match e {
-            EntryCreationAction::Create(c) => Action::Create(c),
-            EntryCreationAction::Update(u) => Action::Update(u),
-        }
-    }
-}
-
-impl From<Create> for EntryCreationAction {
-    fn from(c: Create) -> Self {
-        EntryCreationAction::Create(c)
-    }
-}
-
-impl From<Update> for EntryCreationAction {
-    fn from(u: Update) -> Self {
-        EntryCreationAction::Update(u)
-    }
-}
-
-impl TryFrom<Action> for EntryCreationAction {
-    type Error = crate::WrongActionError;
-    fn try_from(value: Action) -> Result<Self, Self::Error> {
-        match value {
-            Action::Create(h) => Ok(EntryCreationAction::Create(h)),
-            Action::Update(h) => Ok(EntryCreationAction::Update(h)),
-            _ => Err(crate::WrongActionError(format!("{value:?}"))),
-        }
-    }
-}
 
 /// A utility trait for associating a data enum
 /// with a unit enum that has the same variants.
@@ -515,203 +49,450 @@ pub enum UnitEnumEither<E: UnitEnum> {
     Unit(E::Unit),
 }
 
+/// A DHT operation produced by an action and validated by an authority.
+///
+/// Variants carry the [`SignedHashed<Action>`] directly; consumers inspect
+/// `action.hashed.content.data` ([`ActionData`]) to discriminate, rather than
+/// matching distinct typed per-variant action structs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, SerializedBytes)]
+pub enum Op {
+    /// Stores a [`Record`] (validated by the action authority).
+    CreateRecord(CreateRecord),
+    /// Stores an [`Entry`] (validated by the entry authority). The action's
+    /// [`ActionData`] is `Create` or `Update`.
+    CreateEntry(CreateEntry),
+    /// Registers an update against an entry. The action's data is `Update`.
+    Update(Update),
+    /// Registers a delete against an entry. The action's data is `Delete`.
+    Delete(Delete),
+    /// Registers an action on an agent's source chain (validated by the chain
+    /// authority); produced for every action.
+    AgentActivity(AgentActivity),
+    /// Registers a link. The action's data is `CreateLink`.
+    CreateLink(CreateLink),
+    /// Registers a link deletion. The action's data is `DeleteLink`.
+    DeleteLink(DeleteLink),
+}
+
+/// See [`Op::CreateRecord`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, SerializedBytes)]
+pub struct CreateRecord {
+    /// The record being stored.
+    pub record: Record,
+}
+
+/// See [`Op::CreateEntry`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, SerializedBytes)]
+pub struct CreateEntry {
+    /// The signed action whose data is `Create` or `Update`.
+    pub action: SignedHashed<Action>,
+    /// The entry being stored.
+    pub entry: Entry,
+}
+
+/// See [`Op::Update`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, SerializedBytes)]
+pub struct Update {
+    /// The signed `Update` action.
+    pub update: SignedHashed<Action>,
+    /// The new entry, absent when the entry is private.
+    pub new_entry: Option<Entry>,
+}
+
+/// See [`Op::Delete`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, SerializedBytes)]
+pub struct Delete {
+    /// The signed `Delete` action.
+    pub delete: SignedHashed<Action>,
+}
+
+/// See [`Op::AgentActivity`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, SerializedBytes)]
+pub struct AgentActivity {
+    /// The signed action being registered.
+    pub action: SignedHashed<Action>,
+    /// Optionally cached entry for agent-activity authorities.
+    pub cached_entry: Option<Entry>,
+}
+
+/// See [`Op::CreateLink`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, SerializedBytes)]
+pub struct CreateLink {
+    /// The signed `CreateLink` action.
+    pub create_link: SignedHashed<Action>,
+}
+
+/// See [`Op::DeleteLink`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, SerializedBytes)]
+pub struct DeleteLink {
+    /// The signed `DeleteLink` action.
+    pub delete_link: SignedHashed<Action>,
+    /// The original `CreateLink` action content being deleted.
+    pub create_link: Action,
+}
+
+impl CreateEntry {
+    /// Construct, validating that the action's data creates an entry.
+    pub fn new(action: SignedHashed<Action>, entry: Entry) -> Result<Self, WrongActionError> {
+        match &action.hashed.content.data {
+            ActionData::Create(_) | ActionData::Update(_) => Ok(Self { action, entry }),
+            other => Err(WrongActionError(format!(
+                "CreateEntry requires Create or Update action data, got {:?}",
+                other.action_type()
+            ))),
+        }
+    }
+}
+
+impl Update {
+    /// Construct, validating that the action's data is an `Update`.
+    pub fn new(
+        update: SignedHashed<Action>,
+        new_entry: Option<Entry>,
+    ) -> Result<Self, WrongActionError> {
+        match &update.hashed.content.data {
+            ActionData::Update(_) => Ok(Self { update, new_entry }),
+            other => Err(WrongActionError(format!(
+                "Update requires Update action data, got {:?}",
+                other.action_type()
+            ))),
+        }
+    }
+}
+
+impl Delete {
+    /// Construct, validating that the action's data is a `Delete`.
+    pub fn new(delete: SignedHashed<Action>) -> Result<Self, WrongActionError> {
+        match &delete.hashed.content.data {
+            ActionData::Delete(_) => Ok(Self { delete }),
+            other => Err(WrongActionError(format!(
+                "Delete requires Delete action data, got {:?}",
+                other.action_type()
+            ))),
+        }
+    }
+}
+
+impl CreateLink {
+    /// Construct, validating that the action's data is a `CreateLink`.
+    pub fn new(create_link: SignedHashed<Action>) -> Result<Self, WrongActionError> {
+        match &create_link.hashed.content.data {
+            ActionData::CreateLink(_) => Ok(Self { create_link }),
+            other => Err(WrongActionError(format!(
+                "CreateLink requires CreateLink action data, got {:?}",
+                other.action_type()
+            ))),
+        }
+    }
+}
+
+impl DeleteLink {
+    /// Construct, validating the delete action is a `DeleteLink`, the referenced
+    /// original action is a `CreateLink`, and the two share a base address.
+    ///
+    /// When the `hashing` feature is enabled, this also validates that the
+    /// create-link's own hash matches the delete's `link_add_address` (so the
+    /// delete actually targets the supplied create-link action, not merely a
+    /// different link that happens to share its base). That check needs real
+    /// hash computation, which isn't available in the minimal, no-default-features
+    /// build this crate supports for WASM zomes (see `hdi`'s dependency comment) —
+    /// callers that need the guarantee unconditionally should enable `hashing`.
+    pub fn new(
+        delete_link: SignedHashed<Action>,
+        create_link: Action,
+    ) -> Result<Self, WrongActionError> {
+        match (&delete_link.hashed.content.data, &create_link.data) {
+            (ActionData::DeleteLink(dl), ActionData::CreateLink(cl)) => {
+                if dl.base_address != cl.base_address {
+                    return Err(WrongActionError(
+                        "DeleteLink requires the DeleteLink and CreateLink to share a base address"
+                            .into(),
+                    ));
+                }
+                #[cfg(feature = "hashing")]
+                {
+                    use crate::action::ActionHashed;
+                    use holo_hash::HasHash;
+                    let create_link_hash =
+                        ActionHashed::from_content_sync(create_link.clone()).into_hash();
+                    if create_link_hash != dl.link_add_address {
+                        return Err(WrongActionError(format!(
+                            "DeleteLink requires the CreateLink action referenced by link_add_address ({}), got a CreateLink action hashing to {}",
+                            dl.link_add_address, create_link_hash
+                        )));
+                    }
+                }
+                Ok(Self {
+                    delete_link,
+                    create_link,
+                })
+            }
+            (dl, cl) => Err(WrongActionError(format!(
+                "DeleteLink requires DeleteLink and CreateLink action data, got {:?} and {:?}",
+                dl.action_type(),
+                cl.action_type()
+            ))),
+        }
+    }
+}
+
+impl Op {
+    /// The signed action backing this op.
+    fn signed_action(&self) -> &SignedHashed<Action> {
+        match self {
+            Op::CreateRecord(CreateRecord { record }) => &record.signed_action,
+            Op::CreateEntry(CreateEntry { action, .. }) => action,
+            Op::Update(Update { update, .. }) => update,
+            Op::Delete(Delete { delete }) => delete,
+            Op::AgentActivity(AgentActivity { action, .. }) => action,
+            Op::CreateLink(CreateLink { create_link }) => create_link,
+            Op::DeleteLink(DeleteLink { delete_link, .. }) => delete_link,
+        }
+    }
+
+    /// The author of this op's action.
+    pub fn author(&self) -> &AgentPubKey {
+        &self.signed_action().hashed.content.header.author
+    }
+
+    /// The authored timestamp of this op's action.
+    pub fn timestamp(&self) -> Timestamp {
+        self.signed_action().hashed.content.header.timestamp
+    }
+
+    /// The source-chain sequence of this op's action.
+    pub fn action_seq(&self) -> u32 {
+        self.signed_action().hashed.content.header.action_seq
+    }
+
+    /// The previous action hash, if any.
+    pub fn prev_action(&self) -> Option<&ActionHash> {
+        self.signed_action()
+            .hashed
+            .content
+            .header
+            .prev_action
+            .as_ref()
+    }
+
+    /// The action type of this op.
+    pub fn action_type(&self) -> ActionType {
+        self.signed_action().hashed.content.data.action_type()
+    }
+
+    /// The action hash of this op.
+    pub fn action_hash(&self) -> &ActionHash {
+        self.signed_action().as_hash()
+    }
+
+    /// The entry hash and type, for ops whose action creates an entry.
+    pub fn entry_data(&self) -> Option<(&EntryHash, &EntryType)> {
+        match &self.signed_action().hashed.content.data {
+            ActionData::Create(d) => Some((&d.entry_hash, &d.entry_type)),
+            ActionData::Update(d) => Some((&d.entry_hash, &d.entry_type)),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-
     use super::*;
-    use crate::{AppEntryBytes, EntryVisibility, Signature, SIGNATURE_BYTES};
-    use holo_hash::AnyLinkableHash;
+    use crate::action::{
+        Action, ActionData, ActionHashed, ActionHeader, CreateData, DeleteData, DeleteLinkData,
+    };
+    use crate::record::SignedHashed;
+    use crate::signature::Signature;
+    use holo_hash::{ActionHash, AgentPubKey, EntryHash, HasHash, HoloHashed};
+
+    fn signed_action(data: ActionData) -> SignedHashed<Action> {
+        let action = Action {
+            header: ActionHeader {
+                author: AgentPubKey::from_raw_36(vec![1u8; 36]),
+                timestamp: holochain_timestamp::Timestamp::from_micros(7),
+                action_seq: 1,
+                prev_action: Some(ActionHash::from_raw_36(vec![2u8; 36])),
+            },
+            data,
+        };
+        let hash = ActionHash::from_raw_36(vec![9u8; 36]);
+        SignedHashed::with_presigned(
+            HoloHashed::with_pre_hashed(action, hash),
+            Signature([0u8; 64]),
+        )
+    }
+
+    fn create_data() -> ActionData {
+        ActionData::Create(CreateData {
+            entry_type: EntryType::AgentPubKey,
+            entry_hash: EntryHash::from_raw_36(vec![3u8; 36]),
+        })
+    }
+
+    fn delete_data() -> ActionData {
+        ActionData::Delete(DeleteData {
+            deletes_address: ActionHash::from_raw_36(vec![4u8; 36]),
+            deletes_entry_address: EntryHash::from_raw_36(vec![5u8; 36]),
+        })
+    }
+
+    fn delete_link_data() -> ActionData {
+        ActionData::DeleteLink(DeleteLinkData {
+            base_address: EntryHash::from_raw_36(vec![6u8; 36]).into(),
+            link_add_address: ActionHash::from_raw_36(vec![7u8; 36]),
+        })
+    }
 
     #[test]
-    fn test_should_get_action_hash_for_store_record() {
-        let create = Create {
-            author: AgentPubKey::from_raw_36(vec![0; 36]),
-            timestamp: Timestamp::now(),
-            action_seq: 1,
-            prev_action: ActionHash::from_raw_36(vec![0; 36]),
-            entry_type: EntryType::App(AppEntryDef::new(
-                10.into(),
-                0.into(),
-                EntryVisibility::Public,
-            )),
-            entry_hash: EntryHash::from_raw_36(vec![0; 36]),
-            weight: crate::EntryRateWeight::default(),
-        };
+    fn store_entry_accepts_create_and_update() {
+        let entry = Entry::Agent(AgentPubKey::from_raw_36(vec![1u8; 36]));
+        assert!(CreateEntry::new(signed_action(create_data()), entry.clone()).is_ok());
 
-        let action = Action::Create(create);
-        let hashed = SignedHashed::new_unchecked(action, Signature([0; SIGNATURE_BYTES]));
+        let update = ActionData::Update(crate::action::UpdateData {
+            original_action_address: ActionHash::from_raw_36(vec![10u8; 36]),
+            original_entry_address: EntryHash::from_raw_36(vec![11u8; 36]),
+            entry_type: EntryType::AgentPubKey,
+            entry_hash: EntryHash::from_raw_36(vec![12u8; 36]),
+        });
+        assert!(CreateEntry::new(signed_action(update), entry).is_ok());
+    }
 
-        let record = Record::new(
-            SignedActionHashed::from(SignedHashed {
-                hashed: hashed.clone().into(),
-                signature: Signature([0; SIGNATURE_BYTES]),
+    #[test]
+    fn store_entry_rejects_non_entry_action() {
+        let entry = Entry::Agent(AgentPubKey::from_raw_36(vec![1u8; 36]));
+        assert!(CreateEntry::new(signed_action(delete_data()), entry).is_err());
+    }
+
+    #[test]
+    fn register_delete_rejects_non_delete() {
+        assert!(Delete::new(signed_action(create_data())).is_err());
+        assert!(Delete::new(signed_action(delete_data())).is_ok());
+    }
+
+    fn create_link_action(base: u8, target: u8) -> Action {
+        Action {
+            header: ActionHeader {
+                author: AgentPubKey::from_raw_36(vec![1u8; 36]),
+                timestamp: holochain_timestamp::Timestamp::from_micros(1),
+                action_seq: 0,
+                prev_action: None,
+            },
+            data: ActionData::CreateLink(crate::action::CreateLinkData {
+                base_address: EntryHash::from_raw_36(vec![base; 36]).into(),
+                target_address: EntryHash::from_raw_36(vec![target; 36]).into(),
+                zome_index: crate::action::ZomeIndex(0),
+                link_type: crate::link::LinkType(0),
+                tag: crate::link::LinkTag(vec![]),
             }),
-            None,
+        }
+    }
+
+    #[test]
+    fn register_delete_link_requires_delete_link_and_create_link() {
+        let create_link = create_link_action(6, 8);
+        let create_link_hash = ActionHashed::from_content_sync(create_link.clone()).into_hash();
+        let delete_link_data = ActionData::DeleteLink(DeleteLinkData {
+            base_address: EntryHash::from_raw_36(vec![6u8; 36]).into(),
+            link_add_address: create_link_hash,
+        });
+        assert!(DeleteLink::new(signed_action(delete_link_data), create_link).is_ok());
+    }
+
+    #[test]
+    fn register_delete_link_rejects_mismatched_base_address() {
+        // create_link's base differs from delete_link_data()'s base.
+        let create_link = create_link_action(9, 8);
+        assert!(DeleteLink::new(signed_action(delete_link_data()), create_link).is_err());
+    }
+
+    #[test]
+    fn register_delete_link_rejects_matching_base_but_wrong_hash() {
+        // create_link shares delete_link_data()'s base address, but isn't the
+        // exact CreateLink action referenced by link_add_address — a
+        // different CreateLink action can share a base with the one being
+        // deleted (e.g. two links from the same base with different targets).
+        let create_link = create_link_action(6, 8);
+        assert_ne!(
+            ActionHashed::from_content_sync(create_link.clone()).into_hash(),
+            match delete_link_data() {
+                ActionData::DeleteLink(DeleteLinkData {
+                    link_add_address, ..
+                }) => link_add_address,
+                _ => unreachable!(),
+            }
         );
-
-        let op = Op::StoreRecord(StoreRecord { record });
-        assert_eq!(op.action_hash(), hashed.as_hash());
+        assert!(DeleteLink::new(signed_action(delete_link_data()), create_link).is_err());
     }
 
     #[test]
-    fn test_should_get_action_hash_for_store_entry() {
-        let create = Create {
-            author: AgentPubKey::from_raw_36(vec![0; 36]),
-            timestamp: Timestamp::now(),
-            action_seq: 1,
-            prev_action: ActionHash::from_raw_36(vec![0; 36]),
-            entry_type: EntryType::App(AppEntryDef::new(
-                10.into(),
-                0.into(),
-                EntryVisibility::Public,
-            )),
-            entry_hash: EntryHash::from_raw_36(vec![0; 36]),
-            weight: crate::EntryRateWeight::default(),
-        };
-
-        let action = EntryCreationAction::Create(create);
-        let hashed = SignedHashed::new_unchecked(action, Signature([0; SIGNATURE_BYTES]));
-
-        let entry = Entry::App(AppEntryBytes(SerializedBytes::default()));
-
-        let op = Op::StoreEntry(StoreEntry {
-            action: hashed.clone(),
-            entry,
-        });
-        assert_eq!(op.action_hash(), hashed.as_hash());
-    }
-
-    #[test]
-    fn test_should_get_action_hash_for_register_update() {
-        let update = Update {
-            author: AgentPubKey::from_raw_36(vec![0; 36]),
-            timestamp: Timestamp::now(),
-            action_seq: 1,
-            prev_action: ActionHash::from_raw_36(vec![0; 36]),
-            entry_type: EntryType::App(AppEntryDef::new(
-                10.into(),
-                0.into(),
-                EntryVisibility::Public,
-            )),
-            entry_hash: EntryHash::from_raw_36(vec![0; 36]),
-            weight: crate::EntryRateWeight::default(),
-            original_action_address: ActionHash::from_raw_36(vec![0; 36]),
-            original_entry_address: EntryHash::from_raw_36(vec![0; 36]),
-        };
-        let hashed = SignedHashed::new_unchecked(update, Signature([0; SIGNATURE_BYTES]));
-
-        let op = Op::RegisterUpdate(RegisterUpdate {
-            update: hashed.clone(),
-            new_entry: None,
-        });
-        assert_eq!(op.action_hash(), hashed.as_hash());
-    }
-
-    #[test]
-    fn test_should_get_action_hash_for_register_delete() {
-        let delete = Delete {
-            action_seq: 1,
-            author: AgentPubKey::from_raw_36(vec![0; 36]),
-            timestamp: Timestamp::now(),
-            prev_action: ActionHash::from_raw_36(vec![0; 36]),
-            weight: crate::RateWeight::default(),
-            deletes_address: ActionHash::from_raw_36(vec![0; 36]),
-            deletes_entry_address: EntryHash::from_raw_36(vec![0; 36]),
-        };
-        let hashed = SignedHashed::new_unchecked(delete, Signature([0; SIGNATURE_BYTES]));
-
-        let op = Op::RegisterDelete(RegisterDelete {
-            delete: hashed.clone(),
-        });
-        assert_eq!(op.action_hash(), hashed.as_hash());
-    }
-
-    #[test]
-    fn test_should_get_action_hash_for_register_agent_activity() {
-        let action = Action::Create(Create {
-            author: AgentPubKey::from_raw_36(vec![0; 36]),
-            timestamp: Timestamp::now(),
-            action_seq: 1,
-            prev_action: ActionHash::from_raw_36(vec![0; 36]),
-            entry_type: EntryType::App(AppEntryDef::new(
-                10.into(),
-                0.into(),
-                EntryVisibility::Public,
-            )),
-            entry_hash: EntryHash::from_raw_36(vec![0; 36]),
-            weight: crate::EntryRateWeight::default(),
-        });
-
-        let hashed = SignedHashed::new_unchecked(action, Signature([0; SIGNATURE_BYTES]));
-
-        let hashed = SignedActionHashed::from(SignedHashed {
-            hashed: hashed.clone().into(),
-            signature: Signature([0; SIGNATURE_BYTES]),
-        });
-
-        let op = Op::RegisterAgentActivity(RegisterAgentActivity {
-            action: hashed.clone(),
+    fn op_accessors_read_header_and_data() {
+        let sah = signed_action(create_data());
+        let expected_hash = sah.as_hash().clone();
+        let op = Op::AgentActivity(AgentActivity {
+            action: sah,
             cached_entry: None,
         });
-        assert_eq!(op.action_hash(), hashed.as_hash());
+
+        assert_eq!(op.action_seq(), 1);
+        assert_eq!(op.author(), &AgentPubKey::from_raw_36(vec![1u8; 36]));
+        assert_eq!(
+            op.timestamp(),
+            holochain_timestamp::Timestamp::from_micros(7)
+        );
+        assert_eq!(
+            op.prev_action(),
+            Some(&ActionHash::from_raw_36(vec![2u8; 36]))
+        );
+        assert_eq!(op.action_type(), crate::action::ActionType::Create);
+        assert_eq!(op.action_hash(), &expected_hash);
+
+        let (entry_hash, entry_type) = op.entry_data().expect("create has entry data");
+        assert_eq!(entry_hash, &EntryHash::from_raw_36(vec![3u8; 36]));
+        assert_eq!(entry_type, &EntryType::AgentPubKey);
     }
 
     #[test]
-    fn test_should_get_action_hash_for_create_link() {
-        let mut link_hash = [0x84, 0x21, 0x24].to_vec();
-        link_hash.extend(vec![0; 36]);
-
-        let create_link = CreateLink {
-            zome_index: crate::ZomeIndex(0),
-            link_type: crate::LinkType(1),
-            base_address: AnyLinkableHash::from_raw_39(link_hash.clone()),
-            tag: crate::LinkTag(vec![0; 32]),
-            target_address: AnyLinkableHash::from_raw_39(link_hash),
-            timestamp: Timestamp::now(),
-            author: AgentPubKey::from_raw_36(vec![0; 36]),
-            prev_action: ActionHash::from_raw_36(vec![0; 36]),
-            weight: crate::RateWeight::default(),
-            action_seq: 1,
-        };
-        let hashed = SignedHashed::new_unchecked(create_link, Signature([0; SIGNATURE_BYTES]));
-
-        let op = Op::RegisterCreateLink(RegisterCreateLink {
-            create_link: hashed.clone(),
-        });
-        assert_eq!(op.action_hash(), hashed.as_hash());
+    fn op_entry_data_none_for_delete() {
+        let op = Op::Delete(Delete::new(signed_action(delete_data())).unwrap());
+        assert!(op.entry_data().is_none());
     }
 
     #[test]
-    fn test_should_get_action_hash_for_register_delete_link() {
-        let mut link_hash = [0x84, 0x21, 0x24].to_vec();
-        link_hash.extend(vec![0; 36]);
-
-        let delete_link = DeleteLink {
-            author: AgentPubKey::from_raw_36(vec![0; 36]),
-            action_seq: 1,
-            prev_action: ActionHash::from_raw_36(vec![0; 36]),
-            link_add_address: ActionHash::from_raw_36(vec![0; 36]),
-            base_address: AnyLinkableHash::from_raw_39(link_hash.clone()),
-            timestamp: Timestamp::now(),
-        };
-
-        let hashed =
-            SignedHashed::new_unchecked(delete_link.clone(), Signature([0; SIGNATURE_BYTES]));
-        let op = Op::RegisterDeleteLink(RegisterDeleteLink {
-            delete_link: hashed.clone(),
-            create_link: CreateLink {
-                zome_index: crate::ZomeIndex(0),
-                link_type: crate::LinkType(1),
-                base_address: AnyLinkableHash::from_raw_39(link_hash.clone()),
-                tag: crate::LinkTag(vec![0; 32]),
-                target_address: AnyLinkableHash::from_raw_39(link_hash),
-                timestamp: Timestamp::now(),
-                author: AgentPubKey::from_raw_36(vec![0; 36]),
-                prev_action: ActionHash::from_raw_36(vec![0; 36]),
-                weight: crate::RateWeight::default(),
-                action_seq: 1,
-            },
+    fn op_serde_roundtrip() {
+        let entry = Entry::Agent(AgentPubKey::from_raw_36(vec![1u8; 36]));
+        let store_entry =
+            Op::CreateEntry(CreateEntry::new(signed_action(create_data()), entry).unwrap());
+        let store_record = Op::CreateRecord(CreateRecord {
+            record: Record::new(signed_action(create_data()), crate::record::RecordEntry::NA),
         });
-        assert_eq!(op.action_hash(), hashed.as_hash());
+        for op in [store_entry, store_record] {
+            let bytes = holochain_serialized_bytes::encode(&op).unwrap();
+            let decoded: Op = holochain_serialized_bytes::decode(&bytes).unwrap();
+            assert_eq!(decoded, op);
+        }
+    }
+
+    #[test]
+    fn op_accessors_work_through_store_record() {
+        let sah = signed_action(create_data());
+        let expected_hash = sah.as_hash().clone();
+        let record = Record::new(sah, crate::record::RecordEntry::NA);
+        let op = Op::CreateRecord(CreateRecord { record });
+        assert_eq!(op.action_hash(), &expected_hash);
+        assert_eq!(op.action_seq(), 1);
+    }
+
+    #[test]
+    fn op_entry_data_some_for_update() {
+        let update = ActionData::Update(crate::action::UpdateData {
+            original_action_address: ActionHash::from_raw_36(vec![10u8; 36]),
+            original_entry_address: EntryHash::from_raw_36(vec![11u8; 36]),
+            entry_type: EntryType::AgentPubKey,
+            entry_hash: EntryHash::from_raw_36(vec![12u8; 36]),
+        });
+        let op = Op::Update(Update::new(signed_action(update), None).unwrap());
+        let (entry_hash, entry_type) = op.entry_data().expect("update has entry data");
+        assert_eq!(entry_hash, &EntryHash::from_raw_36(vec![12u8; 36]));
+        assert_eq!(entry_type, &EntryType::AgentPubKey);
     }
 }

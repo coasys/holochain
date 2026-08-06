@@ -4,8 +4,8 @@ use crate::{signing::sign_zome_call, ConductorApiError, ConductorApiResult};
 use anyhow::{anyhow, Result};
 use holo_hash::{AgentPubKey, DnaHash};
 use holochain_conductor_api::{
-    AppAuthenticationToken, AppInfo, AppRequest, AppResponse, CellInfo, PeerMetaInfo,
-    ProvisionedCell, ZomeCallParamsSigned,
+    AppAuthenticationToken, AppInfo, AppRequest, AppResponse, CellInfo, OpTimingsCursor,
+    OpTimingsDump, PeerMetaInfo, ProvisionedCell, ZomeCallParamsSigned,
 };
 use holochain_nonce::fresh_nonce;
 use holochain_types::app::{
@@ -60,7 +60,7 @@ impl AppWebsocket {
     /// use std::net::Ipv4Addr;
     /// use holochain_client::{AdminWebsocket, AppWebsocket, ClientAgentSigner};
     ///
-    /// let mut admin_ws = AdminWebsocket::connect((Ipv4Addr::LOCALHOST, 30_000)).await.unwrap();
+    /// let admin_ws = AdminWebsocket::connect((Ipv4Addr::LOCALHOST, 30_000), None).await.unwrap();
     ///
     /// let app_id = "test-app".to_string();
     /// let issued = admin_ws.issue_app_auth_token(app_id.clone().into()).await.unwrap();
@@ -96,7 +96,7 @@ impl AppWebsocket {
     /// use std::time::Duration;
     /// use holochain_client::{AdminWebsocket, AppWebsocket, AllowedOrigins, WebsocketConfig, ClientAgentSigner};
     ///
-    /// let mut admin_ws = AdminWebsocket::connect((Ipv4Addr::LOCALHOST, 30_000)).await.unwrap();
+    /// let admin_ws = AdminWebsocket::connect((Ipv4Addr::LOCALHOST, 30_000), None).await.unwrap();
     ///
     /// let app_id = "test-app".to_string();
     /// let issued = admin_ws.issue_app_auth_token(app_id.clone().into()).await.unwrap();
@@ -141,7 +141,8 @@ impl AppWebsocket {
     ///     ConnectRequest, ClientAgentSigner, AgentSigner, DynAgentSigner
     /// };
     ///
-    /// let mut admin_ws = AdminWebsocket::connect((Ipv4Addr::LOCALHOST, 30_000)).await.unwrap();
+    ///
+    /// let admin_ws = AdminWebsocket::connect((Ipv4Addr::LOCALHOST, 30_000), None).await.unwrap();
     ///
     /// let app_id = "test-app".to_string();
     /// let issued = admin_ws.issue_app_auth_token(app_id.clone().into()).await.unwrap();
@@ -157,7 +158,9 @@ impl AppWebsocket {
     ///     SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 30_001),
     /// ];
     /// for addr in connect_to {
-    ///     match AppWebsocket::connect_with_request_and_config(request, client_config.clone(), issued.token.clone(), signer.clone(), None).await {
+    ///     let request = ConnectRequest::from(addr.clone());
+    ///
+    ///     match AppWebsocket::connect_with_request_and_config(request, client_config.clone(), issued.token.clone(), signer.clone()).await {
     ///         Ok(admin_ws) => {
     ///             println!("Connected to {:?}", addr);
     ///             break;
@@ -453,6 +456,30 @@ impl AppWebsocket {
         let response = self.inner.send(msg).await?;
         match response {
             AppResponse::NetworkMetricsDumped(metrics) => Ok(metrics),
+            _ => unreachable!("Unexpected response {:?}", response),
+        }
+    }
+
+    /// Dump one page of DHT-op lifecycle timings for a DNA of this app.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this app runs no cell of `dna_hash`, the request
+    /// fails, or the limit is zero.
+    pub async fn dump_op_timings(
+        &self,
+        dna_hash: DnaHash,
+        cursor: Option<OpTimingsCursor>,
+        limit: Option<u32>,
+    ) -> ConductorApiResult<OpTimingsDump> {
+        let msg = AppRequest::DumpOpTimings {
+            dna_hash,
+            cursor,
+            limit,
+        };
+        let response = self.inner.send(msg).await?;
+        match response {
+            AppResponse::OpTimingsDumped(timings) => Ok(timings),
             _ => unreachable!("Unexpected response {:?}", response),
         }
     }

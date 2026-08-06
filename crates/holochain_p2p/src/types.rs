@@ -3,7 +3,6 @@ pub mod event;
 
 pub(crate) mod wire;
 
-pub use wire::WireDhtOpData;
 pub use wire::WireMessage;
 
 /// Error type for Holochain P2p.
@@ -41,6 +40,24 @@ pub enum HolochainP2pError {
     /// but it does not exist.
     #[error("The K2 Space {0} does not exist")]
     K2SpaceNotFound(kitsune2_api::SpaceId),
+
+    /// A request is malformed and can never succeed, e.g. because its
+    /// options are contradictory.
+    #[error("InvalidRequest: {0}")]
+    InvalidRequest(String),
+
+    /// A multi-peer request could not gather the required number of
+    /// responses, either because every peer answered without providing
+    /// enough data or because the timeout elapsed first.
+    #[error("{operation}: gathered {received} of {required} required responses")]
+    InsufficientResponses {
+        /// The operation that failed to gather enough responses.
+        operation: String,
+        /// The number of usable responses received.
+        received: usize,
+        /// The number of responses required.
+        required: usize,
+    },
 
     /// Other
     #[error("Other: {0}")]

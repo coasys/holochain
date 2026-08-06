@@ -23,13 +23,10 @@ mod metrics;
 pub mod paths;
 pub mod ribosome_store;
 pub mod space;
-pub mod state;
 
 pub use cell::error::CellError;
 pub use cell::Cell;
 pub use conductor::Conductor;
 pub use conductor::ConductorBuilder;
 pub use conductor::ConductorHandle;
-pub use conductor::ConductorNetworkState;
-pub use conductor::NetworkEvent;
-pub use conductor::{full_integration_dump, integration_dump};
+pub use conductor::{full_integration_dump, integration_dump, wire_rows_to_ops};

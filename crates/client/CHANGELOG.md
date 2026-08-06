@@ -1,5 +1,5 @@
 ---
-default_semver_increment_mode: !pre_minor dev
+default_semver_increment_mode: !pre_patch rc
 ---
 # Changelog
 
@@ -7,9 +7,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## \[Unreleased\]
 
-### Added
+## 0.9.0
 
-- Added `AdminWebsocket::get_network_state()` and `AdminWebsocket::await_cell_network_ready()` to allow clients to query or wait for cell network readiness without retry loops. `ConductorNetworkState` is re-exported from this crate for convenience. [\#5647](https://github.com/holochain/holochain/pull/5647)
+## 0.9.0-rc.5
+
+## 0.9.0-rc.4
+
+## 0.9.0-rc.3
+
+## 0.9.0-rc.2
+
+## 0.9.0-rc.1
+
+## 0.9.0-rc.0
+
+## 0.9.0-dev.32
+
+## 0.9.0-dev.31
+
+## 0.9.0-dev.30
+
+## 0.9.0-dev.29
+
+## 0.9.0-dev.28
+
+## 0.9.0-dev.27
+
+## 0.9.0-dev.26
+
+## 0.9.0-dev.25
+
+## 0.9.0-dev.24
+
+## 0.9.0-dev.23
+
+## 0.9.0-dev.22
+
+## 0.9.0-dev.21
+
+## 0.9.0-dev.20
+
+## 0.9.0-dev.19
+
+## 0.9.0-dev.18
+
+## 0.9.0-dev.17
 
 ## 0.9.0-dev.16
 

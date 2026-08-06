@@ -1,8 +1,9 @@
 //! Defines the Warrant variant of DhtOp
 
-use holochain_keystore::{AgentPubKeyExt, LairResult, MetaLairClient};
-use holochain_zome_types::prelude::*;
-use std::str::FromStr;
+use holo_hash::{hash_type, HashableContent, HashableContentBytes};
+use holochain_serialized_bytes::prelude::*;
+use holochain_timestamp::Timestamp;
+use holochain_zome_types::prelude::{SignedWarrant, Warrant, WarrantProof};
 
 /// A Warrant DhtOp
 #[derive(
@@ -25,12 +26,6 @@ impl WarrantOp {
         match self.proof {
             WarrantProof::ChainIntegrity(_) => WarrantOpType::ChainIntegrityWarrant,
         }
-    }
-
-    /// Sign the warrant for use as an Op
-    pub async fn sign(keystore: &MetaLairClient, warrant: Warrant) -> LairResult<Self> {
-        let signature = warrant.author.sign(keystore, warrant.clone()).await?;
-        Ok(Self::from(SignedWarrant::new(warrant, signature)))
     }
 
     /// Accessor for the timestamp of the warrant
@@ -71,27 +66,5 @@ impl HashableContent for WarrantOp {
 
     fn hashable_content(&self) -> HashableContentBytes {
         self.warrant().hashable_content()
-    }
-}
-
-impl holochain_sqlite::rusqlite::ToSql for WarrantOpType {
-    fn to_sql(
-        &self,
-    ) -> holochain_sqlite::rusqlite::Result<holochain_sqlite::rusqlite::types::ToSqlOutput<'_>>
-    {
-        Ok(holochain_sqlite::rusqlite::types::ToSqlOutput::Owned(
-            format!("{self}").into(),
-        ))
-    }
-}
-
-impl holochain_sqlite::rusqlite::types::FromSql for WarrantOpType {
-    fn column_result(
-        value: holochain_sqlite::rusqlite::types::ValueRef<'_>,
-    ) -> holochain_sqlite::rusqlite::types::FromSqlResult<Self> {
-        String::column_result(value).and_then(|string| {
-            WarrantOpType::from_str(&string)
-                .map_err(|_| holochain_sqlite::rusqlite::types::FromSqlError::InvalidType)
-        })
     }
 }

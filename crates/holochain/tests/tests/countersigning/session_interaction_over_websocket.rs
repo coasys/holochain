@@ -12,9 +12,7 @@ use hdk::prelude::{
     CapSecret, CellId, FunctionName, PreflightRequest, PreflightRequestAcceptance, Role,
 };
 use holo_hash::{ActionHash, AgentPubKey};
-use holochain::prelude::{
-    CountersigningSessionState, DhtOp, Signal, SystemSignal, CAP_SECRET_BYTES,
-};
+use holochain::prelude::{CountersigningSessionState, Signal, SystemSignal, CAP_SECRET_BYTES};
 use holochain::sweettest::{
     authenticate_app_ws_client, websocket_client_by_port, SweetLocalRendezvous, WsPollRecv,
 };
@@ -26,6 +24,7 @@ use holochain_conductor_api::conductor::{ConductorTuningParams, KeystoreConfig};
 use holochain_conductor_api::AppRequest;
 use holochain_conductor_api::{AdminRequest, AdminResponse, AppResponse};
 use holochain_serialized_bytes::{SerializedBytes, SerializedBytesError};
+use holochain_types::op::DhtOp;
 use holochain_types::test_utils::{fake_dna_zomes, write_fake_dna_file};
 use holochain_wasm_test_utils::TestWasm;
 use holochain_websocket::{ReceiveMessage, WebsocketReceiver, WebsocketSender};
@@ -62,7 +61,7 @@ async fn countersigning_session_interaction_calls() {
     // Start local bootstrap and signal servers.
     let local_services = SweetLocalRendezvous::new().await;
     let bootstrap_url = local_services.bootstrap_addr().to_string();
-    let signal_url = local_services.sig_addr().to_string();
+    let signal_url = local_services.relay_addr().to_string();
 
     let network_seed = uuid::Uuid::new_v4().to_string();
 
@@ -624,11 +623,6 @@ impl Agent {
         let mut config = create_config(admin_port, environment_path.clone().into());
         config.network.request_timeout_s = 10;
         config.network.advanced = Some(serde_json::json!({
-            // Allow plaintext signal for testing, and set a short timeout for network requests
-            // so that shutting down a conductor won't keep tx5 busy for too long.
-            "tx5Transport": {
-                "signalAllowPlainText": true,
-            },
             // Gossip faster to speed up the test.
             "k2Gossip": {
                 "initiateIntervalMs": 1000,
@@ -655,7 +649,7 @@ impl Agent {
             ..Default::default()
         });
         config.network.bootstrap_url = Url2::parse(bootstrap_url);
-        config.network.signal_url = Url2::parse(signal_url);
+        config.network.relay_url = Url2::parse(signal_url);
         let config_path = write_config(environment_path, &config);
 
         let (_holochain, admin_port) = start_holochain_with_lair(config_path.clone(), true).await;
@@ -845,6 +839,7 @@ async fn await_dht_sync(agents: &[&Agent]) {
                 AdminRequest::DumpFullState {
                     cell_id: Box::new(agent.cell_id.clone()),
                     dht_ops_cursor: None,
+                    limit: None,
                 },
                 &agent.admin_tx,
             )
@@ -873,17 +868,19 @@ fn sort_dht(dht: &mut [DhtOp]) {
     dht.sort_by(|a, b| match a {
         DhtOp::ChainOp(chain_op_a) => {
             if let DhtOp::ChainOp(chain_op_b) = b {
+                let action_a = chain_op_a.signed_action().data();
+                let action_b = chain_op_b.signed_action().data();
                 let type_a = format!(
                     "{}{}{}",
-                    chain_op_a.get_type(),
-                    chain_op_a.author(),
-                    chain_op_a.action().action_seq(),
+                    chain_op_a.op_type(),
+                    action_a.header.author,
+                    action_a.header.action_seq,
                 );
                 let type_b = format!(
                     "{}{}{}",
-                    chain_op_b.get_type(),
-                    chain_op_b.author(),
-                    chain_op_b.action().action_seq(),
+                    chain_op_b.op_type(),
+                    action_b.header.author,
+                    action_b.header.action_seq,
                 );
                 type_a.partial_cmp(&type_b).unwrap()
             } else {

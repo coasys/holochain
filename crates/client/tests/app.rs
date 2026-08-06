@@ -14,7 +14,7 @@ use holochain_types::{
     websocket::AllowedOrigins,
 };
 use holochain_websocket::ConnectRequest;
-use holochain_zome_types::dependencies::holochain_integrity_types::ExternIO;
+use holochain_zome_types::prelude::ExternIO;
 use kitsune2_api::{AgentInfoSigned, Url};
 use kitsune2_core::Ed25519Verifier;
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,7 @@ async fn handle_signal() {
             roles_settings: None,
             source: AppBundleSource::Bytes(fixture::get_fixture_app_bundle()),
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();
@@ -146,6 +147,7 @@ async fn close_on_drop_is_clone_safe() {
             roles_settings: None,
             source: AppBundleSource::Bytes(fixture::get_fixture_app_bundle()),
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();
@@ -199,7 +201,7 @@ async fn deferred_memproof_installation() {
         name: "".to_string(),
         roles: original_bundle.manifest().app_roles(),
         bootstrap_url: None,
-        signal_url: None,
+        relay_url: None,
     };
     let app_bundle_deferred_memproofs = AppBundle::from(
         original_bundle
@@ -217,6 +219,7 @@ async fn deferred_memproof_installation() {
             roles_settings: None,
             source: AppBundleSource::Bytes(app_bundle_bytes),
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();
@@ -297,6 +300,7 @@ async fn connect_multiple_addresses() {
             roles_settings: None,
             source: AppBundleSource::Bytes(fixture::get_fixture_app_bundle()),
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();
@@ -358,6 +362,7 @@ async fn connect_with_custom_origin() {
             roles_settings: None,
             source: AppBundleSource::Bytes(fixture::get_fixture_app_bundle()),
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();
@@ -424,6 +429,7 @@ async fn dump_network_stats() {
             roles_settings: None,
             source: AppBundleSource::Bytes(fixture::get_fixture_app_bundle()),
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();
@@ -452,9 +458,6 @@ async fn dump_network_stats() {
 
     let network_stats = app_ws.dump_network_stats().await.unwrap();
 
-    #[cfg(feature = "transport-tx5-backend-go-pion")]
-    assert_eq!("BackendGoPion", network_stats.transport_stats.backend);
-    #[cfg(feature = "transport-iroh")]
     assert_eq!("iroh", network_stats.transport_stats.backend);
 }
 
@@ -485,6 +488,7 @@ async fn dump_network_metrics() {
             roles_settings: None,
             source: AppBundleSource::Bytes(fixture::get_fixture_app_bundle()),
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();
@@ -533,6 +537,7 @@ async fn agent_info() {
             network_seed: None,
             source: AppBundleSource::Bytes(fixture::get_fixture_app_bundle()),
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();
@@ -607,6 +612,7 @@ async fn peer_meta_info() {
             network_seed: None,
             source: AppBundleSource::Bytes(fixture::get_fixture_app_bundle()),
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();
@@ -674,6 +680,7 @@ async fn call_zome_with_options_custom_timeout() {
             roles_settings: None,
             source: AppBundleSource::Bytes(fixture::get_fixture_app_bundle()),
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();

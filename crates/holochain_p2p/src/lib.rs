@@ -4,6 +4,7 @@
 use holo_hash::*;
 use holochain_serialized_bytes::prelude::*;
 use holochain_types::cell_config_overrides::CellConfigOverrides;
+use holochain_types::op::ChainOp;
 use holochain_types::prelude::*;
 use kitsune2_api::{AgentInfoSigned, BoxFut};
 use kitsune2_api::{SpaceId, StoredOp};
@@ -20,11 +21,17 @@ pub use spawn::*;
 mod peer_meta_store;
 pub use peer_meta_store::*;
 
+mod peer_latency_store;
+
 mod local_agent;
 pub use local_agent::*;
 
+mod weighted_selection;
+
 mod op_store;
 pub use op_store::*;
+
+mod publish_metadata;
 
 mod hc_report;
 pub use hc_report::*;
@@ -141,7 +148,6 @@ pub trait HolochainP2pDnaT: Send + Sync + 'static {
         source: AgentPubKey,
         op_hash_list: Vec<DhtOpHash>,
         timeout_ms: Option<u64>,
-        reflect_ops: Option<Vec<DhtOp>>,
     ) -> HolochainP2pResult<()>;
 
     /// Publish a countersigning op.
@@ -181,6 +187,18 @@ pub trait HolochainP2pDnaT: Send + Sync + 'static {
         zome_call_origin: Option<(ZomeName, FunctionName)>,
     ) -> HolochainP2pResult<Vec<AgentActivityResponse>>;
 
+    /// Get agent activity from multiple authorities on the DHT, returning
+    /// each peer's response independently, paired with the responding
+    /// peer.
+    ///
+    /// See [`actor::HcP2p::get_agent_activity_multi`] for semantics.
+    async fn get_agent_activity_multi(
+        &self,
+        agent: AgentPubKey,
+        query: ChainQueryFilter,
+        options: actor::GetActivityMultiOptions,
+    ) -> HolochainP2pResult<Vec<(AgentPubKey, AgentActivityResponse)>>;
+
     /// Get agent activity deterministically from the DHT.
     async fn must_get_agent_activity(
         &self,
@@ -189,6 +207,12 @@ pub trait HolochainP2pDnaT: Send + Sync + 'static {
         options: NetworkRequestOptions,
         zome_call_origin: Option<(ZomeName, FunctionName)>,
     ) -> HolochainP2pResult<Vec<MustGetAgentActivityResponse>>;
+
+    /// Check if an agent was recently online in this network.
+    ///
+    /// Returns `true` if the agent has a known URL in the peer store and that URL is not marked as
+    /// unresponsive in the peer meta store.
+    async fn was_agent_recently_online(&self, agent: AgentPubKey) -> HolochainP2pResult<bool>;
 
     /// Send a validation receipt to a remote node.
     async fn send_validation_receipts(
@@ -306,7 +330,6 @@ impl HolochainP2pDnaT for HolochainP2pDna {
         source: AgentPubKey,
         op_hash_list: Vec<DhtOpHash>,
         timeout_ms: Option<u64>,
-        reflect_ops: Option<Vec<DhtOp>>,
     ) -> HolochainP2pResult<()> {
         self.sender
             .publish(
@@ -315,7 +338,6 @@ impl HolochainP2pDnaT for HolochainP2pDna {
                 source,
                 op_hash_list,
                 timeout_ms,
-                reflect_ops,
             )
             .await
     }
@@ -331,7 +353,7 @@ impl HolochainP2pDnaT for HolochainP2pDna {
             .await
     }
 
-    /// Get [`ChainOp::StoreRecord`] or [`ChainOp::StoreEntry`] from the DHT.
+    /// Get [`ChainOp::CreateRecord`] or [`ChainOp::CreateEntry`] from the DHT.
     async fn get(
         &self,
         dht_hash: holo_hash::AnyDhtHash,
@@ -383,16 +405,33 @@ impl HolochainP2pDnaT for HolochainP2pDna {
             .await
     }
 
+    async fn get_agent_activity_multi(
+        &self,
+        agent: AgentPubKey,
+        query: ChainQueryFilter,
+        options: actor::GetActivityMultiOptions,
+    ) -> HolochainP2pResult<Vec<(AgentPubKey, AgentActivityResponse)>> {
+        self.sender
+            .get_agent_activity_multi(self.dna_hash(), agent, query, options)
+            .await
+    }
+
     /// Optional zome call origin for metrics attribution.
     async fn must_get_agent_activity(
         &self,
         author: AgentPubKey,
-        filter: holochain_zome_types::chain::ChainFilter,
+        filter: ChainFilter,
         options: NetworkRequestOptions,
         zome_call_origin: Option<(ZomeName, FunctionName)>,
     ) -> HolochainP2pResult<Vec<MustGetAgentActivityResponse>> {
         self.sender
             .must_get_agent_activity(self.dna_hash(), author, filter, options, zome_call_origin)
+            .await
+    }
+
+    async fn was_agent_recently_online(&self, agent: AgentPubKey) -> HolochainP2pResult<bool> {
+        self.sender
+            .was_agent_recently_online(self.dna_hash(), agent)
             .await
     }
 

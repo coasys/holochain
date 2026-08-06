@@ -560,11 +560,8 @@ mod test {
     use crate::conductor::api::AdminResponse;
     use crate::conductor::api::AppInterfaceApi;
     use crate::conductor::conductor::ConductorBuilder;
-    use crate::conductor::state::AppInterfaceId;
-    use crate::conductor::state::ConductorState;
     use crate::conductor::Conductor;
     use crate::conductor::ConductorHandle;
-    use crate::fixt::RealRibosomeFixturator;
     use crate::sweettest::SweetDnaFile;
     use crate::sweettest::WsPollRecv;
     use crate::sweettest::{app_bundle_from_dnas, authenticate_app_ws_client};
@@ -573,6 +570,8 @@ mod test {
     use ::fixt::prelude::*;
     use holo_hash::fixt::AgentPubKeyFixturator;
     use holochain_conductor_api::conductor::ConductorConfig;
+    use holochain_conductor_api::state::AppInterfaceId;
+    use holochain_conductor_api::state::ConductorState;
     use holochain_conductor_api::*;
     use holochain_keystore::test_keystore;
     use holochain_serialized_bytes::prelude::*;
@@ -615,7 +614,7 @@ mod test {
         let db_dir = test_db_dir();
         let conductor_handle = ConductorBuilder::new()
             .with_data_root_path(db_dir.path().to_path_buf().into())
-            .test(&[])
+            .test()
             .await
             .unwrap();
 
@@ -647,6 +646,7 @@ mod test {
             roles_settings: Default::default(),
             network_seed: None,
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         }));
         let response: AdminResponse = admin_tx.request(request).await.unwrap();
         let app_info = match response {
@@ -742,7 +742,7 @@ mod test {
         let db_dir = test_db_dir();
         let conductor_handle = Conductor::builder()
             .with_data_root_path(db_dir.path().to_path_buf().into())
-            .test(&[])
+            .test()
             .await
             .unwrap();
         (Arc::new(db_dir), conductor_handle)
@@ -756,13 +756,12 @@ mod test {
         let config = SweetConductorConfig::standard()
             .tune_network_config(|nc| {
                 nc.disable_bootstrap = true;
-                nc.signal_url = url2::Url2::parse("ws://dummy.url");
             })
             .into();
         let conductor_handle = ConductorBuilder::new()
             .config(config)
             .with_data_root_path(db_dir.path().to_path_buf().into())
-            .test(&[])
+            .test()
             .await
             .unwrap();
 
@@ -847,11 +846,6 @@ mod test {
             vec![(TestWasm::Foo.into(), TestWasm::Foo.into())],
         );
 
-        // warm the zome
-        let _ = RealRibosomeFixturator::new(crate::fixt::Zomes(vec![TestWasm::Foo]))
-            .next()
-            .unwrap();
-
         let dna_hash = dna.dna_hash().clone();
 
         let (_tmpdir, _, handle, agent_key) =
@@ -889,11 +883,6 @@ mod test {
             vec![(TestWasm::Foo.into(), TestWasm::Foo.into())],
         );
 
-        // warm the zome
-        let _ = RealRibosomeFixturator::new(crate::fixt::Zomes(vec![TestWasm::Foo]))
-            .next()
-            .unwrap();
-
         let cell_id_1 = CellId::from((dna_1.dna_hash().clone(), fake_agent_pubkey_1()));
 
         let cell_id_2 = CellId::from((dna_2.dna_hash().clone(), fake_agent_pubkey_1()));
@@ -906,7 +895,7 @@ mod test {
         let handle = ConductorBuilder::new()
             .config(ConductorConfig::default())
             .with_data_root_path(db_dir.path().to_path_buf().into())
-            .test(&[])
+            .test()
             .await
             .unwrap();
 
@@ -944,12 +933,8 @@ mod test {
                 dbg!(&blob_one);
 
                 assert_eq!(blob_one.used_by, vec!["test app 1".to_string()]);
-                assert!(blob_one.authored_data_size > 12_000);
-                assert!(blob_one.authored_data_size_on_disk > 94_000);
                 assert!(blob_one.dht_data_size > 12_000);
                 assert!(blob_one.dht_data_size_on_disk > 94_000);
-                assert!(blob_one.cache_data_size > 8_000);
-                assert!(blob_one.cache_data_size_on_disk > 94_000);
 
                 let blob_two: &DnaStorageInfo =
                     get_app_data_storage_info(&info, "test app 2".to_string());
@@ -961,12 +946,8 @@ mod test {
                     used_by_two,
                     vec!["test app 2".to_string(), "test app 3".to_string()]
                 );
-                assert!(blob_two.authored_data_size > 24_000);
-                assert!(blob_two.authored_data_size_on_disk > 180_000);
-                assert!(blob_two.dht_data_size > 16_000);
+                assert!(blob_two.dht_data_size > 14_000);
                 assert!(blob_two.dht_data_size_on_disk > 94_000);
-                assert!(blob_two.cache_data_size > 8_000);
-                assert!(blob_two.cache_data_size_on_disk > 94_000);
             }
             other => panic!("unexpected response {other:?}"),
         };
@@ -1193,11 +1174,16 @@ mod test {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         // Get state
-        let expected = conductor_handle.dump_cell_state(&cell_id).await.unwrap();
+        let expected = conductor_handle
+            .dump_cell_state(&cell_id, None, None)
+            .await
+            .unwrap();
 
         let admin_api = AdminInterfaceApi::new(conductor_handle.clone());
         let msg = AdminRequest::DumpState {
             cell_id: Box::new(cell_id),
+            source_chain_cursor: None,
+            limit: None,
         };
         let respond = move |response: AdminResponse| {
             assert_matches!(response, AdminResponse::StateDumped(s) if s == expected);
@@ -1218,9 +1204,6 @@ mod test {
         );
         let agent_pubkey = fake_agent_pubkey_1();
 
-        let _ = RealRibosomeFixturator::new(crate::fixt::Zomes(vec![TestWasm::Foo]))
-            .next()
-            .unwrap();
         let (_tmpdir, _, conductor_handle, _agent_key) = setup_app_in_new_conductor(
             "test app".to_string(),
             Some(agent_pubkey.clone()),

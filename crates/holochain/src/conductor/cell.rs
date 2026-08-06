@@ -8,15 +8,16 @@ use super::api::CellConductorHandle;
 use super::conductor::zome_call_signature_verification::is_valid_signature;
 use super::space::Space;
 use super::ConductorHandle;
+use crate::conductor::api::error::ConductorApiError;
 use crate::conductor::api::CellConductorApi;
 use crate::conductor::cell::error::CellResult;
 use crate::core::queue_consumer::spawn_queue_consumer_tasks;
 use crate::core::queue_consumer::InitialQueueTriggers;
 use crate::core::queue_consumer::QueueTriggers;
+#[cfg(feature = "unstable-countersigning")]
 use crate::core::queue_consumer::TriggerSender;
 use crate::core::ribosome::guest_callback::init::InitResult;
-use crate::core::ribosome::real_ribosome::RealRibosome;
-use crate::core::ribosome::ZomeCallInvocation;
+use crate::core::ribosome::{Ribosome, ZomeCallInvocation};
 use crate::core::workflow::call_zome_workflow;
 use crate::core::workflow::genesis_workflow::genesis_workflow;
 use crate::core::workflow::initialize_zomes_workflow;
@@ -25,22 +26,19 @@ use crate::core::workflow::GenesisWorkflowArgs;
 use crate::core::workflow::GenesisWorkspace;
 use crate::core::workflow::InitializeZomesWorkflowArgs;
 use crate::core::workflow::ZomeCallResult;
-use crate::{conductor::api::error::ConductorApiError, core::ribosome::RibosomeT};
 use error::CellError;
 use futures::future::FutureExt;
 use holo_hash::*;
 use holochain_cascade::authority;
+use holochain_keystore::AgentPubKeyExt;
 use holochain_nonce::fresh_nonce;
 use holochain_p2p::event::CountersigningSessionNegotiationMessage;
 use holochain_p2p::{HolochainP2pDna, HolochainP2pError, HolochainP2pResult};
 use holochain_serialized_bytes::SerializedBytes;
-use holochain_sqlite::prelude::*;
 use holochain_state::host_fn_workspace::SourceChainWorkspace;
 use holochain_state::prelude::*;
-use holochain_state::schedule::live_scheduled_fns;
 use holochain_types::cell_config_overrides::CellConfigOverrides;
 use kitsune2_api::BoxFut;
-use rusqlite::OptionalExtension;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::sync::Arc;
@@ -119,12 +117,11 @@ impl Cell {
         overrides: CellConfigOverrides,
     ) -> CellResult<(Self, InitialQueueTriggers)> {
         let conductor_api = Arc::new(CellConductorApi::new(conductor_handle.clone(), id.clone()));
-        let authored_db = space.get_or_create_authored_db(id.agent_pubkey().clone())?;
 
         // check if genesis has been run
         let has_genesis = {
             // check if genesis ran.
-            GenesisWorkspace::new(authored_db.clone(), space.dht_db.clone())
+            GenesisWorkspace::new(space.dht_store.clone())
                 .has_genesis(id.agent_pubkey().clone())
                 .await?
         };
@@ -161,22 +158,17 @@ impl Cell {
     /// Performs the Genesis workflow for the Cell, ensuring that its initial
     /// records are committed. This is a prerequisite for any other interaction
     /// with the SourceChain
-    #[allow(clippy::too_many_arguments)]
-    pub async fn genesis<Ribosome>(
+    pub async fn genesis(
         cell_id: CellId,
         conductor_handle: ConductorHandle,
-        authored_db: DbWrite<DbKindAuthored>,
-        dht_db: DbWrite<DbKindDht>,
+        dht_store: DhtStore,
         ribosome: Ribosome,
         membrane_proof: Option<MembraneProof>,
-    ) -> CellResult<()>
-    where
-        Ribosome: RibosomeT + 'static,
-    {
+    ) -> CellResult<()> {
         let conductor_api = CellConductorApi::new(conductor_handle.clone(), cell_id.clone());
 
         // run genesis
-        let workspace = GenesisWorkspace::new(authored_db, dht_db);
+        let workspace = GenesisWorkspace::new(dht_store);
 
         // exit early if genesis has already run
         if workspace
@@ -227,31 +219,15 @@ impl Cell {
     }
 
     pub(super) async fn dispatch_scheduled_fns(self: Arc<Self>, now: Timestamp) {
-        let authored_db = match self.get_or_create_authored_db() {
-            Ok(db) => db,
-            Err(e) => {
-                error!(
-                    "error getting authored db, cannot dispatch scheduled functions: {:?}",
-                    e
-                );
-                return;
-            }
-        };
-
         let author = self.id.agent_pubkey().clone();
-        let live_fns = authored_db
-            .write_async(move |txn| {
-                // Rescheduling should not fail as the data in the database
-                // should be valid schedules only.
-                reschedule_expired(txn, now, &author)?;
-                let lives = live_scheduled_fns(txn, now, &author);
-                // We know what to run so we can delete the ephemerals.
-                if lives.is_ok() {
-                    // Failing to delete should rollback this attempt.
-                    delete_live_ephemeral_scheduled_fns(txn, now, &author)?;
-                }
-                lives
-            })
+        self.space
+            .dht_store
+            .reschedule_expired_persisted(&author, now)
+            .await;
+        let live_fns = self
+            .space
+            .dht_store
+            .live_scheduled_functions(&author, now)
             .await;
 
         match live_fns {
@@ -260,6 +236,16 @@ impl Cell {
                 error!("error calling scheduled fn: {:?}", e);
             }
             Ok(live_fns) => {
+                let author_for_new_db = self.id.agent_pubkey().clone();
+                if let Err(e) = self
+                    .space
+                    .dht_store
+                    .delete_live_ephemeral_scheduled_functions(&author_for_new_db, now)
+                    .await
+                {
+                    error!("error deleting live ephemeral scheduled functions: {:?}", e);
+                }
+
                 let mut tasks = vec![];
                 let mut dispatched: Vec<(ScheduledFn, bool)> = Vec::with_capacity(live_fns.len());
                 for (scheduled_fn, schedule, ephemeral) in &live_fns {
@@ -304,55 +290,95 @@ impl Cell {
                 let results: Vec<CellResult<ZomeCallResult>> =
                     futures::future::join_all(tasks).await;
 
-                let author = self.id.agent_pubkey().clone();
-                // In case of an error, a persisted fn needs to be unscheduled.
-                let _ = authored_db
-                    .write_async(move |txn| {
-                        for ((scheduled_fn, ephemeral), result) in dispatched.into_iter().zip(results.iter()) {
-                            match result {
-                                Ok(Ok(ZomeCallResponse::Ok(extern_io))) => {
-                                    let next_schedule: Schedule = match extern_io.decode() {
-                                        Ok(Some(v)) => v,
-                                        Ok(None) => {
-                                            // If the schedule of a persisted fn is `None` then it should be unscheduled.
-                                            if !ephemeral {
-                                                unschedule_fn(txn, &author, &scheduled_fn);
-                                            }
-                                            continue;
+                // Decide what each dispatched function should do in the merged
+                // store based on its zome-call result.
+                // `None`         => skip (ephemeral fn, no persistent state to update)
+                // `Some(None)`   => delete (unschedule the persisted fn)
+                // `Some(Some(s))`=> insert/upsert with schedule `s`
+                let new_db_decisions: Vec<(ScheduledFn, Option<Option<Schedule>>)> = dispatched
+                    .iter()
+                    .zip(results.iter())
+                    .map(|((scheduled_fn, ephemeral), result)| {
+                        let action = match result {
+                            Ok(Ok(ZomeCallResponse::Ok(extern_io))) => {
+                                match extern_io.decode::<Option<Schedule>>() {
+                                    Ok(Some(s)) => Some(Some(s)),
+                                    // Persisted fn returned None or failed to decode →
+                                    // unschedule it.
+                                    Ok(None) | Err(_) => {
+                                        if *ephemeral {
+                                            None
+                                        } else {
+                                            Some(None)
                                         }
-                                        Err(e) => {
-                                            error!("scheduled zome call error in ExternIO::decode: {:?}", e);
-                                            if !ephemeral {
-                                                unschedule_fn(txn, &author, &scheduled_fn);
-                                            }
-                                            continue;
-                                        }
-                                    };
-                                    if let Err(e) = schedule_fn(
-                                        txn,
-                                        &author,
-                                        scheduled_fn.clone(),
-                                        Some(next_schedule),
-                                        now,
-                                    ) {
-                                        error!("scheduled zome call error in schedule_fn: {:?}", e);
-                                        if !ephemeral {
-                                            unschedule_fn(txn, &author, &scheduled_fn);
-                                        }
-                                        continue;
                                     }
                                 }
-                                errorish => {
-                                    error!("scheduled zome call error: {:?}", errorish);
-                                    if !ephemeral {
-                                        unschedule_fn(txn, &author, &scheduled_fn);
-                                    }
-                                },
+                            }
+                            // Any error in the zome call → unschedule persisted fns.
+                            _ => {
+                                if *ephemeral {
+                                    None
+                                } else {
+                                    Some(None)
+                                }
+                            }
+                        };
+                        (scheduled_fn.clone(), action)
+                    })
+                    .collect();
+
+                // Apply the unschedule/reschedule decisions to the DhtStore.
+                for (scheduled_fn, action) in new_db_decisions {
+                    match action {
+                        // Ephemeral fn: no persistent state to update.
+                        None => {}
+                        // Persisted fn with no next schedule or a failed zome call: remove it.
+                        Some(None) => {
+                            if let Err(e) = self
+                                .space
+                                .dht_store
+                                .unschedule_function(&author_for_new_db, &scheduled_fn)
+                                .await
+                            {
+                                error!("error unscheduling function {:?}: {:?}", scheduled_fn, e);
                             }
                         }
-                        Result::<(), DatabaseError>::Ok(())
-                    })
-                    .await;
+                        // Persisted fn with a new schedule: upsert.
+                        Some(Some(next_schedule)) => {
+                            let maybe_schedule = Some(next_schedule);
+                            if let Err(e) = self
+                                .space
+                                .dht_store
+                                .upsert_scheduled_function(
+                                    &author_for_new_db,
+                                    &scheduled_fn,
+                                    &maybe_schedule,
+                                    now,
+                                )
+                                .await
+                            {
+                                error!(
+                                    "error upserting scheduled function {:?}: {:?}",
+                                    scheduled_fn, e
+                                );
+                                // Upsert failed (e.g. invalid crontab string): remove the
+                                // stale row so it does not trigger an extra dispatch on the
+                                // next scheduler tick.
+                                if let Err(e2) = self
+                                    .space
+                                    .dht_store
+                                    .unschedule_function(&author_for_new_db, &scheduled_fn)
+                                    .await
+                                {
+                                    error!(
+                                        "error unscheduling function {:?} after failed upsert: {:?}",
+                                        scheduled_fn, e2
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -397,10 +423,55 @@ impl holochain_p2p::event::HcP2pHandler for Cell {
         Box::pin(async move { fut.await.map_err(HolochainP2pError::other) })
     }
 
+    fn handle_remote_signal_direct(
+        &self,
+        dna_hash: DnaHash,
+        to_agent: AgentPubKey,
+        signal: Vec<u8>,
+        from_agent: AgentPubKey,
+        signature: Signature,
+    ) -> BoxFut<'_, HolochainP2pResult<()>> {
+        Box::pin(async move {
+            // Add 3 to allow for msgpack overhead for an "array 16"
+            if signal.len() > DIRECT_SIGNAL_MAX_SIZE + 3 {
+                let signal_length = signal.len();
+                warn!(
+                    "Received signal payload that is {signal_length:?} > {}",
+                    DIRECT_SIGNAL_MAX_SIZE + 3
+                );
+                return Err(HolochainP2pError::other(
+                    "Received signal payload that was too long",
+                ));
+            }
+
+            let signal: DirectSignal = decode(&signal).map_err(HolochainP2pError::other)?;
+
+            let valid_sig = from_agent
+                .verify_signature(&signature, &signal)
+                .await
+                .map_err(HolochainP2pError::other)?;
+            if !valid_sig {
+                warn!("Received signal payload with an invalid signature");
+                return Err(HolochainP2pError::other(
+                    "Received signal with an invalid signature",
+                ));
+            }
+
+            if let Err(e) = self.signal_tx.send(Signal::AppDirect {
+                cell_id: CellId::new(dna_hash, to_agent),
+                signal: signal.0,
+            }) {
+                info!(?e, "Failed to relay direct signal to app")
+            }
+
+            Ok(())
+        })
+    }
+
     fn handle_publish(
         &self,
         _dna_hash: DnaHash,
-        _ops: Vec<holochain_types::dht_op::DhtOp>,
+        _ops: Vec<(DhtOp, bool)>,
     ) -> BoxFut<'_, HolochainP2pResult<()>> {
         Box::pin(async { unimplemented!() })
     }
@@ -447,8 +518,8 @@ impl holochain_p2p::event::HcP2pHandler for Cell {
     ) -> BoxFut<'_, HolochainP2pResult<WireLinkOps>> {
         Box::pin(async {
             debug!(id = ?self.id());
-            let db = self.space.dht_db.clone();
-            authority::handle_get_links(db.into(), link_key, options)
+            let store = self.space.dht_store.as_read();
+            authority::handle_get_links(store, link_key, options)
                 .await
                 .map_err(HolochainP2pError::other)
         })
@@ -463,9 +534,9 @@ impl holochain_p2p::event::HcP2pHandler for Cell {
         query: WireLinkQuery,
     ) -> BoxFut<'_, HolochainP2pResult<CountLinksResponse>> {
         Box::pin(async {
-            let db = self.space.dht_db.clone();
+            let store = self.space.dht_store.as_read();
             Ok(CountLinksResponse::new(
-                authority::handle_get_links_query(db.into(), query)
+                authority::handle_get_links_query(store, query)
                     .await
                     .map_err(HolochainP2pError::other)?
                     .into_iter()
@@ -485,8 +556,8 @@ impl holochain_p2p::event::HcP2pHandler for Cell {
         options: holochain_p2p::event::GetActivityOptions,
     ) -> BoxFut<'_, HolochainP2pResult<AgentActivityResponse>> {
         Box::pin(async {
-            let db = self.space.dht_db.clone();
-            authority::handle_get_agent_activity(db.into(), agent, query, options)
+            let store = self.space.dht_store.as_read();
+            authority::handle_get_agent_activity(store, agent, query, options)
                 .await
                 .map_err(HolochainP2pError::other)
         })
@@ -498,11 +569,11 @@ impl holochain_p2p::event::HcP2pHandler for Cell {
         _dna_hash: DnaHash,
         _to_agent: AgentPubKey,
         author: AgentPubKey,
-        filter: holochain_zome_types::chain::ChainFilter,
+        filter: ChainFilter,
     ) -> BoxFut<'_, HolochainP2pResult<MustGetAgentActivityResponse>> {
         Box::pin(async {
-            let db = self.space.dht_db.clone();
-            authority::handle_must_get_agent_activity(db.into(), author, filter)
+            let store = self.space.dht_store.as_read();
+            authority::handle_must_get_agent_activity(store, author, filter)
                 .await
                 .map_err(HolochainP2pError::other)
         })
@@ -522,105 +593,62 @@ impl holochain_p2p::event::HcP2pHandler for Cell {
 
                 // Get the action for this op so we can check the entry type.
                 let hash = receipt.receipt.dht_op_hash.clone();
-                let action: Option<SignedAction> = self
-                    .get_or_create_authored_db()?
-                    .read_async(move |txn| {
-                        let h: Option<Vec<u8>> = txn
-                            .query_row(
-                                "SELECT Action.blob as action_blob
-                    FROM DhtOp
-                    JOIN Action ON Action.hash = DhtOp.action_hash
-                    WHERE DhtOp.hash = :hash",
-                                named_params! {
-                                    ":hash": hash,
-                                },
-                                |row| row.get("action_blob"),
-                            )
-                            .optional()?;
-                        match h {
-                            Some(h) => from_blob(h),
-                            None => Ok(None),
-                        }
-                    })
-                    .await?;
+                let action = self
+                    .space
+                    .dht_store
+                    .as_read()
+                    .action_for_op(&hash)
+                    .await
+                    .map_err(|e| CellError::from(HolochainP2pError::other(e)))?;
 
                 // If the action has an app entry type get the entry def
                 // from the conductor.
-                let required_receipt_count = match action.as_ref().and_then(|h| h.entry_type()) {
-                    Some(EntryType::App(AppEntryDef {
-                        zome_index,
-                        entry_index,
-                        ..
-                    })) => {
-                        let ribosome = self.conductor_api.get_this_ribosome().map_err(Box::new)?;
-                        let zome = ribosome.get_integrity_zome(zome_index);
-                        match zome {
-                            Some(zome) => self
-                                .conductor_api
-                                .get_entry_def(&EntryDefBufferKey::new(
-                                    zome.into_inner().1,
-                                    *entry_index,
-                                ))
-                                .map(|e| u8::from(e.required_validations)),
-                            None => None,
+                let required_receipt_count =
+                    match action.as_ref().and_then(|h| h.hashed.content.entry_type()) {
+                        Some(EntryType::App(AppEntryDef {
+                            zome_index,
+                            entry_index,
+                            ..
+                        })) => {
+                            let ribosome =
+                                self.conductor_api.get_this_ribosome().map_err(Box::new)?;
+                            let zome = ribosome.get_integrity_zome(zome_index);
+                            match zome {
+                                Some(zome) => self
+                                    .conductor_api
+                                    .get_entry_def(&EntryDefBufferKey::new(
+                                        zome.into_inner().1,
+                                        *entry_index,
+                                    ))
+                                    .map(|e| u8::from(e.required_validations)),
+                                None => None,
+                            }
                         }
-                    }
-                    _ => None,
-                };
+                        _ => None,
+                    };
 
                 // If no required receipt count was found then fallback to the default.
                 let required_validation_count = required_receipt_count.unwrap_or(
                     crate::core::workflow::publish_dht_ops_workflow::DEFAULT_RECEIPT_BUNDLE_SIZE,
                 );
 
-                let receipt_op_hash = receipt.receipt.dht_op_hash.clone();
-
+                // Record the receipt and read back the running count for this op.
                 let receipt_count = self
                     .space
-                    .dht_db
-                    .write_async({
-                        let receipt_op_hash = receipt_op_hash.clone();
-                        move |txn| -> StateMutationResult<usize> {
-                            // Add the new receipts to the db
-                            add_if_unique(txn, receipt)?;
+                    .dht_store
+                    .record_validation_receipt(&receipt)
+                    .await
+                    .map_err(|e| CellError::from(HolochainP2pError::other(e)))?
+                    as usize;
 
-                            // Get the current count for this DhtOp.
-                            let receipt_count: usize = txn.query_row(
-                            "SELECT COUNT(rowid) FROM ValidationReceipt WHERE op_hash = :op_hash",
-                            named_params! {
-                                ":op_hash": receipt_op_hash,
-                            },
-                            |row| row.get(0),
-                        )?;
-
-                            if receipt_count >= required_validation_count as usize {
-                                // If we have enough receipts then set receipts to complete.
-                                //
-                                // Don't fail here if this doesn't work, it's only informational. Getting
-                                // the same flag set in the authored db is what will stop the publish
-                                // workflow from republishing this op.
-                                set_receipts_complete_redundantly_in_dht_db(
-                                    txn,
-                                    &receipt_op_hash,
-                                    true,
-                                )
-                                .ok();
-                            }
-
-                            Ok(receipt_count)
-                        }
-                    })
-                    .await?;
-
-                // If we have enough receipts then set receipts to complete.
+                // If we have enough receipts then mark the op's receipts
+                // complete so the publish workflow stops republishing it.
                 if receipt_count >= required_validation_count as usize {
-                    // Note that the flag is set in the authored db because that's what the publish workflow checks to decide
-                    // whether to republish the op for more validation receipts.
-                    self.get_or_create_authored_db()?
-                        .write_async(move |txn| -> StateMutationResult<()> {
-                            set_receipts_complete(txn, &receipt_op_hash, true)
-                        })
-                        .await?;
+                    self.space
+                        .dht_store
+                        .mark_chain_op_receipts_complete(&hash)
+                        .await
+                        .map_err(|e| CellError::from(HolochainP2pError::other(e)))?;
                 }
             }
 
@@ -689,16 +717,16 @@ impl holochain_p2p::event::HcP2pHandler for Cell {
 impl Cell {
     #[cfg_attr(feature = "instrument", tracing::instrument(skip(self, options)))]
     async fn handle_get_entry(&self, hash: EntryHash) -> CellResult<WireEntryOps> {
-        let db = self.space.dht_db.clone();
-        authority::handle_get_entry(db.into(), hash)
+        let store = self.space.dht_store.as_read();
+        authority::handle_get_entry(store, hash)
             .await
             .map_err(Into::into)
     }
 
     #[cfg_attr(feature = "instrument", tracing::instrument(skip(self)))]
     async fn handle_get_record(&self, hash: ActionHash) -> CellResult<WireRecordOps> {
-        let db = self.space.dht_db.clone();
-        authority::handle_get_record(db.into(), hash)
+        let store = self.space.dht_store.as_read();
+        authority::handle_get_record(store, hash)
             .await
             .map_err(Into::into)
     }
@@ -742,9 +770,7 @@ impl Cell {
             Some(l) => l,
             None => {
                 SourceChainWorkspace::new(
-                    self.get_or_create_authored_db()?,
-                    self.dht_db().clone(),
-                    self.cache().clone(),
+                    self.space.dht_store.clone(),
                     keystore.clone(),
                     self.id.agent_pubkey().clone(),
                 )
@@ -766,6 +792,7 @@ impl Cell {
             args,
             self.queue_triggers.sys_validation.clone(),
             self.queue_triggers.integrate_dht_ops.clone(),
+            self.queue_triggers.publish_dht_ops.clone(),
             self.queue_triggers.countersigning.clone(),
         )
         .await
@@ -792,9 +819,7 @@ impl Cell {
 
         // Create the workspace
         let workspace = SourceChainWorkspace::init_as_root(
-            self.get_or_create_authored_db()?,
-            self.dht_db().clone(),
-            self.cache().clone(),
+            self.space.dht_store.clone(),
             keystore.clone(),
             id.agent_pubkey().clone(),
         )
@@ -813,6 +838,7 @@ impl Cell {
             signal_tx: self.signal_tx.clone(),
             cell_id: self.id.clone(),
             integrate_dht_ops_trigger: self.queue_triggers.integrate_dht_ops.clone(),
+            publish_dht_ops_trigger: self.queue_triggers.publish_dht_ops.clone(),
         };
         let init_result = initialize_zomes_workflow(
             workspace,
@@ -853,27 +879,11 @@ impl Cell {
     }
 
     /// Instantiate a Ribosome for use by this Cell's workflows
-    pub(crate) fn get_ribosome(&self) -> CellResult<RealRibosome> {
+    pub(crate) fn get_ribosome(&self) -> CellResult<Ribosome> {
         Ok(self
             .conductor_handle
             .get_ribosome(self.id())
             .map_err(|_| DnaError::DnaMissing(self.dna_hash().to_owned()))?)
-    }
-
-    /// Accessor for the authored database backing this Cell
-    pub(crate) fn get_or_create_authored_db(&self) -> CellResult<DbWrite<DbKindAuthored>> {
-        Ok(self
-            .space
-            .get_or_create_authored_db(self.id.agent_pubkey().clone())?)
-    }
-
-    /// Accessor for the authored database backing this Cell
-    pub(crate) fn dht_db(&self) -> &DbWrite<DbKindDht> {
-        &self.space.dht_db
-    }
-
-    pub(crate) fn cache(&self) -> &DbWrite<DbKindCache> {
-        &self.space.cache_db
     }
 
     pub(crate) fn notify_authored_ops_moved_to_limbo(&self) {
@@ -890,10 +900,6 @@ impl Cell {
     #[cfg(any(test, feature = "test_utils"))]
     pub(crate) fn triggers(&self) -> &QueueTriggers {
         &self.queue_triggers
-    }
-
-    pub(crate) fn publish_dht_ops_trigger(&self) -> TriggerSender {
-        self.queue_triggers.publish_dht_ops.clone()
     }
 }
 

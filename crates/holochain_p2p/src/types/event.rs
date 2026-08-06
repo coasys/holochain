@@ -2,7 +2,7 @@
 //! Module containing incoming events from HolochainP2p.
 
 use crate::*;
-use holochain_zome_types::signature::Signature;
+use holochain_zome_types::prelude::Signature;
 
 /// GetLinks options help control how the get is processed at various levels.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -72,11 +72,23 @@ pub trait HcP2pHandler: 'static + Send + Sync + std::fmt::Debug {
         signature: Signature,
     ) -> BoxFut<'_, HolochainP2pResult<SerializedBytes>>;
 
+    /// A remote node is sending us a direct signal.
+    fn handle_remote_signal_direct(
+        &self,
+        dna_hash: DnaHash,
+        to_agent: AgentPubKey,
+        signal: Vec<u8>,
+        from_agent: AgentPubKey,
+        signature: Signature,
+    ) -> BoxFut<'_, HolochainP2pResult<()>>;
+
     /// A remote node is publishing data in a range we claim to be holding.
+    ///
+    /// Ops arrive as [`holochain_types::op::DhtOp`].
     fn handle_publish(
         &self,
         dna_hash: DnaHash,
-        ops: Vec<holochain_types::dht_op::DhtOp>,
+        ops: Vec<(holochain_types::op::DhtOp, bool)>,
     ) -> BoxFut<'_, HolochainP2pResult<()>>;
 
     /// A remote node is requesting entry data from us.
@@ -120,7 +132,7 @@ pub trait HcP2pHandler: 'static + Send + Sync + std::fmt::Debug {
         dna_hash: DnaHash,
         to_agent: AgentPubKey,
         author: AgentPubKey,
-        filter: holochain_zome_types::chain::ChainFilter,
+        filter: ChainFilter,
     ) -> BoxFut<'_, HolochainP2pResult<MustGetAgentActivityResponse>>;
 
     /// A remote node has sent us a validation receipt.
@@ -135,7 +147,7 @@ pub trait HcP2pHandler: 'static + Send + Sync + std::fmt::Debug {
     fn handle_publish_countersign(
         &self,
         dna_hash: DnaHash,
-        op: holochain_types::dht_op::ChainOp,
+        op: ChainOp,
     ) -> BoxFut<'_, HolochainP2pResult<()>>;
 
     /// Messages between agents that drive a countersigning session.

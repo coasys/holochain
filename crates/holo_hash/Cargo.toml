@@ -1,6 +1,6 @@
 [package]
 name = "holo_hash"
-version = "0.7.0-dev.6"
+version = "0.7.0"
 authors = ["Holochain Core Dev Team <devcore@holochain.org>"]
 keywords = ["holochain", "holo", "hash", "blake", "blake2b"]
 categories = ["cryptography"]
@@ -26,20 +26,19 @@ derive_more = { version = "2.0", features = [
   "into",
   "from",
 ], optional = true }
-fixt = { version = "^0.7.0-dev.0", path = "../fixt", optional = true }
+fixt = { version = "^0.7.0", path = "../fixt", optional = true }
 futures = { version = "0.3", optional = true }
-holochain_serialized_bytes = { version = "=0.0.56", optional = true }
-holochain_util = { version = "^0.7.0-dev.1", path = "../holochain_util", default-features = false }
-kitsune2_api = { version = "0.4.0-dev.4", optional = true }
+holochain_serialized_bytes = { version = "=0.0.57", optional = true }
+holochain_util = { version = "^0.7.0", path = "../holochain_util", default-features = false }
+kitsune2_api = { version = "0.5.0", optional = true }
 must_future = { version = "0.1", optional = true }
 proptest = { version = "1", optional = true }
 proptest-derive = { version = "0", optional = true }
 rand = { version = "0.9", optional = true }
-rusqlite = { version = "0.34", optional = true }
 serde = { version = "1", optional = true }
 serde_bytes = { version = "0.11", optional = true }
 sha2 = { version = "0.10", optional = true }
-holochain_wasmer_common = { version = "=0.0.101", optional = true }
+holochain_wasmer_common = { version = "=0.0.103", optional = true }
 schemars = { version = "0.9", optional = true }
 
 [dev-dependencies]
@@ -50,7 +49,7 @@ workspace = true
 
 [features]
 default = ["serialization", "holochain-wasmer"]
-full = ["fixturators", "hashing", "encoding", "sqlite"]
+full = ["fixturators", "hashing", "encoding"]
 
 test_utils = ["fixturators"]
 fixturators = ["dep:fixt", "dep:rand", "hashing", "encoding"]
@@ -75,9 +74,3 @@ serialization = [
 encoding = ["dep:base64", "dep:blake2b_simd", "dep:derive_more", "dep:sha2"]
 holochain-wasmer = ["dep:holochain_wasmer_common"]
 schema = ["dep:schemars"]
-
-sqlite-encrypted = [
-  "dep:rusqlite",
-  "rusqlite/bundled-sqlcipher-vendored-openssl",
-]
-sqlite = ["dep:rusqlite", "rusqlite/bundled"]

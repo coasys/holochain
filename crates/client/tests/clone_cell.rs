@@ -10,7 +10,7 @@ use holochain_types::prelude::{
     AppBundleSource, CloneCellId, CloneId, CreateCloneCellPayload, DnaModifiersOpt, InstalledAppId,
 };
 use holochain_types::websocket::AllowedOrigins;
-use holochain_zome_types::{dependencies::holochain_integrity_types::ExternIO, prelude::RoleName};
+use holochain_zome_types::prelude::{ExternIO, RoleName};
 use std::net::Ipv4Addr;
 
 mod fixture;
@@ -36,6 +36,7 @@ async fn clone_cell_management() {
             roles_settings: None,
             source: AppBundleSource::Bytes(fixture::get_fixture_app_bundle()),
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();
@@ -188,6 +189,7 @@ pub async fn app_info_refresh() {
             roles_settings: None,
             source: AppBundleSource::Bytes(fixture::get_fixture_app_bundle()),
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();

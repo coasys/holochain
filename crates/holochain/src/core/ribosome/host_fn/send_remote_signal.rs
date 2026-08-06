@@ -1,28 +1,26 @@
 use crate::core::metrics::send_remote_signal_metric;
-use crate::core::ribosome::CallContext;
+use crate::core::ribosome::{CallContext, Ribosome};
 use crate::core::ribosome::HostFnAccess;
 use crate::core::ribosome::RibosomeError;
-use crate::core::ribosome::RibosomeT;
 use holochain_keystore::AgentPubKeyExt;
 use holochain_nonce::fresh_nonce;
 use holochain_types::access::Permission;
 use holochain_types::prelude::CellId;
 use holochain_types::prelude::ExternIO;
 use holochain_wasmer_host::prelude::*;
-use holochain_zome_types::prelude::Timestamp;
-use holochain_zome_types::signal::RemoteSignal;
-use holochain_zome_types::zome::FunctionName;
-use holochain_zome_types::zome_io::ZomeCallParams;
+use holochain_zome_types::prelude::{RemoteSignal, FunctionName, ZomeCallParams};
 use std::sync::Arc;
 use tracing::Instrument;
 use wasmer::RuntimeError;
+use holo_hash::HasHash;
+use holochain_timestamp::Timestamp;
 
 #[cfg_attr(
     feature = "instrument",
     tracing::instrument(skip(_ribosome, call_context, input))
 )]
 pub fn send_remote_signal(
-    ribosome: Arc<impl RibosomeT>,
+    ribosome: Arc<Ribosome>,
     call_context: Arc<CallContext>,
     input: RemoteSignal,
 ) -> Result<(), RuntimeError> {
@@ -45,7 +43,7 @@ pub fn send_remote_signal(
 
             tokio::task::spawn(
                 {
-                    let dna_hash = ribosome.dna_hash().clone();
+                    let dna_hash = ribosome.dna_def().as_hash().clone();
                     async move {
                         let mut to_agent_list = Vec::new();
 

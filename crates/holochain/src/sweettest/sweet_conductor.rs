@@ -8,8 +8,8 @@ use crate::conductor::ConductorHandle;
 use crate::conductor::{
     api::error::ConductorApiResult, config::ConductorConfig, error::ConductorResult, Conductor,
 };
+use crate::core::ribosome::inline_ribosome::InlineZomeStore;
 use crate::retry_until_timeout;
-#[cfg(feature = "transport-iroh")]
 use crate::test_utils::retry_fn_until_timeout;
 use ::fixt::prelude::StdRng;
 use hdk::prelude::*;
@@ -17,7 +17,6 @@ use holochain_conductor_api::{
     AdminRequest, AdminResponse, AppAuthenticationRequest, CellInfo, ProvisionedCell,
 };
 use holochain_keystore::MetaLairClient;
-use holochain_sqlite::error::DatabaseResult;
 use holochain_state::mutations::StateMutationResult;
 use holochain_state::prelude::test_db_dir;
 use holochain_state::source_chain::SourceChain;
@@ -28,7 +27,6 @@ use holochain_websocket::*;
 use kitsune2_api::DhtArc;
 use nanoid::nanoid;
 use rand::Rng;
-use rusqlite::named_params;
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
 use std::path::Path;
@@ -53,13 +51,7 @@ pub struct SweetConductor {
     db_dir: TestDir,
     keystore: MetaLairClient,
     config: Arc<ConductorConfig>,
-    /// A cache for DnaFiles such that they can be reloaded into the
-    /// RibosomeStore from here after a conductor restart.
-    /// This is relevant in particular for DnaFiles containing inline zomes
-    /// since they are not persisted to the wasm database and therefore
-    /// are not automatically loaded into the [`crate::conductor::ribosome_store::RibosomeStore`]
-    /// on conductor restart otherwise.
-    dna_files: HashMap<CellId, DnaFile>,
+    inline_zome_store_ref: InlineZomeStore,
     rendezvous: Option<DynSweetRendezvous>,
 }
 
@@ -94,11 +86,11 @@ impl SweetConductor {
         let keystore = handle.keystore().clone();
 
         Self {
+            inline_zome_store_ref: handle.inline_zome_store.clone(),
             handle: Some(SweetConductorHandle(handle)),
             db_dir: env_dir,
             keystore,
             config,
-            dna_files: HashMap::new(),
             rendezvous,
         }
     }
@@ -180,14 +172,6 @@ impl SweetConductor {
             {
                 panic!("Must use rendezvous SweetConductor if rendezvous: is specified in config.network.bootstrap_service");
             }
-            if config
-                .network
-                .signal_url
-                .as_str()
-                .starts_with("rendezvous:")
-            {
-                panic!("Must use rendezvous SweetConductor if rendezvous: is specified in config.network.signal_url");
-            }
             if config.network.relay_url.as_str().starts_with("rendezvous:") {
                 panic!("Must use rendezvous SweetConductor if rendezvous: is specified in config.network.relay_url");
             }
@@ -208,7 +192,7 @@ impl SweetConductor {
 
         let keystore = keystore.unwrap_or_else(holochain_keystore::test_keystore);
 
-        let handle = Self::handle_from_existing(keystore, &config, &[]).await;
+        let handle = Self::handle_from_existing(keystore, &config, Default::default()).await;
 
         info!("Starting with config: {:?}", config);
 
@@ -219,15 +203,16 @@ impl SweetConductor {
     pub async fn handle_from_existing(
         keystore: MetaLairClient,
         config: &ConductorConfig,
-        extra_dna_files: &[(CellId, DnaFile)],
+        inline_zome_store_ref: InlineZomeStore,
     ) -> ConductorHandle {
         NUM_CREATED.fetch_add(1, Ordering::SeqCst);
 
         Conductor::builder()
             .config(config.clone())
             .with_keystore(keystore)
+            .with_inline_zome_store(inline_zome_store_ref)
             .no_print_setup()
-            .test(extra_dna_files)
+            .test()
             .await
             .unwrap()
     }
@@ -267,26 +252,6 @@ impl SweetConductor {
         self.raw_handle().disable_app(id, reason).await
     }
 
-    /// Adds the DnaFiles to the SweetConductor cache so that they can be re-added
-    /// to the RibosomeStore after a conductor restart.
-    /// The latter is required for the case of inline zomes since they are not
-    /// persisted to the wasm database and consequently don't automatically get
-    /// reloaded into the [`crate::conductor::ribosome_store::RibosomeStore`] after a conductor restart.
-    #[cfg_attr(feature = "instrument", tracing::instrument(skip_all))]
-    async fn add_dna_files_to_sweet_conductor_cache(
-        &mut self,
-        agent_key: AgentPubKey,
-        dna_files: impl IntoIterator<Item = &DnaFile>,
-    ) -> ConductorApiResult<()> {
-        for dna_file in dna_files.into_iter() {
-            self.dna_files.insert(
-                CellId::new(dna_file.dna_hash().clone(), agent_key.clone()),
-                dna_file.to_owned(),
-            );
-        }
-        Ok(())
-    }
-
     /// Install an app
     // TODO: make this take a more flexible config for specifying things like
     // membrane proofs
@@ -314,17 +279,6 @@ impl SweetConductor {
                 None,
                 flags,
             )
-            .await?;
-
-        // Add the dna files to the SweetConductor's dna files cache to be able to re-inject them
-        // when restarting the conductor since inline zomes can't otherwise be persisted across
-        // conductor restarts.
-        let dna_files = dnas_with_roles
-            .iter()
-            .map(|dr| dr.dna())
-            .collect::<Vec<_>>();
-
-        self.add_dna_files_to_sweet_conductor_cache(agent.clone(), dna_files.clone())
             .await?;
 
         Ok(agent)
@@ -364,23 +318,12 @@ impl SweetConductor {
             )
             .await?;
 
-        // Add the dna files to the SweetConductor's dna files cache to be able to re-inject them
-        // when restarting the conductor since inline zomes can't otherwise be persisted across
-        // conductor restarts.
-        let dna_files = dnas_with_roles
-            .iter()
-            .map(|dr| dr.dna())
-            .collect::<Vec<_>>();
-
-        self.add_dna_files_to_sweet_conductor_cache(agent.clone(), dna_files.clone())
-            .await?;
-
         Ok(agent)
     }
 
     /// Install an app and enable it
     // TODO: make this take a more flexible config for specifying things like
-    // membrane proofs
+    //       membrane proofs
     #[cfg_attr(feature = "instrument", tracing::instrument(skip_all))]
     async fn install_and_enable_app(
         &mut self,
@@ -397,7 +340,6 @@ impl SweetConductor {
             .await?;
         // While it takes ~ 3 seconds to receive a URL from the home relay, await the agent
         // info of each DNA of the just installed app's agent to show up in the peer stores.
-        #[cfg(feature = "transport-iroh")]
         for dna_with_role in dnas_with_roles {
             let dna_hash = dna_with_role.dna().dna_hash();
             retry_fn_until_timeout(
@@ -462,15 +404,11 @@ impl SweetConductor {
 
     /// Construct a SweetCell for a cell which has already been created
     pub fn get_sweet_cell(&self, cell_id: CellId) -> ConductorApiResult<SweetCell> {
-        let cell_authored_db = self
-            .raw_handle()
-            .get_or_create_authored_db(cell_id.dna_hash(), cell_id.agent_pubkey().clone())?;
-        let cell_dht_db = self.raw_handle().get_dht_db(cell_id.dna_hash())?;
+        let cell_dht_store = self.raw_handle().get_dht_store(cell_id.dna_hash())?;
         let conductor_config = self.config.clone();
         Ok(SweetCell {
             cell_id,
-            cell_authored_db,
-            cell_dht_db,
+            cell_dht_store,
             conductor_config,
         })
     }
@@ -603,8 +541,6 @@ impl SweetConductor {
             .raw_handle()
             .create_clone_cell(installed_app_id, payload)
             .await?;
-        let dna_file = self.get_dna_file(&clone.cell_id).unwrap();
-        self.dna_files.insert(clone.cell_id.clone(), dna_file);
         Ok(clone)
     }
 
@@ -616,15 +552,8 @@ impl SweetConductor {
         &mut self,
         cell_id: CellId,
         coordinator_zomes: CoordinatorZomes,
-        wasms: Vec<wasm::DnaWasm>,
+        wasms: Vec<wasm::DnaWasmHashed>,
     ) -> ConductorResult<()> {
-        // Update the coordinators in the dna files cache
-        let mut dna_file = self.get_dna_file(&cell_id).unwrap();
-        dna_file
-            .update_coordinators(coordinator_zomes.clone(), wasms.clone())
-            .await
-            .unwrap();
-        self.dna_files.insert(cell_id.clone(), dna_file);
         // Update the coordinators in the conductor
         self.raw_handle()
             .update_coordinators(cell_id.clone(), coordinator_zomes, wasms)
@@ -706,10 +635,7 @@ impl SweetConductor {
     ///
     /// * `ignore_dna_files_cache` - Force the SweetConductor to load wasms and
     ///   dna definitions from the database instead of using cached values.
-    ///   When using inline zomes, this means that the inline zomes are no
-    ///   longer available after startup since they cannot be persisted
-    ///   to and read from the database.
-    pub async fn startup(&mut self, ignore_dna_files_cache: bool) {
+    pub async fn startup(&mut self) {
         if self.handle.is_none() {
             // There's a db dir in the sweet conductor and the config, that are
             // supposed to be the same. Let's assert that they are.
@@ -719,22 +645,13 @@ impl SweetConductor {
                 "SweetConductor db_dir and config.data_root_path are not the same",
             );
 
-            // Inline zomes are not persisted in the database. In order for them to be
-            // reloaded into the ribosome store after a conductor restart, we load all
-            // DnaFiles associated to apps that we have installed (including non-inline
-            // zomes) from the cache here and pass them to Self::handle_from_existing
-            // as extra_dna_files to be loaded into the ribosome store explicitly
-            // (and thereby overwrite ribosomes with DnaFiles loaded from the database).
-            // But there are cases when testing with actual wasms (not inline-zomes)
-            // where we want to ensure that the wasms can get correctly loaded from
-            // the database so we offer the option to explicitly ignore the cache here.
-            let extra_dna_files = match ignore_dna_files_cache {
-                true => vec![],
-                false => self.dna_files.clone().into_iter().collect::<Vec<_>>(),
-            };
             self.handle = Some(SweetConductorHandle(
-                Self::handle_from_existing(self.keystore.clone(), &self.config, &extra_dna_files)
-                    .await,
+                Self::handle_from_existing(
+                    self.keystore.clone(),
+                    &self.config,
+                    self.inline_zome_store_ref.clone(),
+                )
+                .await,
             ));
         } else {
             panic!("Attempted to start conductor which was already started");
@@ -872,9 +789,7 @@ impl SweetConductor {
         dna_hash: &DnaHash,
     ) -> SourceChain {
         SourceChain::new(
-            self.get_or_create_authored_db(dna_hash, agent_key.clone())
-                .unwrap(),
-            self.get_dht_db(dna_hash).unwrap(),
+            self.get_dht_store(dna_hash).unwrap(),
             self.keystore().clone(),
             agent_key.clone(),
         )
@@ -971,91 +886,38 @@ impl SweetConductor {
         self.rendezvous.as_ref()
     }
 
-    /// Check if all ops in the DHT database have been integrated.
-    pub fn all_ops_integrated(&self, dna_hash: &DnaHash) -> ConductorApiResult<bool> {
-        let dht_db = self.get_dht_db(dna_hash)?;
-        dht_db.test_read(|txn| {
-            let all_integrated = txn
-                .query_row(
-                    "SELECT NOT EXISTS(SELECT 1 FROM DhtOp WHERE when_integrated IS NULL)",
-                    [],
-                    |row| row.get::<_, bool>(0),
-                )
-                .unwrap();
-            Ok(all_integrated)
-        })
+    /// Check if all ops in the DHT store have been integrated, i.e. nothing
+    /// remains in validation or integration limbo.
+    pub async fn all_ops_integrated(&self, dna_hash: &DnaHash) -> ConductorApiResult<bool> {
+        let dht_store = self.get_dht_store(dna_hash)?;
+        let (validation_limbo, integration_limbo, _) =
+            dht_store.as_read().limbo_state_counts().await?;
+        Ok(validation_limbo == 0 && integration_limbo == 0)
     }
 
-    /// Check if all ops of a specific author have been integrated in the DHT database.
-    pub fn all_ops_of_author_integrated(
+    /// Check if all ops of a specific author have been integrated, i.e. none
+    /// of their chain ops remain in limbo in the DHT store.
+    pub async fn all_ops_of_author_integrated(
         &self,
         dna_hash: &DnaHash,
         author: &AgentPubKey,
     ) -> ConductorApiResult<bool> {
-        let dht_db = self.get_dht_db(dna_hash)?;
-        let author = author.clone();
-        dht_db.test_read(move |txn| {
-            let all_integrated = txn
-                .query_row(
-                    "SELECT NOT EXISTS(
-                            SELECT 1
-                            FROM DhtOp
-                            JOIN Action
-                            ON Action.hash = DhtOp.action_hash
-                            WHERE Action.author = :author
-                            AND DhtOp.when_integrated IS NULL
-                        )",
-                    named_params! {":author": author},
-                    |row| row.get::<_, bool>(0),
-                )
-                .unwrap();
-            Ok(all_integrated)
-        })
+        let dht_store = self.get_dht_store(dna_hash)?;
+        Ok(dht_store
+            .as_read()
+            .count_pending_ops_for_author(author)
+            .await?
+            == 0)
     }
 
-    /// Get all invalid integrated ops from the DHT database.
+    /// Get the hashes of all invalid (rejected) integrated ops from the DHT
+    /// store.
     pub async fn get_invalid_integrated_ops(
         &self,
-        dht_db: &DbWrite<DbKindDht>,
-    ) -> ConductorApiResult<Vec<DhtOpHashed>> {
-        use holo_hash::DhtOpHash;
-        use holochain_state::query::map_sql_dht_op;
-        use holochain_zome_types::prelude::ValidationStatus;
-
-        let result = dht_db
-            .read_async(move |txn| -> DatabaseResult<_> {
-                let mut stmt = txn.prepare(
-                    "
-                    SELECT
-                        DhtOp.hash as hash, DhtOp.type as dht_type, DhtOp.validation_status,
-                        Action.blob as action_blob, Entry.blob as entry_blob
-                    FROM
-                        DhtOp
-                        JOIN Action ON Action.hash = DhtOp.action_hash
-                        LEFT JOIN Entry ON Entry.hash = Action.entry_hash
-                    WHERE
-                        DhtOp.when_integrated IS NOT NULL
-                        AND DhtOp.validation_status = :status
-                    ORDER BY
-                        DhtOp.when_integrated ASC
-                ",
-                )?;
-                let rows = stmt.query_map(
-                    named_params! { ":status": ValidationStatus::Rejected },
-                    |row| {
-                        let hash: DhtOpHash = row.get("hash").unwrap();
-                        let op = map_sql_dht_op(false, "dht_type", row).unwrap();
-                        Ok(DhtOpHashed::with_pre_hashed(op, hash))
-                    },
-                )?;
-                let mut ops = Vec::new();
-                for row in rows {
-                    ops.push(row?);
-                }
-                Ok(ops)
-            })
-            .await?;
-        Ok(result)
+        dna_hash: &DnaHash,
+    ) -> ConductorApiResult<Vec<holo_hash::DhtOpHash>> {
+        let dht_store = self.get_dht_store(dna_hash)?;
+        Ok(dht_store.as_read().rejected_integrated_op_hashes().await?)
     }
 
     /// Manually trigger scheduled fn dispatch
@@ -1197,7 +1059,6 @@ impl std::fmt::Debug for SweetConductor {
         f.debug_struct("SweetConductor")
             .field("db_dir", &self.db_dir)
             .field("config", &self.config)
-            .field("dna_files", &self.dna_files)
             .finish()
     }
 }

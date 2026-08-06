@@ -41,11 +41,13 @@ pub fn validate_create_link_by_must_get_action_then_entry(
             "No action hash associated with link".to_string()
         )))?;
     let action = must_get_action(action_hash)?;
-    let entry_hash = match action.hashed.into_content() {
-        Action::Create(Create { entry_hash, .. }) => entry_hash,
-        _ => return Err(wasm_error!(WasmErrorInner::Guest(
-            format!("invalid action type")
-        ))),
+    let entry_hash = match action.hashed.into_content().data {
+        ActionData::Create(CreateData { entry_hash, .. }) => entry_hash,
+        _ => {
+            return Err(wasm_error!(WasmErrorInner::Guest(
+                "invalid action type".to_string()
+            )))
+        }
     };
     let _ = must_get_entry(entry_hash)?;
     Ok(ValidateCallbackResult::Valid)
@@ -56,11 +58,12 @@ pub fn validate_create_link_by_must_get_agent_activity(
     target_address: AnyLinkableHash,
 ) -> ExternResult<ValidateCallbackResult> {
     // Check the entry type for the given action hash
-    let agent_pk = target_address
-        .into_agent_pub_key()
-        .ok_or(wasm_error!(WasmErrorInner::Guest(
-            "Invalid target address".to_string()
-        )))?;
+    let agent_pk =
+        target_address
+            .into_agent_pub_key()
+            .ok_or(wasm_error!(WasmErrorInner::Guest(
+                "Invalid target address".to_string()
+            )))?;
     let action_hash = base_address
         .into_action_hash()
         .ok_or(wasm_error!(WasmErrorInner::Guest(
@@ -73,30 +76,10 @@ pub fn validate_create_link_by_must_get_agent_activity(
 #[hdk_extern]
 pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
     match op.flattened::<EntryTypes, LinkTypes>()? {
-        FlatOp::RegisterCreateLink {
-            base_address,
-            target_address,
-            link_type,
-            ..
-        } => match link_type {
-            LinkTypes::LinkValidationCallsMustGetValidRecord => {
-                validate_create_link_by_must_get_valid_record(base_address)
-            }
-            LinkTypes::LinkValidationCallsMustGetActionThenEntry => {
-                validate_create_link_by_must_get_action_then_entry(base_address)
-            }
-            LinkTypes::LinkValidationCallsMustGetAgentActivity => {
-                validate_create_link_by_must_get_agent_activity(base_address, target_address)
-            }
-            _ => Ok(ValidateCallbackResult::Valid),
-        },
-        FlatOp::StoreRecord(store_record) => match store_record {
-            OpRecord::CreateLink {
-                base_address,
-                target_address,
-                link_type,
-                ..
-            } => match link_type {
+        FlatOp::Link(link @ OpLink::CreateLink { link_type, .. }) => {
+            let base_address = link.base_address().clone();
+            let target_address = link.target_address().clone();
+            match link_type {
                 LinkTypes::LinkValidationCallsMustGetValidRecord => {
                     validate_create_link_by_must_get_valid_record(base_address)
                 }
@@ -107,9 +90,26 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
                     validate_create_link_by_must_get_agent_activity(base_address, target_address)
                 }
                 _ => Ok(ValidateCallbackResult::Valid),
-            },
-            _ => Ok(ValidateCallbackResult::Valid),
-        },
+            }
+        }
+        FlatOp::CreateRecord(OpRecord::CreateLink {
+            action, link_type, ..
+        }) => {
+            let base_address = action.data.base_address.clone();
+            let target_address = action.data.target_address.clone();
+            match link_type {
+                LinkTypes::LinkValidationCallsMustGetValidRecord => {
+                    validate_create_link_by_must_get_valid_record(base_address)
+                }
+                LinkTypes::LinkValidationCallsMustGetActionThenEntry => {
+                    validate_create_link_by_must_get_action_then_entry(base_address)
+                }
+                LinkTypes::LinkValidationCallsMustGetAgentActivity => {
+                    validate_create_link_by_must_get_agent_activity(base_address, target_address)
+                }
+                _ => Ok(ValidateCallbackResult::Valid),
+            }
+        }
         _ => Ok(ValidateCallbackResult::Valid),
     }
 }

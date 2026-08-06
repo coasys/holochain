@@ -7,7 +7,6 @@ use crate::core::workflow::WorkflowError;
 use crate::core::SourceChainError;
 use holochain_cascade::error::CascadeError;
 use holochain_p2p::HolochainP2pError;
-use holochain_sqlite::error::DatabaseError;
 use holochain_types::prelude::*;
 use holochain_zome_types::cell::CellId;
 use std::path::PathBuf;
@@ -16,8 +15,6 @@ use thiserror::Error;
 #[allow(missing_docs)]
 #[derive(Error, Debug)]
 pub enum CellError {
-    #[error("error dealing with workspace state: {0}")]
-    DatabaseError(#[from] DatabaseError),
     #[error(transparent)]
     CascadeError(#[from] CascadeError),
     #[error("Failed to join the create cell task: {0}")]
@@ -55,10 +52,6 @@ pub enum CellError {
     InitTimeout,
     #[error("Failed to get or create the cache for this dna {0:?}")]
     FailedToCreateCache(Box<ConductorError>),
-    #[error("Failed to get or create the authored db for this dna {0:?}")]
-    FailedToCreateAuthoredDb(Box<ConductorError>),
-    #[error("Failed to get or create the DHT db for this dna {0:?}")]
-    FailedToCreateDhtDb(Box<ConductorError>),
     #[error("Failed to get or create the dna space {0:?}")]
     FailedToCreateDnaSpace(Box<ConductorError>),
     #[error(transparent)]

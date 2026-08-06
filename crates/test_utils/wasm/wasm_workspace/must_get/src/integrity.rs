@@ -32,24 +32,29 @@ pub enum EntryTypes {
 #[hdk_extern]
 fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
     match op.flattened::<_, ()>()? {
-        FlatOp::StoreEntry(e) => match e {
+        FlatOp::CreateEntry(e) => match e {
             OpEntry::CreateEntry {
                 app_entry: EntryTypes::SelfAgentsChain(_),
-                action
+                action,
             } => {
                 let _agent_activity = must_get_agent_activity(
-                    action.author.to_owned(),
+                    action.author().to_owned(),
                     ChainFilter::new(hash_action(action.to_owned().into())?),
                 )?;
                 return Ok(ValidateCallbackResult::Valid);
             }
             OpEntry::CreateEntry {
                 app_entry: EntryTypes::SelfPrevAgentsChain(_),
-                action
+                action,
             } => {
                 let _agent_activity = must_get_agent_activity(
-                    action.author.to_owned(),
-                    ChainFilter::new(action.prev_action.to_owned()),
+                    action.author().to_owned(),
+                    ChainFilter::new(
+                        action
+                            .prev_action()
+                            .cloned()
+                            .expect("a Create action always has a prev_action"),
+                    ),
                 )?;
                 return Ok(ValidateCallbackResult::Valid);
             }
@@ -64,7 +69,7 @@ fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
                 app_entry: EntryTypes::AgentsChainRec(AgentsChainRec(author, chain_top)),
                 ..
             } => {
-                let mut filter = ChainFilter::new(chain_top).take(2);
+                let mut filter = ChainFilter::take(chain_top, 2);
                 loop {
                     let chain = must_get_agent_activity(author.clone(), filter.clone())?;
                     if chain.len() > 2 {
@@ -74,11 +79,10 @@ fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
                     }
                     match chain.last() {
                         Some(op) => {
-                            if op.action.action().action_seq() == 0 {
+                            if op.action.hashed.content.action_seq() == 0 {
                                 return Ok(ValidateCallbackResult::Valid);
                             } else {
-                                filter =
-                                    ChainFilter::new(op.action.action_address().clone()).take(2);
+                                filter = ChainFilter::take(op.action.as_hash().clone(), 2);
                             }
                         }
                         None => {

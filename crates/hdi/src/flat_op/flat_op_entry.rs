@@ -1,7 +1,8 @@
+//! The `OpEntry` / `OpUpdate` / `OpDelete` types; see the description in the [`crate::flat_op`] parent module.
 use super::*;
-use holochain_integrity_types::{CapClaimEntry, CapGrantEntry};
+use holochain_integrity_types::prelude::{CapClaimEntry, CapGrantEntry};
 
-/// Data specific to the [`Op::StoreEntry`](holochain_integrity_types::op::Op::StoreEntry)
+/// Data specific to the [`Op::CreateEntry`](holochain_integrity_types::op::Op::CreateEntry)
 /// operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpEntry<ET>
@@ -14,30 +15,25 @@ where
         /// The app defined entry with the deserialized
         /// [`Entry`](holochain_integrity_types::entry::Entry) data.
         app_entry: ET,
-        /// The [`Create`] action that creates this entry
-        action: Create,
+        /// The Create action that creates this entry.
+        action: TypedAction<CreateData>,
     },
     /// This operation stores the [`Entry`](holochain_integrity_types::entry::Entry) for an
     /// [`AgentPubKey`].
     CreateAgent {
-        /// The agent that was created
+        /// The agent key this action creates.
         agent: AgentPubKey,
-        /// The [`Create`] action that creates this agent's key
-        action: Create,
+        /// The Create action that creates this agent's key.
+        action: TypedAction<CreateData>,
     },
     /// This operation stores the [`Entry`](holochain_integrity_types::entry::Entry) for the newly
     /// created entry in an update.
     UpdateEntry {
-        /// The hash of the [`Action`](holochain_integrity_types::action::Action) that created the
-        /// original entry
-        original_action_hash: ActionHash,
-        /// The hash of the original entry
-        original_entry_hash: EntryHash,
         /// The app defined entry with the deserialized
         /// [`Entry`](holochain_integrity_types::entry::Entry) data of the new entry.
         app_entry: ET,
-        /// The [`Update`] action that updates this entry
-        action: Update,
+        /// The Update action that updates this entry.
+        action: TypedAction<UpdateData>,
     },
     /// This operation stores the [`Entry`](holochain_integrity_types::entry::Entry) for an updated
     /// [`AgentPubKey`].
@@ -46,58 +42,44 @@ where
         new_key: AgentPubKey,
         /// The original [`AgentPubKey`].
         original_key: AgentPubKey,
-        /// The hash of the original keys [`Action`](holochain_integrity_types::action::Action).
-        original_action_hash: ActionHash,
-        /// The [`Update`] action that updates this entry
-        action: Update,
+        /// The Update action that updates this entry.
+        action: TypedAction<UpdateData>,
     },
     /// This operation stores the [`Entry`](holochain_integrity_types::entry::Entry) for a CapGrant
     CreateCapGrant {
         /// The cap grant entry data.
         entry: CapGrantEntry,
-        /// The [`Create`] action that creates this cap grant
-        action: Create,
+        /// The Create action that creates this cap grant.
+        action: TypedAction<CreateData>,
     },
     /// This operation stores the [`Entry`](holochain_integrity_types::entry::Entry) for a CapClaim
     CreateCapClaim {
         /// The cap claim entry data.
         entry: CapClaimEntry,
-        /// The [`Create`] action that creates this cap claim
-        action: Create,
+        /// The Create action that creates this cap claim.
+        action: TypedAction<CreateData>,
     },
     /// This operation updates the [`Entry`](holochain_integrity_types::entry::Entry) for a
     /// CapGrant
     UpdateCapGrant {
-        /// The hash of the [`Action`](holochain_integrity_types::action::Action) that created the
-        /// original [`CapGrant`](holochain_integrity_types::action::EntryType::CapGrant)
-        original_action_hash: ActionHash,
-        /// The hash of the original
-        /// [`CapGrant`](holochain_integrity_types::action::EntryType::CapGrant)
-        original_entry_hash: EntryHash,
-        /// The [`Update`] action that updates the
-        /// [`CapGrant`](holochain_integrity_types::action::EntryType::CapGrant)
-        action: Update,
-        /// The new entry to store
+        /// The Update action that updates the
+        /// [`CapGrant`](holochain_integrity_types::action::EntryType::CapGrant).
+        action: TypedAction<UpdateData>,
+        /// The new entry to store.
         entry: CapGrantEntry,
     },
     /// This operation updates the [`Entry`](holochain_integrity_types::entry::Entry) for a
     /// CapClaim
     UpdateCapClaim {
-        /// The hash of the [`Action`](holochain_integrity_types::action::Action) that created the
-        /// original [`CapClaim`](holochain_integrity_types::action::EntryType::CapClaim)
-        original_action_hash: ActionHash,
-        /// The hash of the original
-        /// [`CapClaim`](holochain_integrity_types::action::EntryType::CapClaim)
-        original_entry_hash: EntryHash,
-        /// The [`Update`] action that updates the
-        /// [`CapClaim`](holochain_integrity_types::action::EntryType::CapClaim)
-        action: Update,
-        /// The new entry to store
+        /// The Update action that updates the
+        /// [`CapClaim`](holochain_integrity_types::action::EntryType::CapClaim).
+        action: TypedAction<UpdateData>,
+        /// The new entry to store.
         entry: CapClaimEntry,
     },
 }
 
-/// Data specific to the [`Op::RegisterUpdate`](holochain_integrity_types::op::Op::RegisterUpdate)
+/// Data specific to the [`Op::Update`](holochain_integrity_types::op::Op::Update)
 /// operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpUpdate<ET>
@@ -110,19 +92,16 @@ where
         /// The app defined entry type with the deserialized
         /// [`Entry`](holochain_integrity_types::entry::Entry) data of the new entry.
         app_entry: ET,
-        /// The action that updates this entry
-        action: Update,
+        /// The action that updates this entry.
+        action: TypedAction<UpdateData>,
     },
     /// This operation registers an update from the original private
     /// [`Entry`](holochain_integrity_types::entry::Entry).
     PrivateEntry {
-        /// The hash of the original original
-        /// [`Action`](holochain_integrity_types::action::Action).
-        original_action_hash: ActionHash,
         /// The unit version of the app defined entry type for the new entry.
         app_entry_type: <ET as UnitEnum>::Unit,
-        /// The action that updates this entry
-        action: Update,
+        /// The action that updates this entry.
+        action: TypedAction<UpdateData>,
     },
     /// This operation registers an update from the original [`AgentPubKey`].
     Agent {
@@ -130,36 +109,156 @@ where
         new_key: AgentPubKey,
         /// The original [`AgentPubKey`].
         original_key: AgentPubKey,
-        /// The hash of the original original
-        /// [`Action`](holochain_integrity_types::action::Action).
-        original_action_hash: ActionHash,
-        /// The [`Update`] action that updates the agent's key
-        action: Update,
+        /// The Update action that updates the agent's key.
+        action: TypedAction<UpdateData>,
     },
     /// This operation registers an update from a Capability Claim.
     CapClaim {
-        /// The hash of the original original
-        /// [`Action`](holochain_integrity_types::action::Action).
-        original_action_hash: ActionHash,
-        /// The [`Update`] action that updates the
-        /// [`CapClaim`](holochain_integrity_types::action::EntryType::CapClaim)
-        action: Update,
+        /// The Update action that updates the
+        /// [`CapClaim`](holochain_integrity_types::action::EntryType::CapClaim).
+        action: TypedAction<UpdateData>,
     },
     /// This operation registers an update from a Capability Grant.
     CapGrant {
-        /// The hash of the original original
-        /// [`Action`](holochain_integrity_types::action::Action).
-        original_action_hash: ActionHash,
-        /// The [`Update`] action that updates the
-        /// [`CapGrant`](holochain_integrity_types::action::EntryType::CapGrant)
-        action: Update,
+        /// The Update action that updates the
+        /// [`CapGrant`](holochain_integrity_types::action::EntryType::CapGrant).
+        action: TypedAction<UpdateData>,
     },
 }
 
-/// Data specific to the [`Op::RegisterDelete`](holochain_integrity_types::op::Op::RegisterDelete)
+impl<ET: UnitEnum> OpUpdate<ET> {
+    /// The `Update` action shared by every variant.
+    pub fn action(&self) -> &TypedAction<UpdateData> {
+        match self {
+            OpUpdate::Entry { action, .. }
+            | OpUpdate::PrivateEntry { action, .. }
+            | OpUpdate::Agent { action, .. }
+            | OpUpdate::CapClaim { action, .. }
+            | OpUpdate::CapGrant { action, .. } => action,
+        }
+    }
+
+    /// The hash of the action that created the entry being updated.
+    pub fn original_action_hash(&self) -> &ActionHash {
+        &self.action().data.original_action_address
+    }
+
+    /// The hash of the original entry being updated.
+    pub fn original_entry_hash(&self) -> &EntryHash {
+        &self.action().data.original_entry_address
+    }
+}
+
+/// Data specific to the [`Op::Delete`](holochain_integrity_types::op::Op::Delete)
 /// operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpDelete {
-    /// The [`Delete`] action that deletes this entry
-    pub action: Delete,
+    /// The Delete action that deletes this entry.
+    pub action: TypedAction<DeleteData>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::short_hand::{ah, ak, eh};
+
+    fn header() -> ActionHeader {
+        ActionHeader {
+            author: ak(1),
+            timestamp: Timestamp::from_micros(0),
+            action_seq: 0,
+            prev_action: None,
+        }
+    }
+
+    #[test]
+    fn op_delete_constructs_and_clones() {
+        let op = OpDelete {
+            action: TypedAction {
+                header: header(),
+                data: DeleteData {
+                    deletes_address: ah(2),
+                    deletes_entry_address: eh(3),
+                },
+            },
+        };
+        assert_eq!(op.clone(), op);
+    }
+
+    fn update_action(
+        original_action_address: ActionHash,
+        original_entry_address: EntryHash,
+    ) -> TypedAction<UpdateData> {
+        TypedAction {
+            header: header(),
+            data: UpdateData {
+                original_action_address,
+                original_entry_address,
+                entry_type: holochain_integrity_types::action::EntryType::AgentPubKey,
+                entry_hash: eh(9),
+            },
+        }
+    }
+
+    #[test]
+    fn op_update_action_and_hashes_are_uniform_across_variants() {
+        let action = update_action(ah(4), eh(5));
+        let op = OpUpdate::<()>::CapClaim {
+            action: action.clone(),
+        };
+        assert_eq!(op.action(), &action);
+        assert_eq!(op.original_action_hash(), &ah(4));
+        assert_eq!(op.original_entry_hash(), &eh(5));
+    }
+
+    #[test]
+    fn op_update_entry_has_the_same_accessors_as_every_other_variant() {
+        let action = update_action(ah(6), eh(7));
+        let op = OpUpdate::<()>::Entry {
+            app_entry: (),
+            action: action.clone(),
+        };
+        assert_eq!(op.original_action_hash(), &ah(6));
+        assert_eq!(op.original_entry_hash(), &eh(7));
+    }
+
+    #[test]
+    fn op_entry_create_agent_carries_the_agent_key() {
+        let action = TypedAction {
+            header: header(),
+            data: CreateData {
+                entry_type: holochain_integrity_types::action::EntryType::AgentPubKey,
+                entry_hash: eh(9),
+            },
+        };
+        let op = OpEntry::<()>::CreateAgent {
+            agent: AgentPubKey::from(eh(9)),
+            action,
+        };
+        match op {
+            OpEntry::CreateAgent { agent, .. } => assert_eq!(agent, AgentPubKey::from(eh(9))),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn op_entry_update_agent_carries_both_keys() {
+        let action = update_action(ah(10), eh(11));
+        let op = OpEntry::<()>::UpdateAgent {
+            new_key: AgentPubKey::from(eh(9)),
+            original_key: AgentPubKey::from(eh(11)),
+            action,
+        };
+        match op {
+            OpEntry::UpdateAgent {
+                new_key,
+                original_key,
+                ..
+            } => {
+                assert_eq!(new_key, AgentPubKey::from(eh(9)));
+                assert_eq!(original_key, AgentPubKey::from(eh(11)));
+            }
+            _ => unreachable!(),
+        }
+    }
 }

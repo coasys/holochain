@@ -33,6 +33,11 @@ pub struct ConductorBuilder {
     /// With these PRAGMA commands, you'll be able to run sqlcipher
     /// directly to manipulate holochain databases.
     pub danger_print_db_secrets: bool,
+
+    /// An [`InlineZomeStore`] to use, permitting a new conductor startup to use inline zomes that
+    /// were installed on a previous run.
+    #[cfg(feature = "test_utils")]
+    pub inline_zome_store: Option<crate::core::ribosome::inline_ribosome::InlineZomeStore>,
 }
 
 impl ConductorBuilder {
@@ -107,7 +112,7 @@ impl ConductorBuilder {
             keystore.clone()
         } else {
             pub(crate) fn warn_no_encryption() {
-                #[cfg(not(feature = "sqlite-encrypted"))]
+                #[cfg(not(feature = "encryption"))]
                 {
                     const MSG: &str = "WARNING: running without local db encryption";
                     eprintln!("{}", MSG);
@@ -209,12 +214,20 @@ impl ConductorBuilder {
 
         let net_spaces1 = spaces.clone();
         let net_spaces2 = spaces.clone();
-        let net_spaces3 = spaces.clone();
-        let conductor_db = spaces.conductor_db.clone();
+        let conductor_store = spaces.conductor_store.clone();
         let p2p_config = holochain_p2p::HolochainP2pConfig {
-            auth_material: config
+            auth_material_bootstrap: config
                 .network
-                .base64_auth_material
+                .base64_auth_material_bootstrap
+                .as_ref()
+                .map(|m| {
+                    use base64::prelude::*;
+                    BASE64_STANDARD.decode(m).map_err(ConductorError::other)
+                })
+                .transpose()?,
+            auth_material_relay: config
+                .network
+                .base64_auth_material_relay
                 .as_ref()
                 .map(|m| {
                     use base64::prelude::*;
@@ -222,20 +235,16 @@ impl ConductorBuilder {
                 })
                 .transpose()?,
             get_db_peer_meta: Arc::new(move |dna_hash| {
-                let res = net_spaces1.peer_meta_store_db(&dna_hash);
+                let res = net_spaces1.peer_meta_store(&dna_hash);
                 Box::pin(async move { res.map_err(holochain_p2p::HolochainP2pError::other) })
             }),
-            get_db_op_store: Arc::new(move |dna_hash| {
-                let res = net_spaces2.dht_db(&dna_hash);
+            get_dht_store: Arc::new(move |dna_hash| {
+                let res = net_spaces2.dht_store(&dna_hash);
                 Box::pin(async move { res.map_err(holochain_p2p::HolochainP2pError::other) })
             }),
-            get_db_cache: Arc::new(move |dna_hash| {
-                let res = net_spaces3.cache(&dna_hash);
-                Box::pin(async move { res.map_err(holochain_p2p::HolochainP2pError::other) })
-            }),
-            get_conductor_db: Arc::new(move || {
-                let conductor_db = conductor_db.clone();
-                Box::pin(async move { conductor_db })
+            get_conductor_store: Arc::new(move || {
+                let conductor_store = conductor_store.clone();
+                Box::pin(async move { conductor_store })
             }),
             target_arc_factor: config.network.target_arc_factor,
             network_config: Some(config.network.to_k2_config()?),
@@ -270,6 +279,8 @@ impl ConductorBuilder {
             spaces,
             post_commit_sender,
             outcome_tx,
+            #[cfg(feature = "test_utils")]
+            builder.inline_zome_store.unwrap_or_default(),
         );
 
         // Create handle
@@ -374,13 +385,20 @@ impl ConductorBuilder {
         self
     }
 
+    /// Add an inline zome store
+    #[cfg(feature = "test_utils")]
+    pub fn with_inline_zome_store(
+        mut self,
+        inline_zome_store: crate::core::ribosome::inline_ribosome::InlineZomeStore,
+    ) -> Self {
+        self.inline_zome_store = Some(inline_zome_store);
+        self
+    }
+
     /// Build a Conductor with a test environment
     #[cfg(any(test, feature = "test_utils"))]
     #[cfg_attr(feature = "instrument", tracing::instrument(skip_all, fields(scope = self.config.network.tracing_scope)))]
-    pub async fn test(
-        self,
-        extra_dna_files: &[(CellId, DnaFile)],
-    ) -> ConductorResult<ConductorHandle> {
+    pub async fn test(self) -> ConductorResult<ConductorHandle> {
         if rustls::crypto::aws_lc_rs::default_provider()
             .install_default()
             .is_err()
@@ -431,12 +449,20 @@ impl ConductorBuilder {
 
         let net_spaces1 = spaces.clone();
         let net_spaces2 = spaces.clone();
-        let net_spaces3 = spaces.clone();
-        let conductor_db = spaces.conductor_db.clone();
+        let conductor_store = spaces.conductor_store.clone();
         let p2p_config = holochain_p2p::HolochainP2pConfig {
-            auth_material: config
+            auth_material_bootstrap: config
                 .network
-                .base64_auth_material
+                .base64_auth_material_bootstrap
+                .as_ref()
+                .map(|m| {
+                    use base64::prelude::*;
+                    BASE64_STANDARD.decode(m).map_err(ConductorError::other)
+                })
+                .transpose()?,
+            auth_material_relay: config
+                .network
+                .base64_auth_material_relay
                 .as_ref()
                 .map(|m| {
                     use base64::prelude::*;
@@ -444,20 +470,16 @@ impl ConductorBuilder {
                 })
                 .transpose()?,
             get_db_peer_meta: Arc::new(move |dna_hash| {
-                let res = net_spaces1.peer_meta_store_db(&dna_hash);
+                let res = net_spaces1.peer_meta_store(&dna_hash);
                 Box::pin(async move { res.map_err(holochain_p2p::HolochainP2pError::other) })
             }),
-            get_db_op_store: Arc::new(move |dna_hash| {
-                let res = net_spaces2.dht_db(&dna_hash);
+            get_dht_store: Arc::new(move |dna_hash| {
+                let res = net_spaces2.dht_store(&dna_hash);
                 Box::pin(async move { res.map_err(holochain_p2p::HolochainP2pError::other) })
             }),
-            get_db_cache: Arc::new(move |dna_hash| {
-                let res = net_spaces3.cache(&dna_hash);
-                Box::pin(async move { res.map_err(holochain_p2p::HolochainP2pError::other) })
-            }),
-            get_conductor_db: Arc::new(move || {
-                let conductor_db = conductor_db.clone();
-                Box::pin(async move { conductor_db })
+            get_conductor_store: Arc::new(move || {
+                let conductor_store = conductor_store.clone();
+                Box::pin(async move { conductor_store })
             }),
             target_arc_factor: config.network.target_arc_factor,
             network_config: Some(config.network.to_k2_config()?),
@@ -489,24 +511,14 @@ impl ConductorBuilder {
             spaces,
             post_commit_sender,
             outcome_tx,
+            #[cfg(feature = "test_utils")]
+            builder.inline_zome_store.unwrap_or_default(),
         );
 
         // Create handle
         let handle: ConductorHandle = Arc::new(conductor);
 
         holochain_p2p.register_handler(handle.clone()).await?;
-
-        // Register extra DNAs. In particular, the ones with InlineZomes will
-        // not be registered in the Wasm DB and cannot be automatically loaded
-        // on conductor restart. Hence they need to get passed along here
-        // via the extra_dna_files argument (populated from the SweetConductor's
-        // DnaFile cache) in order to be added to the RibosomeStore manually.
-        for (cell_id, dna_file) in extra_dna_files {
-            handle
-                .register_dna_file(cell_id.clone(), dna_file.clone())
-                .await
-                .expect("Could not install DNA");
-        }
 
         Self::finish(
             handle,

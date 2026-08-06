@@ -1,27 +1,6 @@
 use crate::*;
 use strum_macros::AsRefStr;
 
-/// Struct for encoding DhtOp as bytes.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct WireDhtOpData {
-    /// The dht op.
-    pub op_data: holochain_types::dht_op::DhtOp,
-}
-
-impl WireDhtOpData {
-    /// Encode as bytes.
-    pub fn encode(self) -> Result<bytes::Bytes, HolochainP2pError> {
-        let mut b = bytes::BufMut::writer(bytes::BytesMut::new());
-        rmp_serde::encode::write_named(&mut b, &self).map_err(HolochainP2pError::other)?;
-        Ok(b.into_inner().freeze())
-    }
-
-    /// Decode from bytes.
-    pub fn decode(data: &[u8]) -> Result<Self, HolochainP2pError> {
-        rmp_serde::decode::from_slice(data).map_err(HolochainP2pError::other)
-    }
-}
-
 /// Encoding for the hcp2p preflight message.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct WirePreflightMessage {
@@ -106,7 +85,7 @@ pub enum WireMessage {
         msg_id: u64,
         to_agent: AgentPubKey,
         agent: AgentPubKey,
-        filter: holochain_zome_types::chain::ChainFilter,
+        filter: ChainFilter,
     },
     MustGetAgentActivityRes {
         msg_id: u64,
@@ -125,12 +104,26 @@ pub enum WireMessage {
         zome_call_params_serialized: ExternIO,
         signature: Signature,
     },
+    RemoteSignalDirectEvt {
+        to_agent: AgentPubKey,
+        signal: Vec<u8>,
+        from_agent: AgentPubKey,
+        signature: Signature,
+    },
     PublishCountersignEvt {
         op: ChainOp,
     },
     CountersigningSessionNegotiationEvt {
         to_agent: AgentPubKey,
         message: event::CountersigningSessionNegotiationMessage,
+    },
+    /// Lightweight ping request for measuring peer round-trip latency.
+    PingReq {
+        msg_id: u64,
+    },
+    /// Response to a [`PingReq`](Self::PingReq), sent immediately upon receipt.
+    PingRes {
+        msg_id: u64,
     },
 }
 
@@ -168,6 +161,8 @@ impl WireMessage {
             WireMessage::MustGetAgentActivityRes { msg_id, .. } => Some(*msg_id),
             WireMessage::SendValidationReceiptsReq { msg_id, .. } => Some(*msg_id),
             WireMessage::SendValidationReceiptsRes { msg_id, .. } => Some(*msg_id),
+            WireMessage::PingReq { msg_id, .. } => Some(*msg_id),
+            WireMessage::PingRes { msg_id, .. } => Some(*msg_id),
             _ => None,
         }
     }
@@ -283,7 +278,7 @@ impl WireMessage {
     pub fn must_get_agent_activity_req(
         to_agent: AgentPubKey,
         agent: AgentPubKey,
-        filter: holochain_zome_types::chain::ChainFilter,
+        filter: ChainFilter,
     ) -> (u64, WireMessage) {
         let msg_id = next_msg_id();
         (
@@ -340,6 +335,20 @@ impl WireMessage {
         }
     }
 
+    pub fn remote_signal_direct_evt(
+        to_agent: AgentPubKey,
+        signal: Vec<u8>,
+        from_agent: AgentPubKey,
+        signature: Signature,
+    ) -> WireMessage {
+        Self::RemoteSignalDirectEvt {
+            to_agent,
+            signal,
+            from_agent,
+            signature,
+        }
+    }
+
     /// Outgoing "PublishCountersign" notify event.
     pub fn publish_countersign_evt(op: ChainOp) -> WireMessage {
         Self::PublishCountersignEvt { op }
@@ -351,5 +360,16 @@ impl WireMessage {
         message: event::CountersigningSessionNegotiationMessage,
     ) -> WireMessage {
         Self::CountersigningSessionNegotiationEvt { to_agent, message }
+    }
+
+    /// Outgoing "Ping" request for latency measurement.
+    pub fn ping_req() -> (u64, WireMessage) {
+        let msg_id = next_msg_id();
+        (msg_id, Self::PingReq { msg_id })
+    }
+
+    /// Incoming "Ping" response.
+    pub fn ping_res(msg_id: u64) -> WireMessage {
+        Self::PingRes { msg_id }
     }
 }

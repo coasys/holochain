@@ -3,8 +3,9 @@ use crate::util::AbortOnDropHandle;
 use holo_hash::{ActionHash, DnaHash};
 use holochain_conductor_api::{
     AdminInterfaceConfig, AdminRequest, AdminResponse, AppAuthenticationToken,
-    AppAuthenticationTokenIssued, AppInfo, AppInterfaceInfo, AppStatusFilter, FullStateDump,
-    IssueAppAuthenticationTokenPayload, PeerMetaInfo, StorageInfo,
+    AppAuthenticationTokenIssued, AppInfo, AppInterfaceInfo, AppStatusFilter, DhtOpsCursor,
+    FullStateDump, IssueAppAuthenticationTokenPayload, OpTimingsCursor, OpTimingsDump,
+    PeerMetaInfo, SourceChainCursor, StorageInfo,
 };
 use holochain_types::network::HolochainTransportStats;
 use holochain_types::websocket::AllowedOrigins;
@@ -16,9 +17,9 @@ use holochain_types::{
     },
 };
 use holochain_websocket::{connect, ConnectRequest, WebsocketConfig, WebsocketSender};
-use holochain_zome_types::{
-    capability::GrantedFunctions,
-    prelude::{DnaDef, GrantZomeCallCapabilityPayload},
+use holochain_zome_types::prelude::{
+    CapAccess, DnaDef, GrantZomeCallCapabilityPayload, GrantedFunctions, ZomeCallCapGrant,
+    CAP_SECRET_BYTES,
 };
 use kitsune2_api::Url;
 use serde::{Deserialize, Serialize};
@@ -61,7 +62,7 @@ impl AdminWebsocket {
     /// use std::net::Ipv4Addr;
     /// use holochain_client::AdminWebsocket;
     ///
-    /// let admin_ws = AdminWebsocket::connect((Ipv4Addr::LOCALHOST, 30_000), String::from("my_cli_app")).await.unwrap();
+    /// let admin_ws = AdminWebsocket::connect((Ipv4Addr::LOCALHOST, 30_000), Some(String::from("my_cli_app"))).await.unwrap();
     /// # }
     /// ```
     ///
@@ -449,9 +450,21 @@ impl AdminWebsocket {
         }
     }
 
-    pub async fn dump_state(&self, cell_id: CellId) -> ConductorApiResult<String> {
+    /// Dump one exclusive page of a cell's source-chain state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the pagination arguments are invalid.
+    pub async fn dump_state(
+        &self,
+        cell_id: CellId,
+        source_chain_cursor: Option<SourceChainCursor>,
+        limit: Option<u32>,
+    ) -> ConductorApiResult<String> {
         let msg = AdminRequest::DumpState {
             cell_id: Box::new(cell_id),
+            source_chain_cursor,
+            limit,
         };
         let response = self.send(msg).await?;
         match response {
@@ -469,18 +482,51 @@ impl AdminWebsocket {
         }
     }
 
+    /// Dump one page of a cell's full state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the limit is zero.
     pub async fn dump_full_state(
         &self,
         cell_id: CellId,
-        dht_ops_cursor: Option<u64>,
+        dht_ops_cursor: Option<DhtOpsCursor>,
+        limit: Option<u32>,
     ) -> ConductorApiResult<FullStateDump> {
         let msg = AdminRequest::DumpFullState {
             cell_id: Box::new(cell_id),
             dht_ops_cursor,
+            limit,
         };
         let response = self.send(msg).await?;
         match response {
             AdminResponse::FullStateDumped(state) => Ok(state),
+            _ => unreachable!("Unexpected response {:?}", response),
+        }
+    }
+
+    /// Dump one page of a DNA's DHT-op lifecycle timings.
+    ///
+    /// Pass the previous page's `cursor` to resume; `None` starts at the
+    /// oldest op by received time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the limit is zero.
+    pub async fn dump_op_timings(
+        &self,
+        dna_hash: DnaHash,
+        cursor: Option<OpTimingsCursor>,
+        limit: Option<u32>,
+    ) -> ConductorApiResult<OpTimingsDump> {
+        let msg = AdminRequest::DumpOpTimings {
+            dna_hash,
+            cursor,
+            limit,
+        };
+        let response = self.send(msg).await?;
+        match response {
+            AdminResponse::OpTimingsDumped(timings) => Ok(timings),
             _ => unreachable!("Unexpected response {:?}", response),
         }
     }
@@ -558,7 +604,6 @@ impl AdminWebsocket {
         &self,
         request: AuthorizeSigningCredentialsPayload,
     ) -> ConductorApiResult<crate::signing::client_signing::SigningCredentials> {
-        use holochain_zome_types::capability::{ZomeCallCapGrant, CAP_SECRET_BYTES};
         use rand::{rngs::OsRng, RngCore};
         use std::collections::BTreeSet;
 
@@ -574,7 +619,7 @@ impl AdminWebsocket {
             cell_id: request.cell_id,
             cap_grant: ZomeCallCapGrant {
                 tag: "zome-call-signing-key".to_string(),
-                access: holochain_zome_types::capability::CapAccess::Assigned {
+                access: CapAccess::Assigned {
                     secret: cap_secret.into(),
                     assignees: BTreeSet::from([signing_agent_key.clone()]),
                 },

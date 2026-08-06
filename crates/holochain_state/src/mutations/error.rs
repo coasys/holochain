@@ -4,16 +4,10 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum StateMutationError {
     #[error(transparent)]
-    Sql(#[from] holochain_sqlite::rusqlite::Error),
-
-    #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
 
     #[error(transparent)]
-    DatabaseError(#[from] holochain_sqlite::error::DatabaseError),
-
-    #[error(transparent)]
-    DhtOpError(#[from] holochain_types::dht_op::DhtOpError),
+    DhtOpError(#[from] holochain_types::error::DhtOpError),
 
     #[error(transparent)]
     StateQueryError(#[from] StateQueryError),
@@ -29,9 +23,6 @@ pub enum StateMutationError {
 
     #[error("Cannot remove a fully published countersigning session")]
     CannotRemoveFullyPublished,
-
-    #[error("The operation was not found in the cache")]
-    OpNotFoundInCache,
 
     #[error("{0}")]
     Other(String),

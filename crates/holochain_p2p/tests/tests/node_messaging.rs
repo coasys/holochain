@@ -3,6 +3,7 @@ use holochain_keystore::*;
 use holochain_p2p::actor::{GetLinksRequestOptions, NetworkRequestOptions};
 use holochain_p2p::event::*;
 use holochain_p2p::*;
+use holochain_state::data::PeerMetaStore;
 use holochain_trace::test_run;
 use holochain_types::prelude::*;
 use kitsune2_api::*;
@@ -11,6 +12,38 @@ use std::{sync::Arc, time::Duration};
 
 const UNRESPONSIVE_TIMEOUT: Duration = Duration::from_secs(15);
 const WAIT_BETWEEN_CALLS: Duration = Duration::from_millis(10);
+const PEER_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Wait until `hc`'s peer store for `dna_hash` knows about at least
+/// `expected_count` agents.
+///
+/// Tests that immediately call p2p methods (send_remote_signal,
+/// send_validation_receipts, get, ...) race the iroh peer-discovery handshake
+/// triggered by `spawn_test`; on slower runners (notably Windows CI) the
+/// handshake outlasts the in-test timeout, and the call fails with
+/// `"could not find url for peer"` or a peer-lookup timeout. Calling this
+/// before the racy operation makes the test wait for discovery to complete.
+async fn wait_for_peers(hc: &actor::DynHcP2p, dna_hash: DnaHash, expected_count: usize) {
+    tokio::time::timeout(PEER_DISCOVERY_TIMEOUT, async {
+        loop {
+            if hc
+                .peer_store(dna_hash.clone())
+                .await
+                .unwrap()
+                .get_all()
+                .await
+                .unwrap()
+                .len()
+                >= expected_count
+            {
+                break;
+            }
+            tokio::time::sleep(WAIT_BETWEEN_CALLS).await;
+        }
+    })
+    .await
+    .expect("peer discovery timed out");
+}
 
 /// An implementation of [`HcP2pHandler`] that doesn't ever respond to requests
 #[derive(Clone, Debug)]
@@ -27,10 +60,21 @@ impl HcP2pHandler for UnresponsiveHandler {
         Box::pin(std::future::pending())
     }
 
+    fn handle_remote_signal_direct(
+        &self,
+        _dna_hash: DnaHash,
+        _to_agent: AgentPubKey,
+        _signal: Vec<u8>,
+        _from_agent: AgentPubKey,
+        _signature: Signature,
+    ) -> BoxFut<'_, HolochainP2pResult<()>> {
+        Box::pin(std::future::pending())
+    }
+
     fn handle_publish(
         &self,
         _dna_hash: DnaHash,
-        _ops: Vec<holochain_types::dht_op::DhtOp>,
+        _ops: Vec<(holochain_types::op::DhtOp, bool)>,
     ) -> BoxFut<'_, HolochainP2pResult<()>> {
         Box::pin(std::future::pending())
     }
@@ -79,7 +123,7 @@ impl HcP2pHandler for UnresponsiveHandler {
         _dna_hash: DnaHash,
         _to_agent: AgentPubKey,
         _author: AgentPubKey,
-        _filter: holochain_zome_types::chain::ChainFilter,
+        _filter: ChainFilter,
     ) -> BoxFut<'_, HolochainP2pResult<MustGetAgentActivityResponse>> {
         Box::pin(std::future::pending())
     }
@@ -96,7 +140,134 @@ impl HcP2pHandler for UnresponsiveHandler {
     fn handle_publish_countersign(
         &self,
         _dna_hash: DnaHash,
-        _op: holochain_types::dht_op::ChainOp,
+        _op: holochain_types::op::ChainOp,
+    ) -> BoxFut<'_, HolochainP2pResult<()>> {
+        Box::pin(std::future::pending())
+    }
+
+    fn handle_countersigning_session_negotiation(
+        &self,
+        _dna_hash: DnaHash,
+        _to_agent: AgentPubKey,
+        _message: CountersigningSessionNegotiationMessage,
+    ) -> BoxFut<'_, HolochainP2pResult<()>> {
+        Box::pin(std::future::pending())
+    }
+}
+
+/// Answers `get_agent_activity` by echoing the responding agent
+/// (`to_agent`) into the response's `agent` field, so tests can verify
+/// which peer produced which response. All other requests hang forever.
+#[derive(Clone, Debug)]
+struct EchoingActivityHandler;
+
+impl HcP2pHandler for EchoingActivityHandler {
+    fn handle_call_remote(
+        &self,
+        _dna_hash: DnaHash,
+        _to_agent: AgentPubKey,
+        _zome_call_params_serialized: ExternIO,
+        _signature: Signature,
+    ) -> BoxFut<'_, HolochainP2pResult<SerializedBytes>> {
+        Box::pin(std::future::pending())
+    }
+
+    fn handle_remote_signal_direct(
+        &self,
+        _dna_hash: DnaHash,
+        _to_agent: AgentPubKey,
+        _signal: Vec<u8>,
+        _from_agent: AgentPubKey,
+        _signature: Signature,
+    ) -> BoxFut<'_, HolochainP2pResult<()>> {
+        Box::pin(std::future::pending())
+    }
+
+    fn handle_publish(
+        &self,
+        _dna_hash: DnaHash,
+        _ops: Vec<(holochain_types::op::DhtOp, bool)>,
+    ) -> BoxFut<'_, HolochainP2pResult<()>> {
+        Box::pin(std::future::pending())
+    }
+
+    fn handle_get(
+        &self,
+        _dna_hash: DnaHash,
+        _to_agent: AgentPubKey,
+        _dht_hash: holo_hash::AnyDhtHash,
+    ) -> BoxFut<'_, HolochainP2pResult<WireOps>> {
+        Box::pin(std::future::pending())
+    }
+
+    fn handle_get_links(
+        &self,
+        _dna_hash: DnaHash,
+        _to_agent: AgentPubKey,
+        _link_key: WireLinkKey,
+        _options: GetLinksOptions,
+    ) -> BoxFut<'_, HolochainP2pResult<WireLinkOps>> {
+        Box::pin(std::future::pending())
+    }
+
+    fn handle_count_links(
+        &self,
+        _dna_hash: DnaHash,
+        _to_agent: AgentPubKey,
+        _query: WireLinkQuery,
+    ) -> BoxFut<'_, HolochainP2pResult<CountLinksResponse>> {
+        Box::pin(std::future::pending())
+    }
+
+    fn handle_get_agent_activity(
+        &self,
+        _dna_hash: DnaHash,
+        to_agent: AgentPubKey,
+        _agent: AgentPubKey,
+        _query: ChainQueryFilter,
+        _options: GetActivityOptions,
+    ) -> BoxFut<'_, HolochainP2pResult<AgentActivityResponse>> {
+        Box::pin(async move {
+            Ok(AgentActivityResponse {
+                // Echo the responder identity so tests can check pairing.
+                agent: to_agent,
+                valid_activity: ChainItems::NotRequested,
+                rejected_activity: ChainItems::NotRequested,
+                status: ChainStatus::Empty,
+                // A highest observed action marks the response as
+                // non-empty, so the multi fan-out does not discard it.
+                highest_observed: Some(HighestObserved {
+                    action_seq: 1,
+                    hash: vec![ActionHash::from_raw_36(vec![7; 36])],
+                }),
+                warrants: Vec::new(),
+            })
+        })
+    }
+
+    fn handle_must_get_agent_activity(
+        &self,
+        _dna_hash: DnaHash,
+        _to_agent: AgentPubKey,
+        _author: AgentPubKey,
+        _filter: holochain_zome_types::prelude::ChainFilter,
+    ) -> BoxFut<'_, HolochainP2pResult<MustGetAgentActivityResponse>> {
+        Box::pin(std::future::pending())
+    }
+
+    fn handle_validation_receipts_received(
+        &self,
+        _dna_hash: DnaHash,
+        _to_agent: AgentPubKey,
+        _receipts: ValidationReceiptBundle,
+    ) -> BoxFut<'_, HolochainP2pResult<()>> {
+        Box::pin(std::future::pending())
+    }
+
+    fn handle_publish_countersign(
+        &self,
+        _dna_hash: DnaHash,
+        _op: holochain_types::op::ChainOp,
     ) -> BoxFut<'_, HolochainP2pResult<()>> {
         Box::pin(std::future::pending())
     }
@@ -218,6 +389,9 @@ async fn test_remote_signal() {
     let (agent1, _hc1, _) = spawn_test(dna_hash.clone(), handler.clone(), &addr).await;
     let (_agent2, hc2, _) = spawn_test(dna_hash.clone(), handler.clone(), &addr).await;
 
+    // Wait for hc2 to discover agent1 via the bootstrap before sending.
+    wait_for_peers(&hc2, dna_hash.clone(), 2).await;
+
     hc2.send_remote_signal(
         dna_hash,
         vec![(agent1, ExternIO(b"hello".to_vec()), Signature([0; 64]))],
@@ -238,16 +412,20 @@ async fn test_remote_signal() {
     .unwrap();
 }
 
-fn test_dht_op(authored_timestamp: holochain_types::prelude::Timestamp) -> DhtOpHashed {
-    let mut create = ::fixt::fixt!(Create);
-    create.timestamp = authored_timestamp;
+fn test_dht_op(
+    authored_timestamp: holochain_types::prelude::Timestamp,
+) -> holochain_types::op::DhtOp {
+    use holochain_types::fixt::CreateAction;
+    use holochain_types::op::{ChainOp, DhtOp, OpEntry};
+    use holochain_zome_types::action::SignedAction;
 
-    let op = DhtOp::from(ChainOp::StoreRecord(
-        ::fixt::fixt!(Signature),
-        Action::Create(create),
-        RecordEntry::Present(::fixt::fixt!(Entry)),
-    ));
-    DhtOpHashed::from_content_sync(op)
+    let mut action = ::fixt::fixt!(Action, CreateAction);
+    action.header.timestamp = authored_timestamp;
+    let signed = SignedAction::new(action, ::fixt::fixt!(Signature));
+    DhtOp::ChainOp(Box::new(ChainOp::CreateRecord(
+        signed,
+        OpEntry::Present(::fixt::fixt!(Entry)),
+    )))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -264,7 +442,7 @@ async fn test_publish() {
     hc2.test_set_full_arcs(space.clone()).await;
 
     let op = test_dht_op(holochain_types::prelude::Timestamp::now());
-    let op_hash = op.as_hash().clone();
+    let op_hash = op.to_hash();
 
     // TODO invoking process_incoming_ops is a hack,
     //      prefer calling a function on the mem store directly.
@@ -273,9 +451,11 @@ async fn test_publish() {
         .await
         .unwrap()
         .op_store()
-        .process_incoming_ops(vec![bytes::Bytes::from(
-            holochain_serialized_bytes::encode(op.as_content()).unwrap(),
-        )])
+        .process_incoming_ops(vec![IncomingOp {
+            op_id: op.to_hash().to_located_k2_op_id(&op.dht_basis()),
+            op_data: bytes::Bytes::from(holochain_serialized_bytes::encode(&op).unwrap()),
+            metadata: None,
+        }])
         .await
         .unwrap();
 
@@ -292,51 +472,6 @@ async fn test_publish() {
                 AgentPubKey::from_raw_32(vec![2; 32]),
                 vec![op_hash.clone()],
                 None,
-                None,
-            )
-            .await
-            .unwrap();
-
-            if let Some(res) = handler.calls.lock().unwrap().first() {
-                assert_eq!("publish", res);
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_publish_reflect() {
-    let dna_hash = DnaHash::from_raw_36(vec![0; 36]);
-    let space = dna_hash.to_k2_space();
-    let handler = Arc::new(Handler::default());
-
-    let (_bootstrap_srv, addr) = spawn_test_bootstrap().await.unwrap();
-    let (_agent1, hc1, _) = spawn_test(dna_hash.clone(), handler.clone(), &addr).await;
-    let (_agent2, hc2, _) = spawn_test(dna_hash.clone(), handler.clone(), &addr).await;
-
-    hc1.test_set_full_arcs(space.clone()).await;
-    hc2.test_set_full_arcs(space.clone()).await;
-
-    tokio::time::timeout(UNRESPONSIVE_TIMEOUT, async {
-        loop {
-            tokio::time::sleep(WAIT_BETWEEN_CALLS).await;
-
-            let op = test_dht_op(holochain_types::prelude::Timestamp::now());
-            let op_hash = op.as_hash();
-
-            hc2.publish(
-                dna_hash.clone(),
-                HoloHash::from_raw_36_and_type(
-                    op_hash.get_raw_36().to_vec(),
-                    holo_hash::hash_type::AnyLinkable::Action,
-                ),
-                AgentPubKey::from_raw_32(vec![2; 32]),
-                vec![],
-                None,
-                Some(vec![op.into_content()]),
             )
             .await
             .unwrap();
@@ -583,6 +718,9 @@ async fn test_get_empty_data_better_than_no_response() {
     hc1.test_set_full_arcs(space.clone()).await;
     hc2.test_set_full_arcs(space.clone()).await;
     hc3.test_set_full_arcs(space.clone()).await;
+
+    // Wait for hc1 to discover the other two agents before issuing a get.
+    wait_for_peers(&hc1, dna_hash.clone(), 3).await;
 
     // One agent will respond with empty data so we need to wait for the other one to timeout
     // before we will get the empty data.
@@ -915,6 +1053,192 @@ async fn test_get_agent_activity_with_unresponsive_agents() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn get_agent_activity_multi_pairs_responses_with_peers() {
+    let dna_hash = DnaHash::from_raw_36(vec![0; 36]);
+    let space = dna_hash.to_k2_space();
+    let handler = Arc::new(EchoingActivityHandler);
+
+    let (_bootstrap_srv, addr) = spawn_test_bootstrap().await.unwrap();
+    let (_agent1, hc1, _) = spawn_test(dna_hash.clone(), handler.clone(), &addr).await;
+    let (_agent2, hc2, _) = spawn_test(dna_hash.clone(), handler.clone(), &addr).await;
+    let (_agent3, hc3, _) = spawn_test(dna_hash.clone(), handler, &addr).await;
+
+    hc1.test_set_full_arcs(space.clone()).await;
+    hc2.test_set_full_arcs(space.clone()).await;
+    hc3.test_set_full_arcs(space.clone()).await;
+
+    let responses = tokio::time::timeout(UNRESPONSIVE_TIMEOUT, async {
+        loop {
+            tokio::time::sleep(WAIT_BETWEEN_CALLS).await;
+
+            // Retry until peer discovery lets the full fan-out succeed.
+            if let Ok(responses) = hc1
+                .get_agent_activity_multi(
+                    dna_hash.clone(),
+                    AgentPubKey::from_raw_36(vec![2; 36]),
+                    ChainQueryFilter {
+                        sequence_range: ChainQueryFilterRange::Unbounded,
+                        entry_type: None,
+                        entry_hashes: None,
+                        action_type: None,
+                        include_entries: false,
+                        order_descending: false,
+                    },
+                    holochain_p2p::actor::GetActivityMultiOptions {
+                        target_peer_count: 2,
+                        required_responses: 2,
+                        timeout_ms: Some(5_000),
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                return responses;
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    // At least required_responses entries, one per responding peer.
+    assert!(responses.len() >= 2, "got {} responses", responses.len());
+
+    // Each response is paired with the peer that produced it: the echoing
+    // handler wrote its own identity (`to_agent`) into `response.agent`.
+    for (peer, response) in &responses {
+        assert_eq!(peer, &response.agent);
+    }
+
+    // All responding peers are distinct.
+    let mut peers: Vec<_> = responses.iter().map(|(peer, _)| peer.clone()).collect();
+    peers.sort();
+    peers.dedup();
+    assert_eq!(peers.len(), responses.len());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_agent_activity_multi_fails_when_below_required_responses() {
+    let dna_hash = DnaHash::from_raw_36(vec![0; 36]);
+    let space = dna_hash.to_k2_space();
+    let responsive = Arc::new(EchoingActivityHandler);
+    let unresponsive = Arc::new(UnresponsiveHandler);
+
+    let (_bootstrap_srv, addr) = spawn_test_bootstrap().await.unwrap();
+    let (_agent1, hc1, _) = spawn_test(dna_hash.clone(), responsive.clone(), &addr).await;
+    let (_agent2, hc2, _) = spawn_test(dna_hash.clone(), responsive, &addr).await;
+    let (_agent3, hc3, _) = spawn_test(dna_hash.clone(), unresponsive.clone(), &addr).await;
+    let (_agent4, hc4, _) = spawn_test(dna_hash.clone(), unresponsive, &addr).await;
+
+    hc1.test_set_full_arcs(space.clone()).await;
+    hc2.test_set_full_arcs(space.clone()).await;
+    hc3.test_set_full_arcs(space.clone()).await;
+    hc4.test_set_full_arcs(space.clone()).await;
+
+    // Wait for discovery so the fan-out sees all four nodes.
+    wait_for_peers(&hc1, dna_hash.clone(), 4).await;
+
+    let query = ChainQueryFilter {
+        sequence_range: ChainQueryFilterRange::Unbounded,
+        entry_type: None,
+        entry_hashes: None,
+        action_type: None,
+        include_entries: false,
+        order_descending: false,
+    };
+
+    // Requiring more responses than the responsive peer count (1 remote
+    // responder from hc1's perspective, since hc3/hc4 never answer) must
+    // produce an InsufficientResponses error, bounded by the configured
+    // timeout rather than blocking on the unresponsive peers.
+    let start = std::time::Instant::now();
+    let result = hc1
+        .get_agent_activity_multi(
+            dna_hash.clone(),
+            AgentPubKey::from_raw_36(vec![2; 36]),
+            query.clone(),
+            holochain_p2p::actor::GetActivityMultiOptions {
+                target_peer_count: 3,
+                required_responses: 2,
+                timeout_ms: Some(3_000),
+                ..Default::default()
+            },
+        )
+        .await;
+    let elapsed = start.elapsed();
+
+    match result {
+        Err(HolochainP2pError::InsufficientResponses {
+            received, required, ..
+        }) => {
+            assert!(received < 2, "received {received}");
+            assert_eq!(required, 2);
+        }
+        other => panic!("expected InsufficientResponses error, got: {other:?}"),
+    }
+    // Slow peers must not block far past the configured timeout.
+    assert!(elapsed < Duration::from_secs(10), "took {elapsed:?}");
+
+    // With an achievable minimum, the same topology succeeds and the
+    // unresponsive peers are simply absent from the result.
+    let responses = tokio::time::timeout(UNRESPONSIVE_TIMEOUT, async {
+        loop {
+            tokio::time::sleep(WAIT_BETWEEN_CALLS).await;
+
+            if let Ok(responses) = hc1
+                .get_agent_activity_multi(
+                    dna_hash.clone(),
+                    AgentPubKey::from_raw_36(vec![2; 36]),
+                    query.clone(),
+                    holochain_p2p::actor::GetActivityMultiOptions {
+                        target_peer_count: 3,
+                        required_responses: 1,
+                        timeout_ms: Some(3_000),
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                return responses;
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    assert!(!responses.is_empty());
+    for (peer, response) in &responses {
+        assert_eq!(peer, &response.agent);
+    }
+
+    // Contradictory options fail fast with InvalidRequest instead of
+    // fanning out and burning the timeout.
+    for options in [
+        holochain_p2p::actor::GetActivityMultiOptions {
+            target_peer_count: 2,
+            required_responses: 3,
+            ..Default::default()
+        },
+        holochain_p2p::actor::GetActivityMultiOptions {
+            required_responses: 0,
+            ..Default::default()
+        },
+    ] {
+        let result = hc1
+            .get_agent_activity_multi(
+                dna_hash.clone(),
+                AgentPubKey::from_raw_36(vec![2; 36]),
+                query.clone(),
+                options,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(HolochainP2pError::InvalidRequest(_))),
+            "expected InvalidRequest error, got: {result:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_must_get_agent_activity() {
     let dna_hash = DnaHash::from_raw_36(vec![0; 36]);
     let space = dna_hash.to_k2_space();
@@ -1014,6 +1338,9 @@ async fn test_validation_receipts() {
     let (_bootstrap_srv, addr) = spawn_test_bootstrap().await.unwrap();
     let (agent1, _hc1, _) = spawn_test(dna_hash.clone(), handler.clone(), &addr).await;
     let (_agent2, hc2, _) = spawn_test(dna_hash.clone(), handler.clone(), &addr).await;
+
+    // Wait for hc2 to discover agent1 via the bootstrap before sending.
+    wait_for_peers(&hc2, dna_hash.clone(), 2).await;
 
     hc2.send_validation_receipts(
         dna_hash,
@@ -1225,11 +1552,19 @@ async fn spawn_test(
     handler: DynHcP2pHandler,
     bootstrap_addr: &SocketAddr,
 ) -> (AgentPubKey, actor::DynHcP2p, MetaLairClient) {
-    let db_peer_meta =
-        DbWrite::test_in_mem(DbKindPeerMetaStore(Arc::new(dna_hash.clone()))).unwrap();
-    let db_op = DbWrite::test_in_mem(DbKindDht(Arc::new(dna_hash.clone()))).unwrap();
-    let db_cache = DbWrite::test_in_mem(DbKindCache(Arc::new(dna_hash.clone()))).unwrap();
-    let conductor_db = DbWrite::test_in_mem(DbKindConductor).unwrap();
+    let db_peer_meta = holochain_state::peer_metadata_store::PeerMetaStore::new(
+        holochain_state::data::test_open_db(PeerMetaStore::new(Arc::new(dna_hash.clone())))
+            .await
+            .unwrap(),
+    );
+    let dht_store = holochain_state::DhtStore::new_test(holochain_state::data::Dht::new(Arc::new(
+        dna_hash.clone(),
+    )))
+    .await
+    .unwrap();
+    let conductor_store = holochain_state::conductor::ConductorStore::new_test()
+        .await
+        .unwrap();
     let lair_client = test_keystore();
 
     let agent = lair_client.new_sign_keypair_random().await.unwrap();
@@ -1240,34 +1575,14 @@ async fn spawn_test(
                 let db_peer_meta = db_peer_meta.clone();
                 Box::pin(async move { Ok(db_peer_meta.clone()) })
             }),
-            get_db_op_store: Arc::new(move |_| {
-                let db_op = db_op.clone();
-                Box::pin(async move { Ok(db_op.clone()) })
+            get_dht_store: Arc::new(move |_| {
+                let dht_store = dht_store.clone();
+                Box::pin(async move { Ok(dht_store) })
             }),
-            get_db_cache: Arc::new(move |_| {
-                let db_cache = db_cache.clone();
-                Box::pin(async move { Ok(db_cache) })
+            get_conductor_store: Arc::new(move || {
+                let conductor_store = conductor_store.clone();
+                Box::pin(async move { conductor_store })
             }),
-            get_conductor_db: Arc::new(move || {
-                let conductor_db = conductor_db.clone();
-                Box::pin(async move { conductor_db })
-            }),
-            #[cfg(feature = "transport-tx5-backend-go-pion")]
-            network_config: Some(serde_json::json!({
-                "coreBootstrap": {
-                    "serverUrl": format!("http://{bootstrap_addr}"),
-                },
-                "tx5Transport": {
-                    "serverUrl": format!("ws://{bootstrap_addr}"),
-                    "signalAllowPlainText": true,
-                    "timeoutS": 30,
-                    "webrtcConnectTimeoutS": 25,
-                }
-            })),
-            #[cfg(all(
-                feature = "transport-iroh",
-                not(feature = "transport-tx5-backend-go-pion")
-            ))]
             network_config: Some(serde_json::json!({
                 "coreBootstrap": {
                     "serverUrl": format!("http://{bootstrap_addr}"),

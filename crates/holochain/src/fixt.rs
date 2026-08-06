@@ -9,30 +9,26 @@ use crate::core::ribosome::guest_callback::init::InitInvocation;
 use crate::core::ribosome::guest_callback::post_commit::PostCommitHostAccess;
 use crate::core::ribosome::guest_callback::post_commit::PostCommitInvocation;
 use crate::core::ribosome::guest_callback::validate::ValidateHostAccess;
-#[cfg(feature = "wasmer_sys")]
-use crate::core::ribosome::real_ribosome::ModuleCacheLock;
-use crate::core::ribosome::real_ribosome::RealRibosome;
 use crate::core::ribosome::CallContext;
 use crate::core::ribosome::FnComponents;
 use crate::core::ribosome::HostContext;
 use crate::core::ribosome::InvocationAuth;
 use crate::core::ribosome::ZomeCallHostAccess;
 use crate::core::ribosome::ZomesToInvoke;
-use crate::sweettest::SweetDnaFile;
-use crate::test_utils::fake_genesis;
+use crate::test_utils::fake_genesis_for_agent_with_store;
+use crate::test_utils::fake_genesis_with_store;
 use ::fixt::prelude::*;
 pub use holo_hash::fixt::*;
 use holo_hash::WasmHash;
 use holochain_keystore::test_keystore;
 use holochain_keystore::MetaLairClient;
 use holochain_p2p::MockHolochainP2pDnaT;
+use holochain_state::data::{DbWrite, Dht};
 use holochain_state::host_fn_workspace::HostFnWorkspace;
 use holochain_state::host_fn_workspace::HostFnWorkspaceRead;
 pub use holochain_types::fixt::*;
 use holochain_types::prelude::*;
 use holochain_wasm_test_utils::TestWasm;
-#[cfg(feature = "wasmer_sys")]
-use holochain_wasmer_host::module::ModuleCache;
 use rand::rng;
 use rand::seq::IteratorRandom;
 use rand::Rng;
@@ -45,43 +41,6 @@ use tokio::sync::broadcast;
 pub struct Zomes(pub Vec<TestWasm>);
 
 newtype_fixturator!(FnComponents<Vec<String>>);
-
-fixturator!(
-    RealRibosome;
-    constructor fn empty(DnaFile);
-);
-
-impl Iterator for RealRibosomeFixturator<Zomes> {
-    type Item = RealRibosome;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let input = self.0.curve.0.clone();
-        let uuid = StringFixturator::new(Unpredictable).next().unwrap();
-        let (dna_file, _, _) = tokio_helper::block_forever_on(async move {
-            SweetDnaFile::from_test_wasms(uuid, input, Default::default()).await
-        });
-
-        #[cfg(feature = "wasmer_wamr")]
-        let module_cache = None;
-        #[cfg(feature = "wasmer_sys")]
-        let module_cache = Some(Arc::new(ModuleCacheLock::new(ModuleCache::new(None))));
-
-        let ribosome =
-            tokio_helper::block_forever_on(RealRibosome::new(dna_file, module_cache)).unwrap();
-
-        // warm the module cache for each wasm in the ribosome
-        for zome in self.0.curve.0.clone() {
-            let mut call_context = CallContextFixturator::new(Empty).next().unwrap();
-            call_context.zome = CoordinatorZome::from(zome).erase_type();
-            tokio_helper::block_forever_on(ribosome.build_module(call_context.zome.zome_name()))
-                .unwrap();
-        }
-
-        self.0.index += 1;
-
-        Some(ribosome)
-    }
-}
 
 fixturator!(
     DnaWasm;
@@ -208,49 +167,37 @@ fixturator!(
 fixturator!(
     HostFnWorkspace;
     curve Empty {
-        let authored_db = holochain_state::test_utils::test_authored_db_with_id(get_fixt_index!() as u8);
-        let dht_db = holochain_state::test_utils::test_dht_db_with_id(get_fixt_index!() as u8);
-        let cache = holochain_state::test_utils::test_cache_db();
         let keystore = holochain_keystore::test_keystore();
         tokio_helper::block_forever_on(async {
-            fake_genesis(authored_db.to_db(), dht_db.to_db(), keystore.clone()).await.unwrap();
-            HostFnWorkspace::new(
-                authored_db.to_db(),
-                dht_db.to_db(),
-                cache.to_db(),
+            let dht_store = holochain_state::test_utils::test_dht_store(fake_dna_hash(get_fixt_index!() as u8)).await;
+            fake_genesis_with_store(fake_dna_hash(get_fixt_index!() as u8), keystore.clone(), dht_store.clone()).await.unwrap();
+            HostFnWorkspace::<DbWrite<Dht>>::new(
+                dht_store,
                 keystore,
                 Some(fixt!(AgentPubKey, Predictable, get_fixt_index!())),
             ).await.unwrap()
         })
     };
     curve Unpredictable {
-        let authored_db = holochain_state::test_utils::test_authored_db_with_id(get_fixt_index!() as u8);
-        let dht_db = holochain_state::test_utils::test_dht_db_with_id(get_fixt_index!() as u8);
-        let cache = holochain_state::test_utils::test_cache_db();
         let keystore = holochain_keystore::test_keystore();
         tokio_helper::block_forever_on(async {
-            fake_genesis(authored_db.to_db(), dht_db.to_db(), keystore.clone()).await.unwrap();
-            HostFnWorkspace::new(
-                authored_db.to_db(),
-                dht_db.to_db(),
-                cache.to_db(),
+            let dht_store = holochain_state::test_utils::test_dht_store(fake_dna_hash(get_fixt_index!() as u8)).await;
+            fake_genesis_with_store(fake_dna_hash(get_fixt_index!() as u8), keystore.clone(), dht_store.clone()).await.unwrap();
+            HostFnWorkspace::<DbWrite<Dht>>::new(
+                dht_store,
                 keystore,
                 Some(fixt!(AgentPubKey, Predictable, get_fixt_index!())),
             ).await.unwrap()
         })
     };
     curve Predictable {
-        let authored_db = holochain_state::test_utils::test_authored_db_with_id(get_fixt_index!() as u8);
-        let dht_db = holochain_state::test_utils::test_dht_db_with_id(get_fixt_index!() as u8);
-        let cache = holochain_state::test_utils::test_cache_db_with_id(get_fixt_index!() as u8);
         let agent = fixt!(AgentPubKey, Predictable, get_fixt_index!());
         let keystore = holochain_keystore::test_keystore();
         tokio_helper::block_forever_on(async {
-            crate::test_utils::fake_genesis_for_agent(authored_db.to_db(), dht_db.to_db(), agent.clone(), keystore.clone()).await.unwrap();
-            HostFnWorkspace::new(
-                authored_db.to_db(),
-                dht_db.to_db(),
-                cache.to_db(),
+            let dht_store = holochain_state::test_utils::test_dht_store(fake_dna_hash(get_fixt_index!() as u8)).await;
+            fake_genesis_for_agent_with_store(fake_dna_hash(get_fixt_index!() as u8), agent.clone(), keystore.clone(), dht_store.clone()).await.unwrap();
+            HostFnWorkspace::<DbWrite<Dht>>::new(
+                dht_store,
                 keystore,
                 Some(agent),
             ).await.unwrap()
@@ -261,52 +208,40 @@ fixturator!(
 fixturator!(
     HostFnWorkspaceRead;
     curve Empty {
-        let authored_db = holochain_state::test_utils::test_authored_db_with_id(get_fixt_index!() as u8);
-        let dht_db = holochain_state::test_utils::test_dht_db_with_id(get_fixt_index!() as u8);
-        let cache = holochain_state::test_utils::test_cache_db();
         let keystore = holochain_keystore::test_keystore();
         tokio_helper::block_forever_on(async {
-            fake_genesis(authored_db.to_db(), dht_db.to_db(), keystore.clone()).await.unwrap();
-            HostFnWorkspaceRead::new(
-                authored_db.to_db().into(),
-                dht_db.to_db().into(),
-                cache.to_db(),
+            let dht_store = holochain_state::test_utils::test_dht_store(fake_dna_hash(get_fixt_index!() as u8)).await;
+            fake_genesis_with_store(fake_dna_hash(get_fixt_index!() as u8), keystore.clone(), dht_store.clone()).await.unwrap();
+            HostFnWorkspace::<DbWrite<Dht>>::new(
+                dht_store,
                 keystore,
                 Some(fixt!(AgentPubKey, Predictable, get_fixt_index!())),
-            ).await.unwrap()
+            ).await.unwrap().as_read()
         })
     };
     curve Unpredictable {
-        let authored_db = holochain_state::test_utils::test_authored_db_with_id(get_fixt_index!() as u8);
-        let dht_db = holochain_state::test_utils::test_dht_db_with_id(get_fixt_index!() as u8);
-        let cache = holochain_state::test_utils::test_cache_db();
         let keystore = holochain_keystore::test_keystore();
         tokio_helper::block_forever_on(async {
-            fake_genesis(authored_db.to_db(), dht_db.to_db(), keystore.clone()).await.unwrap();
-            HostFnWorkspaceRead::new(
-                authored_db.to_db().into(),
-                dht_db.to_db().into(),
-                cache.to_db(),
+            let dht_store = holochain_state::test_utils::test_dht_store(fake_dna_hash(get_fixt_index!() as u8)).await;
+            fake_genesis_with_store(fake_dna_hash(get_fixt_index!() as u8), keystore.clone(), dht_store.clone()).await.unwrap();
+            HostFnWorkspace::<DbWrite<Dht>>::new(
+                dht_store,
                 keystore,
                 Some(fixt!(AgentPubKey, Predictable, get_fixt_index!())),
-            ).await.unwrap()
+            ).await.unwrap().as_read()
         })
     };
     curve Predictable {
-        let authored_db = holochain_state::test_utils::test_authored_db_with_id(get_fixt_index!() as u8);
-        let dht_db = holochain_state::test_utils::test_dht_db_with_id(get_fixt_index!() as u8);
-        let cache = holochain_state::test_utils::test_cache_db_with_id(get_fixt_index!() as u8);
         let agent = fixt!(AgentPubKey, Predictable, get_fixt_index!());
         let keystore = holochain_keystore::test_keystore();
         tokio_helper::block_forever_on(async {
-            crate::test_utils::fake_genesis_for_agent(authored_db.to_db(), dht_db.to_db(), agent.clone(), keystore.clone()).await.unwrap();
-            HostFnWorkspaceRead::new(
-                authored_db.to_db().into(),
-                dht_db.to_db().into(),
-                cache.to_db(),
+            let dht_store = holochain_state::test_utils::test_dht_store(fake_dna_hash(get_fixt_index!() as u8)).await;
+            fake_genesis_for_agent_with_store(fake_dna_hash(get_fixt_index!() as u8), agent.clone(), keystore.clone(), dht_store.clone()).await.unwrap();
+            HostFnWorkspace::<DbWrite<Dht>>::new(
+                dht_store,
                 keystore,
                 Some(agent),
-            ).await.unwrap()
+            ).await.unwrap().as_read()
         })
     };
 );

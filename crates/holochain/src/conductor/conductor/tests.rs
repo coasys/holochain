@@ -15,7 +15,6 @@ use holochain_keystore::crude_mock_keystore::*;
 use holochain_keystore::test_keystore;
 use holochain_types::{app::AppStatus, inline_zome::InlineZomeSet};
 use holochain_wasm_test_utils::TestWasm;
-use holochain_zome_types::op::Op;
 use matches::assert_matches;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
@@ -59,6 +58,7 @@ async fn app_ids_are_unique() {
         spaces,
         post_commit_sender,
         outcome_tx,
+        Default::default(),
     );
 
     let app_id = "app_id".to_string();
@@ -75,16 +75,19 @@ async fn app_ids_are_unique() {
             name: "".to_string(),
             roles: vec![],
             bootstrap_url: None,
-            signal_url: None,
+            relay_url: None,
         }),
         Timestamp::now(),
     )
     .unwrap();
 
-    conductor.add_disabled_app_to_db(app.clone()).await.unwrap();
+    conductor
+        .add_disabled_app_to_db(app.clone(), InitPropertiesMap::new())
+        .await
+        .unwrap();
 
     assert_matches!(
-        conductor.add_disabled_app_to_db(app.clone()).await,
+        conductor.add_disabled_app_to_db(app.clone(), InitPropertiesMap::new()).await,
         Err(ConductorError::AppAlreadyInstalled(id)) if id == app_id
     );
 }
@@ -116,7 +119,7 @@ async fn role_names_must_be_unique() {
             roles: vec![],
             allow_deferred_memproofs: false,
             bootstrap_url: None,
-            signal_url: None,
+            relay_url: None,
         }),
         Timestamp::now(),
     );
@@ -146,7 +149,7 @@ async fn role_names_must_be_unique() {
             roles: vec![],
             allow_deferred_memproofs: false,
             bootstrap_url: None,
-            signal_url: None,
+            relay_url: None,
         }),
         Timestamp::now(),
     );
@@ -332,7 +335,7 @@ async fn test_bad_entry_validation_after_genesis_returns_zome_call_error() {
     let bad_zome =
         InlineZomeSet::new_unique_single("integrity", "custom", vec![unit_entry_def.clone()], 0)
             .function("integrity", "validate", |_api, op: Op| match op {
-                Op::StoreEntry(StoreEntry { action, .. })
+                Op::CreateEntry(CreateEntry { action, .. })
                     if action.hashed.content.app_entry_def().is_some() =>
                 {
                     Ok(ValidateResult::Invalid(
@@ -446,6 +449,7 @@ async fn test_deferred_memproof_provisioning() {
             roles_settings: Default::default(),
             network_seed: None,
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();
@@ -471,7 +475,7 @@ async fn test_deferred_memproof_provisioning() {
     );
 
     conductor.shutdown().await;
-    conductor.startup(false).await;
+    conductor.startup().await;
 
     //- Status is still AwaitingMemproofs after a restart
     let app_info = conductor.get_app_info(&app_id).await.unwrap().unwrap();
@@ -562,6 +566,7 @@ async fn test_deferred_memproof_provisioning_uninstall() {
             roles_settings: Default::default(),
             network_seed: None,
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();
@@ -573,6 +578,71 @@ async fn test_deferred_memproof_provisioning_uninstall() {
         .await
         .unwrap();
     assert_eq!(conductor.list_apps(None).await.unwrap().len(), 0);
+}
+
+/// Init properties supplied at install time are persisted per role and removed
+/// when the app is uninstalled (via the foreign-key cascade on the app row).
+#[tokio::test(flavor = "multi_thread")]
+async fn init_properties_persist_and_clear_on_uninstall() {
+    use holochain_serialized_bytes::{SerializedBytes, UnsafeBytes};
+    use holochain_zome_types::init::InitProperties;
+
+    let (dna, _, _) = SweetDnaFile::unique_from_test_wasms(vec![TestWasm::Foo]).await;
+    let conductor = SweetConductor::standard().await;
+    let app_id = "app-id".to_string();
+    let role_name = "role".to_string();
+    let bundle = app_bundle_from_dnas(&[(role_name.clone(), dna)], false, None).await;
+    let bundle_bytes = bundle.pack().unwrap();
+
+    let props = InitProperties(SerializedBytes::from(UnsafeBytes::from(vec![1, 2, 3])));
+    let role_settings = (
+        role_name.clone(),
+        RoleSettings::Provisioned {
+            membrane_proof: None,
+            modifiers: None,
+            init_properties: Some(props.clone()),
+        },
+    );
+
+    conductor
+        .clone()
+        .install_app_bundle(InstallAppPayload {
+            source: AppBundleSource::Bytes(bundle_bytes),
+            agent_key: None,
+            installed_app_id: Some(app_id.clone()),
+            roles_settings: Some(std::collections::HashMap::from([role_settings])),
+            network_seed: None,
+            ignore_genesis_failure: false,
+            restore_from_dht: false,
+        })
+        .await
+        .unwrap();
+
+    // Init properties are persisted for the role at install time.
+    let stored = conductor
+        .spaces
+        .conductor_store
+        .as_read()
+        .get_init_properties(&app_id, &role_name)
+        .await
+        .unwrap();
+    assert_eq!(stored, Some(props));
+
+    // Uninstalling the app removes them via the foreign-key cascade.
+    conductor
+        .clone()
+        .uninstall_app(&app_id, false)
+        .await
+        .unwrap();
+
+    let stored = conductor
+        .spaces
+        .conductor_store
+        .as_read()
+        .get_init_properties(&app_id, &role_name)
+        .await
+        .unwrap();
+    assert_eq!(stored, None);
 }
 
 #[tokio::test(flavor = "multi_thread")]

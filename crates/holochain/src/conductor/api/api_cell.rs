@@ -5,14 +5,13 @@ use super::error::ConductorApiResult;
 use crate::conductor::error::ConductorResult;
 use crate::conductor::ConductorHandle;
 use crate::core::ribosome::guest_callback::post_commit::PostCommitArgs;
-use crate::core::ribosome::real_ribosome::RealRibosome;
+use crate::core::ribosome::Ribosome;
 use crate::core::workflow::ZomeCallResult;
 use async_trait::async_trait;
 use holochain_keystore::MetaLairClient;
 use holochain_p2p::HolochainP2pResult;
+use holochain_state::conductor::WitnessNonceResult;
 use holochain_state::host_fn_workspace::SourceChainWorkspace;
-use holochain_state::nonce::WitnessNonceResult;
-use holochain_state::prelude::DatabaseResult;
 use holochain_types::prelude::*;
 use holochain_zome_types::block::Block;
 use holochain_zome_types::block::BlockTargetId;
@@ -56,20 +55,22 @@ impl CellConductorApiT for CellConductorApi {
         self.conductor_handle.keystore()
     }
 
-    fn get_dna_file(&self, cell_id: &CellId) -> Option<DnaFile> {
-        self.conductor_handle.get_dna_file(cell_id)
+    fn get_dna_def(&self, cell_id: &CellId) -> Option<DnaDef> {
+        self.conductor_handle
+            .get_dna_def(cell_id)
+            .map(|d| d.content)
     }
 
-    fn get_this_ribosome(&self) -> ConductorApiResult<RealRibosome> {
+    fn get_this_ribosome(&self) -> ConductorApiResult<Ribosome> {
         Ok(self.conductor_handle.get_ribosome(&self.cell_id)?)
     }
 
     #[cfg_attr(feature = "instrument", tracing::instrument(skip(self)))]
     fn get_zome(&self, cell_id: &CellId, zome_name: &ZomeName) -> ConductorApiResult<Zome> {
         let dna = self
-            .get_dna_file(cell_id)
+            .get_dna_def(cell_id)
             .ok_or_else(|| ConductorApiError::CellMissing(cell_id.clone()))?;
-        Ok(dna.dna_def().get_zome(zome_name)?)
+        Ok(dna.get_zome(zome_name)?)
     }
 
     fn get_entry_def(&self, key: &EntryDefBufferKey) -> Option<EntryDef> {
@@ -95,11 +96,11 @@ pub trait CellConductorApiT: Send + Sync {
     /// Request access to this conductor's keystore
     fn keystore(&self) -> &MetaLairClient;
 
-    /// Get a [`Dna`](holochain_types::prelude::Dna) from the [`RibosomeStore`](crate::conductor::ribosome_store::RibosomeStore)
-    fn get_dna_file(&self, cell_id: &CellId) -> Option<DnaFile>;
+    /// Get a [`DnaDef`] from the [`RibosomeStore`](crate::conductor::ribosome_store::RibosomeStore)
+    fn get_dna_def(&self, cell_id: &CellId) -> Option<DnaDef>;
 
-    /// Get the [`RealRibosome`] of this cell from the [`RibosomeStore`](crate::conductor::ribosome_store::RibosomeStore)
-    fn get_this_ribosome(&self) -> ConductorApiResult<RealRibosome>;
+    /// Get the [`Ribosome`] of this cell from the [`RibosomeStore`](crate::conductor::ribosome_store::RibosomeStore)
+    fn get_this_ribosome(&self) -> ConductorApiResult<Ribosome>;
 
     /// Get a [`Zome`](holochain_types::prelude::Zome) from this cell's Dna
     fn get_zome(&self, cell_id: &CellId, zome_name: &ZomeName) -> ConductorApiResult<Zome>;
@@ -157,9 +158,6 @@ pub trait CellConductorReadHandleT: Send + Sync {
     /// Expose block functionality to zomes.
     async fn block(&self, input: Block) -> HolochainP2pResult<()>;
 
-    /// Expose unblock functionality to zomes.
-    async fn unblock(&self, input: Block) -> DatabaseResult<()>;
-
     /// Expose is_blocked functionality to zomes.
     async fn is_blocked(&self, input: BlockTargetId, timestamp: Timestamp)
         -> ConductorResult<bool>;
@@ -169,6 +167,9 @@ pub trait CellConductorReadHandleT: Send + Sync {
         &self,
         cell_id: &CellId,
     ) -> ConductorResult<Option<InstalledApp>>;
+
+    /// Read the init properties supplied for this cell's role at install time.
+    async fn get_init_properties(&self) -> ConductorResult<Option<InitProperties>>;
 
     /// Expose create_clone_cell functionality to zomes.
     async fn create_clone_cell(
@@ -261,10 +262,6 @@ impl CellConductorReadHandleT for CellConductorApi {
         self.conductor_handle.holochain_p2p().block(input).await
     }
 
-    async fn unblock(&self, input: Block) -> DatabaseResult<()> {
-        self.conductor_handle.unblock(input).await
-    }
-
     async fn is_blocked(
         &self,
         input: BlockTargetId,
@@ -279,6 +276,12 @@ impl CellConductorReadHandleT for CellConductorApi {
     ) -> ConductorResult<Option<InstalledApp>> {
         self.conductor_handle
             .find_app_containing_cell(cell_id)
+            .await
+    }
+
+    async fn get_init_properties(&self) -> ConductorResult<Option<InitProperties>> {
+        self.conductor_handle
+            .get_init_properties_for_cell(&self.cell_id)
             .await
     }
 

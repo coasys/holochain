@@ -320,6 +320,7 @@ pub async fn register_and_install_dna_named(
         network_seed: None,
         roles_settings: Default::default(),
         ignore_genesis_failure: false,
+        restore_from_dht: false,
     };
     let request = AdminRequest::InstallApp(Box::new(payload));
     let response = client.request(request);
@@ -390,7 +391,7 @@ pub fn create_config(port: u16, data_root_path: DataRootPath) -> ConductorConfig
 
 pub fn write_config(mut path: PathBuf, config: &ConductorConfig) -> PathBuf {
     path.push("conductor_config.yml");
-    std::fs::write(path.clone(), serde_yaml::to_string(&config).unwrap()).unwrap();
+    std::fs::write(path.clone(), yaml_serde::to_string(&config).unwrap()).unwrap();
     path
 }
 
@@ -420,11 +421,12 @@ async fn check_timeout_named<T>(
 pub async fn dump_full_state(
     client: &mut WebsocketSender,
     cell_id: CellId,
-    dht_ops_cursor: Option<u64>,
+    dht_ops_cursor: Option<holochain_conductor_api::DhtOpsCursor>,
 ) -> WebsocketResult<FullStateDump> {
     let request = AdminRequest::DumpFullState {
         cell_id: Box::new(cell_id),
         dht_ops_cursor,
+        limit: None,
     };
     let response = client.request(request);
     let response = check_timeout(response, 3000).await?;

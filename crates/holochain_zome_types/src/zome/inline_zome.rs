@@ -6,14 +6,19 @@
 
 // TODO: move entire module to `holochain_types`
 
-use crate::prelude::*;
-pub use error::*;
+use crate::zome_io::HostFnApiT;
+use holo_hash::{blake2b_256, InlineHash};
+use holochain_integrity_types::prelude::{
+    EntryDef, EntryDefsCallbackResult, ExternIO, FunctionName,
+};
+use holochain_serialized_bytes::prelude::*;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
 mod error;
+pub use error::*;
 
 pub type BoxApi = Box<dyn HostFnApiT>;
 
@@ -33,12 +38,11 @@ pub struct InlineZome<T = IntegrityZomeMarker> {
     /// Inline zome type marker.
     _t: PhantomData<T>,
 
-    /// Since closures cannot be serialized, we include a UUID which
-    /// is the only part of an InlineZome that gets serialized.
-    /// This UUID becomes part of the determination of the DnaHash
-    /// that it is a part of.
-    /// Think of it as a stand-in for the WasmHash of a WasmZome.
-    pub(super) uuid: String,
+    /// Since closures cannot be serialized, we include a simulated hash to identify the zome.
+    ///
+    /// This becomes part of the determination of the DnaHash. Think of it as a stand-in for the
+    /// WasmHash of a WasmZome.
+    pub(super) hash: InlineHash,
 
     /// The collection of closures which define this zome.
     /// These functions are directly called by the Ribosome.
@@ -51,9 +55,11 @@ pub struct InlineZome<T = IntegrityZomeMarker> {
 impl<T> InlineZome<T> {
     /// Inner constructor.
     fn new_inner<S: Into<String>>(uuid: S) -> Self {
+        let hash = blake2b_256(uuid.into().as_bytes());
+
         Self {
             _t: PhantomData,
-            uuid: uuid.into(),
+            hash: InlineHash::from_raw_32(hash),
             functions: HashMap::new(),
             globals: HashMap::new(),
         }
@@ -97,8 +103,8 @@ impl<T> InlineZome<T> {
     }
 
     /// Accessor
-    pub fn uuid(&self) -> String {
-        self.uuid.clone()
+    pub fn hash(&self) -> InlineHash {
+        self.hash.clone()
     }
 
     /// Set a global value for this zome.
@@ -142,7 +148,7 @@ impl InlineCoordinatorZome {
 }
 
 /// An inline zome clonable type object.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, derive_more::Deref)]
 pub struct DynInlineZome(pub Arc<dyn InlineZomeT + Send + Sync>);
 
 pub trait InlineZomeT: std::fmt::Debug {
@@ -159,7 +165,7 @@ pub trait InlineZomeT: std::fmt::Debug {
     ) -> InlineZomeResult<Option<ExternIO>>;
 
     /// Accessor
-    fn uuid(&self) -> String;
+    fn hash(&self) -> InlineHash;
 
     /// Get a global value for this zome.
     fn get_global(&self, name: &str) -> Option<u8>;
@@ -169,7 +175,7 @@ pub trait InlineZomeT: std::fmt::Debug {
 pub type InlineZomeFn =
     Arc<dyn Fn(BoxApi, ExternIO) -> InlineZomeResult<ExternIO> + 'static + Send + Sync>;
 
-impl<T: std::fmt::Debug> InlineZomeT for InlineZome<T> {
+impl<T: std::fmt::Debug + Sync> InlineZomeT for InlineZome<T> {
     fn functions(&self) -> Vec<FunctionName> {
         self.functions()
     }
@@ -183,8 +189,8 @@ impl<T: std::fmt::Debug> InlineZomeT for InlineZome<T> {
         self.maybe_call(api, name, input)
     }
 
-    fn uuid(&self) -> String {
-        self.uuid()
+    fn hash(&self) -> InlineHash {
+        self.hash()
     }
 
     fn get_global(&self, name: &str) -> Option<u8> {
@@ -194,25 +200,25 @@ impl<T: std::fmt::Debug> InlineZomeT for InlineZome<T> {
 
 impl<T: std::fmt::Debug> std::fmt::Debug for InlineZome<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("<InlineZome {}>", self.uuid))
+        f.write_fmt(format_args!("<InlineZome {}>", self.hash))
     }
 }
 
 impl<T: PartialEq> PartialEq for InlineZome<T> {
     fn eq(&self, other: &InlineZome<T>) -> bool {
-        self.uuid == other.uuid
+        self.hash == other.hash
     }
 }
 
 impl PartialEq for DynInlineZome {
     fn eq(&self, other: &DynInlineZome) -> bool {
-        self.0.uuid() == other.0.uuid()
+        self.0.hash() == other.0.hash()
     }
 }
 
 impl<T: PartialOrd> PartialOrd for InlineZome<T> {
     fn partial_cmp(&self, other: &InlineZome<T>) -> Option<std::cmp::Ordering> {
-        Some(self.uuid.cmp(&other.uuid))
+        Some(self.hash.cmp(&other.hash))
     }
 }
 
@@ -228,32 +234,32 @@ impl Eq for DynInlineZome {}
 
 impl<T: Ord> Ord for InlineZome<T> {
     fn cmp(&self, other: &InlineZome<T>) -> std::cmp::Ordering {
-        self.uuid.cmp(&other.uuid)
+        self.hash.cmp(&other.hash)
     }
 }
 
 impl Ord for DynInlineZome {
     fn cmp(&self, other: &DynInlineZome) -> std::cmp::Ordering {
-        self.0.uuid().cmp(&other.0.uuid())
+        self.0.hash().cmp(&other.0.hash())
     }
 }
 
 impl<T: std::hash::Hash> std::hash::Hash for InlineZome<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.uuid.hash(state);
+        self.hash.hash(state);
     }
 }
 
 impl std::hash::Hash for DynInlineZome {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.uuid().hash(state);
+        self.0.hash().hash(state);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prelude::GetOptions;
+    use crate::prelude::{GetInput, GetOptions};
     use ::fixt::fixt;
     use holo_hash::fixt::ActionHashFixturator;
     use holo_hash::AnyDhtHash;

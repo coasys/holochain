@@ -2,7 +2,7 @@
 //! at the level of a [`DnaHash`] space.
 //! Multiple [`Cell`](crate::conductor::Cell)'s could share the same space.
 use super::{conductor::RwShare, error::ConductorResult};
-use crate::conductor::{error::ConductorError, state::ConductorState};
+use crate::conductor::error::ConductorError;
 use crate::core::workflow::countersigning_workflow::CountersigningWorkspace;
 use crate::core::{
     queue_consumer::QueueConsumerMap,
@@ -16,16 +16,13 @@ use crate::core::{
 use holo_hash::{AgentPubKey, DhtOpHash, DnaHash};
 use holochain_conductor_api::conductor::paths::DatabasesRootPath;
 use holochain_conductor_api::conductor::ConductorConfig;
+use holochain_conductor_api::state::ConductorState;
 use holochain_keystore::MetaLairClient;
 use holochain_p2p::actor::DynHcP2p;
-use holochain_sqlite::prelude::{
-    DatabaseResult, DbKey, DbKindAuthored, DbKindCache, DbKindConductor, DbKindDht, DbSyncLevel,
-    DbSyncStrategy, DbWrite, PoolConfig, ReadAccess,
-};
-use holochain_state::{host_fn_workspace::SourceChainWorkspace, mutations, prelude::*};
+use holochain_state::data::{DbKey, DbSyncLevel};
+use holochain_state::{host_fn_workspace::SourceChainWorkspace, prelude::*};
 use holochain_util::timed;
 use lair_keystore_api::prelude::SharedLockedArray;
-use rusqlite::OptionalExtension;
 use std::convert::TryInto;
 use std::path::PathBuf;
 use std::{
@@ -44,11 +41,13 @@ pub struct Spaces {
     pub(crate) config: Arc<ConductorConfig>,
     /// The map of running queue consumer workflows.
     pub(crate) queue_consumer_map: QueueConsumerMap,
-    pub(crate) conductor_db: DbWrite<DbKindConductor>,
+    /// Conductor database for normalized ConductorState
+    pub(crate) conductor_store: holochain_state::conductor::ConductorStore,
     pub(crate) wasm_store: holochain_state::wasm::WasmStore,
     pub(crate) dna_def_store: holochain_state::dna_def::DnaDefStore,
     pub(crate) entry_def_store: holochain_state::entry_def::EntryDefStore,
-    db_key: DbKey,
+    pub(crate) space_data_config: holochain_state::data::HolochainDataConfig,
+    data_db_key: holochain_state::data::DbKey,
 }
 
 /// This is the set of data required at the
@@ -60,23 +59,11 @@ pub struct Space {
     /// The dna hash for this space.
     pub dna_hash: Arc<DnaHash>,
 
-    /// The caches databases. These are shared across cells.
-    /// There is one per unique Dna.
-    pub cache_db: DbWrite<DbKindCache>,
+    /// DHT store wrapping the new holochain_data database.
+    pub dht_store: DhtStore,
 
-    /// The conductor database. There is only one of these.
-    pub conductor_db: DbWrite<DbKindConductor>,
-
-    /// The authored databases. These are per-agent.
-    /// There is one per unique combination of Dna and AgentPubKey.
-    pub authored_dbs: Arc<parking_lot::Mutex<HashMap<AgentPubKey, DbWrite<DbKindAuthored>>>>,
-
-    /// The dht databases. These are shared across cells.
-    /// There is one per unique Dna.
-    pub dht_db: DbWrite<DbKindDht>,
-
-    /// The peer meta store database. One per unique Dna.
-    pub peer_meta_store_db: DbWrite<DbKindPeerMetaStore>,
+    /// The peer meta store. One per unique Dna.
+    pub peer_meta_store: holochain_state::peer_metadata_store::PeerMetaStore,
 
     /// Countersigning workspace for session state.
     pub countersigning_workspaces:
@@ -90,10 +77,6 @@ pub struct Space {
 
     /// Incoming ops batch for this space.
     pub incoming_ops_batch: IncomingOpsBatch,
-
-    root_db_dir: Arc<PathBuf>,
-    db_key: DbKey,
-    db_max_readers: u16,
 }
 
 /// Test spaces
@@ -155,73 +138,69 @@ impl Spaces {
         if danger_print_db_secrets {
             eprintln!(
                 "--beg-db-secrets--{}--end-db-secrets--",
-                &String::from_utf8_lossy(&*db_key.unlocked.lock().unwrap().lock())
+                &String::from_utf8_lossy(&*db_key.key.lock().unwrap().lock())
             );
         }
 
-        let db_sync_strategy = config.db_sync_strategy;
-        let db_sync_level = match db_sync_strategy {
-            DbSyncStrategy::Fast => DbSyncLevel::Off,
-            DbSyncStrategy::Resilient => DbSyncLevel::Normal,
-        };
+        let db_sync = convert_db_sync_level(config.db_sync_level);
 
-        let conductor_db = tokio::task::block_in_place(|| {
-            let conductor_db = DbWrite::open_with_pool_config(
-                root_db_dir.as_ref(),
-                DbKindConductor,
-                PoolConfig {
-                    synchronous_level: db_sync_level,
-                    key: db_key.clone(),
-                    max_readers: config.db_max_readers,
-                },
-            )?;
-            ConductorResult::Ok(conductor_db)
-        })?;
-
-        let db_sync = match db_sync_level {
-            DbSyncLevel::Off => holochain_data::DbSyncLevel::Off,
-            DbSyncLevel::Normal => holochain_data::DbSyncLevel::Normal,
-            DbSyncLevel::Full => holochain_data::DbSyncLevel::Full,
-        };
-
-        // Convert the DbKey from holochain_sqlite to holochain_data format
-        let data_db_key = holochain_data::DbKey::load(db_key.locked.clone(), passphrase.clone())
+        let data_db_key = DbKey::load(db_key.locked.clone(), passphrase.clone())
             .await
             .map_err(ConductorError::other)?;
 
-        let wasm_db = holochain_data::open_db(
+        let conductor_db = holochain_state::data::open_db(
             root_db_dir.as_ref(),
-            holochain_data::kind::Wasm,
-            holochain_data::HolochainDataConfig {
-                key: Some(data_db_key),
+            holochain_state::data::Conductor,
+            holochain_state::data::HolochainDataConfig {
+                key: Some(data_db_key.clone()),
                 sync_level: db_sync,
                 max_readers: config.db_max_readers,
             },
         )
         .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        .map_err(ConductorError::other)?;
+        let conductor_store = holochain_state::conductor::ConductorStore::new(conductor_db);
+
+        let wasm_db = holochain_state::data::open_db(
+            root_db_dir.as_ref(),
+            holochain_state::data::Wasm,
+            holochain_state::data::HolochainDataConfig {
+                key: Some(data_db_key.clone()),
+                sync_level: db_sync,
+                max_readers: config.db_max_readers,
+            },
+        )
+        .await
+        .map_err(ConductorError::other)?;
 
         // Create store instances from the wasm database
         let wasm_store = holochain_state::wasm::WasmStore::new(wasm_db.clone());
         let dna_def_store = holochain_state::dna_def::DnaDefStore::new(wasm_db.clone());
         let entry_def_store = holochain_state::entry_def::EntryDefStore::new(wasm_db);
 
+        let space_data_config = holochain_state::data::HolochainDataConfig {
+            key: Some(data_db_key.clone()),
+            sync_level: db_sync,
+            max_readers: config.db_max_readers,
+        };
+
         Ok(Spaces {
             map: RwShare::new(HashMap::new()),
             db_dir: Arc::new(root_db_dir),
             config,
             queue_consumer_map: QueueConsumerMap::new(),
-            conductor_db,
+            conductor_store,
             wasm_store,
             dna_def_store,
             entry_def_store,
-            db_key,
+            space_data_config,
+            data_db_key,
         })
     }
 
-    /// Unblock some target.
-    pub async fn unblock(&self, input: Block) -> DatabaseResult<()> {
-        holochain_state::block::unblock(&self.conductor_db, input).await
+    /// Block some target.
+    pub async fn block(&self, input: Block) -> StateMutationResult<()> {
+        self.conductor_store.block(input).await
     }
 
     /// Check if some target is blocked.
@@ -247,38 +226,40 @@ impl Spaces {
             return Ok(false);
         }
 
-        self.conductor_db
-            .read_async(move |txn| {
-                Ok(
-                    // If the target_id is directly blocked then we always return true.
-                    holochain_state::block::query_is_blocked(txn, target_id, timestamp)?
-            // If there are zero unblocked cells then return true.
-            || {
-                let mut all_blocked_cell_ids = true;
-                for cell_id in cell_ids {
-                    if !holochain_state::block::query_is_blocked(
-                        txn,
-                        BlockTargetId::Cell(cell_id), timestamp)? {
-                            all_blocked_cell_ids = false;
-                            break;
-                        }
-                }
-                all_blocked_cell_ids
-            },
-                )
-            })
+        // Check if the target_id itself is directly blocked
+        let target_blocked = self
+            .conductor_store
+            .as_read()
+            .is_blocked(target_id.clone(), timestamp)
             .await
+            .map_err(ConductorError::other)?;
+
+        if target_blocked {
+            return Ok(true);
+        }
+
+        // Check if any of the cell_ids are blocked
+        let cell_targets: Vec<BlockTargetId> =
+            cell_ids.into_iter().map(BlockTargetId::Cell).collect();
+
+        let any_cells_blocked = self
+            .conductor_store
+            .as_read()
+            .is_any_blocked(cell_targets, timestamp)
+            .await
+            .map_err(ConductorError::other)?;
+
+        Ok(any_cells_blocked)
     }
 
     /// Get the holochain conductor state
     #[cfg_attr(feature = "instrument", tracing::instrument(skip_all))]
     pub async fn get_state(&self) -> ConductorResult<ConductorState> {
         timed!([1, 10, 1000], "get_state", {
-            match query_conductor_state(&self.conductor_db).await? {
+            match self.conductor_store.as_read().load_state().await? {
                 Some(state) => Ok(state),
-                // update_state will again try to read the state. It's a little
-                // inefficient in the infrequent case where we haven't saved the
-                // state yet, but more atomic, so worth it.
+                // Initialize by running an identity update — writes the default
+                // state atomically on first access.
                 None => self.update_state(Ok).await,
             }
         })
@@ -290,35 +271,43 @@ impl Spaces {
     where
         F: Send + FnOnce(ConductorState) -> ConductorResult<ConductorState> + 'static,
     {
-        let (state, _) = self.update_state_prime(|s| Ok((f(s)?, ()))).await?;
+        let (state, _) = self
+            .update_state_prime(|s| Ok((f(s)?, ())), "", &InitPropertiesMap::new())
+            .await?;
         Ok(state)
     }
 
-    /// Update the internal state with a pure function mapping old state to new,
-    /// which may also produce an output value which will be the output of
-    /// this function
+    /// Update the internal state with a pure function mapping old state
+    /// to new, and atomically persist the result alongside any `init_properties`
+    /// for `app_id`. This may also produce an output value which will be the output
+    /// of this function. When `init_properties` is empty the `app_id` is not used.
+    ///
+    /// The load, transform, and save steps run atomically inside a single
+    /// database transaction on the conductor store, and concurrent callers
+    /// are serialized — so no read-modify-write interleaving can silently
+    /// drop updates.
     #[cfg_attr(feature = "instrument", tracing::instrument(skip_all))]
-    pub async fn update_state_prime<F, O>(&self, f: F) -> ConductorResult<(ConductorState, O)>
+    pub async fn update_state_prime<F, O>(
+        &self,
+        f: F,
+        app_id: &str,
+        init_properties: &InitPropertiesMap,
+    ) -> ConductorResult<(ConductorState, O)>
     where
         F: FnOnce(ConductorState) -> ConductorResult<(ConductorState, O)> + Send + 'static,
         O: Send + 'static,
     {
         timed!([1, 10, 1000], "update_state_prime", {
-            self.conductor_db
-                .write_async(move |txn| {
-                    let state = txn
-                        .query_row("SELECT blob FROM ConductorState WHERE id = 1", [], |row| {
-                            row.get("blob")
-                        })
-                        .optional()?;
-                    let state = match state {
-                        Some(state) => from_blob(state)?,
-                        None => ConductorState::default(),
-                    };
-                    let (new_state, output) = f(state)?;
-                    mutations::insert_conductor_state(txn, (&new_state).try_into()?)?;
-                    Result::<_, ConductorError>::Ok((new_state, output))
-                })
+            self.conductor_store
+                .update_state(
+                    move |state| -> ConductorResult<_> {
+                        let state = state.unwrap_or_default();
+                        let (new_state, output) = f(state)?;
+                        Ok((new_state.clone(), (new_state, output)))
+                    },
+                    app_id,
+                    init_properties,
+                )
                 .await
         })
     }
@@ -330,11 +319,27 @@ impl Spaces {
     }
 
     /// Get the space if it exists or create it if it doesn't.
-    pub fn get_or_create_space(&self, dna_hash: &DnaHash) -> DatabaseResult<Space> {
+    pub fn get_or_create_space(&self, dna_hash: &DnaHash) -> ConductorResult<Space> {
         self.get_or_create_space_ref(dna_hash, |s| s.clone())
     }
 
-    fn get_or_create_space_ref<F, R>(&self, dna_hash: &DnaHash, f: F) -> DatabaseResult<R>
+    /// Drop the cached space for a DNA, releasing its database handles and
+    /// queue consumer triggers.
+    ///
+    /// Called once the last cell for a DNA has been removed and its database
+    /// files deleted. Without this, a reinstall of the same DNA would reuse the
+    /// cached space's connection pools, which point at the deleted files; the
+    /// pool would lazily reopen them as empty, un-migrated databases (migrations
+    /// only run when a database is opened). Dropping the space forces a
+    /// subsequent install to open fresh, migrated databases.
+    pub(crate) fn remove_space(&self, dna_hash: &DnaHash) {
+        self.map.share_mut(|spaces| {
+            spaces.remove(dna_hash);
+        });
+        self.queue_consumer_map.remove_all_for_dna(dna_hash);
+    }
+
+    fn get_or_create_space_ref<F, R>(&self, dna_hash: &DnaHash, f: F) -> ConductorResult<R>
     where
         F: Fn(&Space) -> R,
     {
@@ -348,9 +353,10 @@ impl Spaces {
                         let space = Space::new(
                             Arc::new(dna_hash.clone()),
                             self.db_dir.to_path_buf(),
-                            self.config.db_sync_strategy,
-                            self.db_key.clone(),
+                            convert_db_sync_level(self.config.db_sync_level),
                             self.config.db_max_readers,
+                            self.space_data_config.clone(),
+                            Some(self.data_db_key.clone()),
                         )?;
 
                         let r = f(&space);
@@ -361,58 +367,27 @@ impl Spaces {
         }
     }
 
-    /// Get the cache database (this will create the space if it doesn't already exist).
-    pub fn cache(&self, dna_hash: &DnaHash) -> DatabaseResult<DbWrite<DbKindCache>> {
-        self.get_or_create_space_ref(dna_hash, |space| space.cache_db.clone())
+    /// Get the new-schema DHT store (this will create the space if it doesn't already exist).
+    pub fn dht_store(&self, dna_hash: &DnaHash) -> ConductorResult<DhtStore> {
+        self.get_or_create_space_ref(dna_hash, |space| space.dht_store.clone())
     }
 
-    /// Get or create the authored database for this author (this will create the space if it doesn't already exist).
-    pub fn get_or_create_authored_db(
+    /// Get the peer meta store for a DNA space.
+    pub fn peer_meta_store(
         &self,
         dna_hash: &DnaHash,
-        author: AgentPubKey,
-    ) -> DatabaseResult<DbWrite<DbKindAuthored>> {
-        self.get_or_create_space_ref(dna_hash, |space| {
-            space.get_or_create_authored_db(author.clone())
-        })?
+    ) -> ConductorResult<holochain_state::peer_metadata_store::PeerMetaStore> {
+        self.get_or_create_space_ref(dna_hash, |space| space.peer_meta_store.clone())
     }
 
-    /// Get all the authored databases for this space (this will create the space if it doesn't already exist).
-    pub fn get_all_authored_dbs(
-        &self,
-        dna_hash: &DnaHash,
-    ) -> DatabaseResult<Vec<DbWrite<DbKindAuthored>>> {
-        self.get_or_create_space_ref(dna_hash, |space| space.get_all_authored_dbs())
-    }
-
-    /// Get the authored database for this author if it already exists.
-    pub fn get_authored_db_if_present(
-        &self,
-        dna_hash: &DnaHash,
-        author: &AgentPubKey,
-    ) -> DatabaseResult<Option<DbWrite<DbKindAuthored>>> {
-        match self.map.share_ref(|spaces| spaces.get(dna_hash).cloned()) {
-            Some(space) => space.get_authored_db_if_present(author),
-            None => Ok(None),
-        }
-    }
-
-    /// Get the dht database (this will create the space if it doesn't already exist).
-    pub fn dht_db(&self, dna_hash: &DnaHash) -> DatabaseResult<DbWrite<DbKindDht>> {
-        self.get_or_create_space_ref(dna_hash, |space| space.dht_db.clone())
-    }
-
-    /// Get the peer_meta_store database.
-    pub fn peer_meta_store_db(
-        &self,
-        dna_hash: &DnaHash,
-    ) -> DatabaseResult<DbWrite<DbKindPeerMetaStore>> {
-        self.get_or_create_space_ref(dna_hash, |space| space.peer_meta_store_db.clone())
-    }
-
-    /// we are receiving a "publish" event from the network.
+    /// Handle a "publish" event received from the network, passing the ops
+    /// straight through to the incoming ops workflow.
     #[cfg_attr(feature = "instrument", tracing::instrument(skip(self, ops)))]
-    pub async fn handle_publish(&self, dna_hash: &DnaHash, ops: Vec<DhtOp>) -> ConductorResult<()> {
+    pub async fn handle_publish(
+        &self,
+        dna_hash: &DnaHash,
+        ops: Vec<(DhtOp, bool)>,
+    ) -> ConductorResult<()> {
         let space = self.get_or_create_space(dna_hash)?;
         let trigger = match self
             .queue_consumer_map
@@ -468,75 +443,44 @@ impl Space {
     fn new(
         dna_hash: Arc<DnaHash>,
         root_db_dir: PathBuf,
-        db_sync_strategy: DbSyncStrategy,
-        db_key: DbKey,
+        data_db_sync_level: DbSyncLevel,
         db_max_readers: u16,
-    ) -> DatabaseResult<Self> {
-        let db_sync_level = match db_sync_strategy {
-            DbSyncStrategy::Fast => DbSyncLevel::Off,
-            DbSyncStrategy::Resilient => DbSyncLevel::Normal,
-        };
+        space_data_config: holochain_state::data::HolochainDataConfig,
+        data_db_key: Option<holochain_state::data::DbKey>,
+    ) -> ConductorResult<Self> {
+        tokio::task::block_in_place(|| {
+            let peer_meta_store_db = tokio::runtime::Handle::current()
+                .block_on(holochain_state::data::open_db(
+                    &root_db_dir,
+                    holochain_state::data::PeerMetaStore::new(dna_hash.clone()),
+                    holochain_state::data::HolochainDataConfig {
+                        key: data_db_key,
+                        sync_level: data_db_sync_level,
+                        max_readers: db_max_readers,
+                    },
+                ))
+                .map_err(ConductorError::other)?;
+            let peer_meta_store =
+                holochain_state::peer_metadata_store::PeerMetaStore::new(peer_meta_store_db);
+            let new_dht_db = tokio::runtime::Handle::current()
+                .block_on(holochain_state::data::open_db(
+                    &root_db_dir,
+                    holochain_state::data::Dht::new(dna_hash.clone()),
+                    space_data_config,
+                ))
+                .map_err(ConductorError::other)?;
+            let dht_store = DhtStore::new(new_dht_db);
 
-        let (cache, dht_db, peer_meta_store_db, conductor_db) =
-            tokio::task::block_in_place(|| {
-                let cache = DbWrite::open_with_pool_config(
-                    root_db_dir.as_ref(),
-                    DbKindCache(dna_hash.clone()),
-                    PoolConfig {
-                        synchronous_level: db_sync_level,
-                        key: db_key.clone(),
-                        max_readers: db_max_readers,
-                    },
-                )?;
-                let dht_db = DbWrite::open_with_pool_config(
-                    root_db_dir.as_ref(),
-                    DbKindDht(dna_hash.clone()),
-                    PoolConfig {
-                        synchronous_level: db_sync_level,
-                        key: db_key.clone(),
-                        max_readers: db_max_readers,
-                    },
-                )?;
-                let peer_meta_store_db = DbWrite::open_with_pool_config(
-                    root_db_dir.as_ref(),
-                    DbKindPeerMetaStore(dna_hash.clone()),
-                    PoolConfig {
-                        synchronous_level: db_sync_level,
-                        key: db_key.clone(),
-                        max_readers: db_max_readers,
-                    },
-                )?;
-                let conductor_db: DbWrite<DbKindConductor> = DbWrite::open_with_pool_config(
-                    root_db_dir.as_ref(),
-                    DbKindConductor,
-                    PoolConfig {
-                        synchronous_level: db_sync_level,
-                        key: db_key.clone(),
-                        max_readers: db_max_readers,
-                    },
-                )?;
-                DatabaseResult::Ok((cache, dht_db, peer_meta_store_db, conductor_db))
-            })?;
-
-        let witnessing_workspace = WitnessingWorkspace::default();
-        let incoming_op_hashes = IncomingOpHashes::default();
-        let incoming_ops_batch = IncomingOpsBatch::default();
-        let r = Self {
-            dna_hash,
-            cache_db: cache,
-            authored_dbs: Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            dht_db,
-            peer_meta_store_db,
-            countersigning_workspaces: Default::default(),
-            witnessing_workspace,
-            incoming_op_hashes,
-            incoming_ops_batch,
-            conductor_db,
-            root_db_dir: Arc::new(root_db_dir),
-            db_key,
-            db_max_readers,
-        };
-        Ok(r)
+            Ok(Self {
+                dna_hash,
+                dht_store,
+                peer_meta_store,
+                countersigning_workspaces: Default::default(),
+                witnessing_workspace: WitnessingWorkspace::default(),
+                incoming_op_hashes: IncomingOpHashes::default(),
+                incoming_ops_batch: IncomingOpsBatch::default(),
+            })
+        })
     }
 
     /// Construct a SourceChain for an author in this Space
@@ -545,13 +489,7 @@ impl Space {
         keystore: MetaLairClient,
         author: AgentPubKey,
     ) -> SourceChainResult<SourceChain> {
-        SourceChain::raw_empty(
-            self.get_or_create_authored_db(author.clone())?,
-            self.dht_db.clone(),
-            keystore,
-            author,
-        )
-        .await
+        SourceChain::raw_empty(self.dht_store.clone(), keystore, author).await
     }
 
     /// Create a SourceChainWorkspace from this Space
@@ -560,73 +498,8 @@ impl Space {
         keystore: MetaLairClient,
         author: AgentPubKey,
     ) -> ConductorResult<SourceChainWorkspace> {
-        Ok(SourceChainWorkspace::new(
-            self.get_or_create_authored_db(author.clone())?.clone(),
-            self.dht_db.clone(),
-            self.cache_db.clone(),
-            keystore,
-            author,
-        )
-        .await?)
+        Ok(SourceChainWorkspace::new(self.dht_store.clone(), keystore, author).await?)
     }
-
-    /// Get or create the authored database for an agent in this space
-    pub fn get_or_create_authored_db(
-        &self,
-        author: AgentPubKey,
-    ) -> DatabaseResult<DbWrite<DbKindAuthored>> {
-        match self.authored_dbs.lock().entry(author.clone()) {
-            hash_map::Entry::Occupied(entry) => Ok(entry.get().clone()),
-            hash_map::Entry::Vacant(entry) => {
-                let db = tokio::task::block_in_place(|| {
-                    DbWrite::open_with_pool_config(
-                        self.root_db_dir.as_ref(),
-                        DbKindAuthored(Arc::new(CellId::new((*self.dna_hash).clone(), author))),
-                        PoolConfig {
-                            synchronous_level: DbSyncLevel::Normal,
-                            key: self.db_key.clone(),
-                            max_readers: self.db_max_readers,
-                        },
-                    )
-                })?;
-
-                entry.insert(db.clone());
-                Ok(db)
-            }
-        }
-    }
-
-    /// Get the authored database for an agent if it exists.
-    pub fn get_authored_db_if_present(
-        &self,
-        author: &AgentPubKey,
-    ) -> DatabaseResult<Option<DbWrite<DbKindAuthored>>> {
-        Ok(self.authored_dbs.lock().get(author).cloned())
-    }
-
-    /// Gets authored databases for this space, for every author.
-    pub fn get_all_authored_dbs(&self) -> Vec<DbWrite<DbKindAuthored>> {
-        self.authored_dbs.lock().values().cloned().collect()
-    }
-}
-
-/// Get the holochain conductor state
-#[cfg_attr(feature = "instrument", tracing::instrument(skip_all))]
-pub async fn query_conductor_state(
-    db: &DbRead<DbKindConductor>,
-) -> ConductorResult<Option<ConductorState>> {
-    db.read_async(|txn| {
-        let state = txn
-            .query_row("SELECT blob FROM ConductorState WHERE id = 1", [], |row| {
-                row.get("blob")
-            })
-            .optional()?;
-        match state {
-            Some(state) => ConductorResult::Ok(Some(from_blob(state)?)),
-            None => ConductorResult::Ok(None),
-        }
-    })
-    .await
 }
 
 #[cfg(test)]
@@ -677,6 +550,16 @@ impl TestSpaces {
     }
 }
 
+fn convert_db_sync_level(
+    level: holochain_conductor_api::config::conductor::DbSyncLevel,
+) -> DbSyncLevel {
+    match level {
+        holochain_conductor_api::config::conductor::DbSyncLevel::Off => DbSyncLevel::Off,
+        holochain_conductor_api::config::conductor::DbSyncLevel::Normal => DbSyncLevel::Normal,
+        holochain_conductor_api::config::conductor::DbSyncLevel::Full => DbSyncLevel::Full,
+    }
+}
+
 #[cfg(test)]
 impl TestSpace {
     /// Create a new test space
@@ -686,13 +569,15 @@ impl TestSpace {
             .tempdir()
             .unwrap();
 
+        let test_space_data_config = holochain_state::data::HolochainDataConfig::default();
         Self {
             space: Space::new(
                 Arc::new(dna_hash),
                 temp_dir.path().to_path_buf(),
                 Default::default(),
-                Default::default(),
                 ConductorConfig::default().db_max_readers,
+                test_space_data_config,
+                None,
             )
             .unwrap(),
             _temp_dir: temp_dir,
@@ -729,32 +614,10 @@ mod tests {
 
         let dna_hash = DnaHash::from_raw_36(vec![0; 36]);
         let space = spaces.get_or_create_space(&dna_hash).unwrap();
-        space
-            .get_or_create_authored_db(AgentPubKey::from_raw_32(vec![0; 32]))
-            .unwrap();
 
-        // db_max_readers applied to space
-        assert_eq!(space.db_max_readers, custom_max_readers);
-
-        // db_max_readers applied to cache db
+        // db_max_readers is applied to the DhtStore's connection pool.
         assert_eq!(
-            space.cache_db.connection_pool_max_size(),
-            custom_max_readers as u32 + 1
-        );
-
-        // db_max_readers applied to dht db
-        assert_eq!(
-            space.dht_db.connection_pool_max_size(),
-            custom_max_readers as u32 + 1
-        );
-
-        // db_max_readers applied to authored db
-        assert_eq!(
-            space
-                .get_all_authored_dbs()
-                .first()
-                .unwrap()
-                .connection_pool_max_size(),
+            space.dht_store.connection_pool_max_size(),
             custom_max_readers as u32 + 1
         );
     }

@@ -1,11 +1,30 @@
-use holo_hash::AnyDhtHash;
+use holo_hash::{AgentPubKey, AnyLinkableHash};
 use holochain::sweettest::*;
 use holochain::test_utils::wait_for_integration;
-use holochain_sqlite::error::DatabaseResult;
 use holochain_wasm_test_utils::TestWasm;
 use holochain_zome_types::prelude::*;
-use rusqlite::named_params;
 use std::time::Duration;
+
+/// Returns whether `cell`'s `DhtStore` holds a locally-validated op at
+/// `basis` whose action was authored by `author`.
+///
+/// "Authored by X" means "an op at this basis whose action author == X".
+async fn store_has_op_at_basis_authored_by(
+    cell: &SweetCell,
+    basis: &AnyLinkableHash,
+    author: &AgentPubKey,
+) -> bool {
+    let store = cell.dht_store();
+    let read = store.as_read();
+    for op_hash in read.get_ops_at_basis(basis).await.unwrap() {
+        if let Some(sah) = read.action_for_op(&op_hash).await.unwrap() {
+            if sah.hashed.content.author() == author {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 /// - Alice commits an entry and it is in their authored store
 /// - Bob doesn't have the entry in their authored store
@@ -40,36 +59,18 @@ async fn authored_test() {
         .await;
 
     let entry_hash = record.unwrap().action().entry_hash().cloned().unwrap();
+    let basis: AnyLinkableHash = entry_hash.clone().into();
 
     // publish these commits
     let triggers = handle.get_cell_triggers(alice.cell_id()).await.unwrap();
     triggers.integrate_dht_ops.trigger(&"authored_test");
 
-    // Alice commits the entry
-    alice
-        .authored_db()
-        .read_async({
-            let basis: AnyDhtHash = entry_hash.clone().into();
-            let alice_pk = alice.cell_id().agent_pubkey().clone();
-
-            move |txn| -> DatabaseResult<()> {
-                let has_authored_entry: bool = txn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM DhtOp JOIN Action ON DhtOp.action_hash = Action.hash
-                    WHERE basis_hash = :hash AND Action.author = :author)",
-                    named_params! {
-                    ":hash": basis,
-                    ":author": alice_pk,
-                },
-                    |row| row.get(0),
-                )?;
-
-                assert!(has_authored_entry);
-
-                Ok(())
-            }
-        })
-        .await
-        .unwrap();
+    // Alice commits the entry, so the store has an op at that basis authored
+    // by Alice.
+    assert!(
+        store_has_op_at_basis_authored_by(&alice, &basis, alice.agent_pubkey()).await,
+        "alice should have an op at the entry basis authored by alice"
+    );
 
     // Integration should have 3 ops in it.
     // Plus another 14 (2x7) for genesis.
@@ -77,59 +78,31 @@ async fn authored_test() {
     let expected_count = 3 + 14;
 
     wait_for_integration(
-        bob.dht_db(),
-        expected_count,
+        bob.dht_store(),
+        expected_count as u64,
         num_attempts,
         delay_per_attempt,
     )
-    .await
-    .unwrap();
+    .await;
 
-    bob
-        .authored_db()
-        .read_async({
-            let basis: AnyDhtHash = entry_hash.clone().into();
-            let bob_pk = bob.cell_id().agent_pubkey().clone();
+    // Bob has not authored anything at this basis (Alice did), so there is no
+    // op at the basis authored by Bob.
+    assert!(
+        !store_has_op_at_basis_authored_by(&bob, &basis, bob.agent_pubkey()).await,
+        "bob should not have an op at the entry basis authored by bob"
+    );
 
-            move |txn| -> DatabaseResult<()> {
-                let has_authored_entry: bool = txn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM DhtOp JOIN Action ON DhtOp.action_hash = Action.hash
-                    WHERE basis_hash = :hash AND Action.author = :author)",
-                    named_params! {
-                    ":hash": basis,
-                    ":author": bob_pk,
-                },
-                    |row| row.get(0),
-                )?;
-                // Bob Should not have the entry in their authored table
-                assert!(!has_authored_entry);
-
-                Ok(())
-            }
-        })
+    // But Bob does hold Alice's integrated op at that basis.
+    let ops_at_basis = bob
+        .dht_store()
+        .as_read()
+        .get_ops_at_basis(&basis)
         .await
         .unwrap();
-
-    bob.dht_db()
-        .read_async({
-            let basis: AnyDhtHash = entry_hash.clone().into();
-
-            move |txn| -> DatabaseResult<()> {
-                let has_integrated_entry: bool = txn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM DhtOp WHERE basis_hash = :hash)",
-                    named_params! {
-                        ":hash": basis,
-                    },
-                    |row| row.get(0),
-                )?;
-
-                assert!(has_integrated_entry);
-
-                Ok(())
-            }
-        })
-        .await
-        .unwrap();
+    assert!(
+        !ops_at_basis.is_empty(),
+        "bob should have an integrated op at the entry basis"
+    );
 
     // Now bob commits the entry
     let _: ActionHash = conductor
@@ -140,29 +113,10 @@ async fn authored_test() {
     let triggers = handle.get_cell_triggers(bob.cell_id()).await.unwrap();
     triggers.publish_dht_ops.trigger(&"");
 
-    bob
-        .authored_db()
-        .read_async({
-            let basis: AnyDhtHash = entry_hash.clone().into();
-            let bob_pk = bob.cell_id().agent_pubkey().clone();
-
-            move |txn| -> DatabaseResult<()> {
-                let has_authored_entry: bool = txn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM DhtOp JOIN Action ON DhtOp.action_hash = Action.hash
-                    WHERE basis_hash = :hash AND Action.author = :author)",
-                    named_params! {
-                    ":hash": basis,
-                    ":author": bob_pk,
-                },
-                    |row| row.get(0),
-                )?;
-
-                // Bob Should have the entry in their authored table because they committed it.
-                assert!(has_authored_entry);
-
-                Ok(())
-            }
-        })
-        .await
-        .unwrap();
+    // Bob has an op at the entry basis authored by Bob, because they
+    // committed it.
+    assert!(
+        store_has_op_at_basis_authored_by(&bob, &basis, bob.agent_pubkey()).await,
+        "bob should have an op at the entry basis authored by bob after committing"
+    );
 }

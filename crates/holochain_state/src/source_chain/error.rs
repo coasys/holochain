@@ -1,4 +1,3 @@
-// use crate::holochain::core::workflow::produce_dht_ops_workflow::dht_op_light::error::DhtOpConvertError;
 use super::HeadInfo;
 use crate::prelude::StateMutationError;
 use crate::query::StateQueryError;
@@ -7,7 +6,6 @@ use crate::scratch::SyncScratchError;
 use holo_hash::ActionHash;
 use holo_hash::EntryHash;
 use holochain_serialized_bytes::prelude::*;
-use holochain_sqlite::error::DatabaseError;
 use holochain_types::prelude::*;
 use thiserror::Error;
 
@@ -54,9 +52,6 @@ pub enum SourceChainError {
 
     #[error("Serialization error: {0}")]
     SerializationError(#[from] SerializedBytesError),
-
-    #[error("Workspace error: {0}")]
-    DatabaseError(#[from] DatabaseError),
 
     #[error("SerdeJson Error: {0}")]
     SerdeJsonError(String),

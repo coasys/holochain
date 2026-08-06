@@ -1,9 +1,9 @@
 use crate::prelude::*;
-use crate::query::StmtIter;
 use holo_hash::ActionHash;
 use holo_hash::AnyDhtHash;
 use holo_hash::EntryHash;
 use holochain_keystore::KeystoreError;
+use holochain_zome_types::prelude::{Record, SignedActionHashed};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -29,11 +29,6 @@ pub struct Scratch {
 
 #[derive(Debug, Clone)]
 pub struct SyncScratch(Arc<Mutex<Scratch>>);
-
-// MD: hmm, why does this need to be a separate type? Why collect into this?
-pub struct FilteredScratch {
-    actions: Vec<SignedActionHashed>,
-}
 
 impl Scratch {
     pub fn new() -> Self {
@@ -92,11 +87,6 @@ impl Scratch {
         self.entries.insert(hash, Arc::new(entry));
     }
 
-    pub fn as_filter(&self, f: impl Fn(&SignedActionHashed) -> bool) -> FilteredScratch {
-        let actions = self.actions.iter().filter(|&shh| f(shh)).cloned().collect();
-        FilteredScratch { actions }
-    }
-
     pub fn into_sync(self) -> SyncScratch {
         SyncScratch(Arc::new(Mutex::new(self)))
     }
@@ -120,7 +110,8 @@ impl Scratch {
                 .entry_hash()
                 // TODO: let's use Arc<Entry> from here on instead of dereferencing
                 .and_then(|eh| self.entries.get(eh).map(|e| (**e).clone()));
-            Record::new(shh, entry)
+            let record_entry = RecordEntry::new(shh.action().entry_visibility(), entry);
+            Record::new(shh, record_entry)
         })
     }
 
@@ -130,13 +121,16 @@ impl Scratch {
     }
 
     fn get_exact_record(&self, hash: &ActionHash) -> StateQueryResult<Option<Record>> {
-        Ok(self.get_action(hash)?.map(|shh| {
-            let entry = shh
-                .action()
-                .entry_hash()
-                .and_then(|eh| self.get_entry(eh).ok());
-            Record::new(shh, entry.flatten())
-        }))
+        let Some(shh) = self.actions().find(|h| h.action_address() == hash).cloned() else {
+            return Ok(None);
+        };
+        let entry = shh
+            .action()
+            .entry_hash()
+            .and_then(|eh| self.get_entry(eh).ok())
+            .flatten();
+        let record_entry = RecordEntry::new(shh.action().entry_visibility(), entry);
+        Ok(Some(Record::new(shh, record_entry)))
     }
 
     fn get_any_record(&self, hash: &EntryHash) -> StateQueryResult<Option<Record>> {
@@ -150,7 +144,8 @@ impl Scratch {
                         .unwrap_or(false)
                 })?
                 .clone();
-            Some(Record::new(shh, Some(entry)))
+            let record_entry = RecordEntry::new(shh.action().entry_visibility(), Some(entry));
+            Some(Record::new(shh, record_entry))
         });
         Ok(r)
     }
@@ -283,35 +278,6 @@ impl Store for Scratch {
     }
 }
 
-impl FilteredScratch {
-    pub fn drain(&mut self) -> impl Iterator<Item = SignedActionHashed> + '_ {
-        self.actions.drain(..)
-    }
-}
-
-impl<Q> Stores<Q> for Scratch
-where
-    Q: Query<Item = Judged<SignedActionHashed>>,
-{
-    type O = FilteredScratch;
-
-    fn get_initial_data(&self, query: Q) -> StateQueryResult<Self::O> {
-        Ok(self.as_filter(query.as_filter()))
-    }
-}
-
-impl StoresIter<Judged<SignedActionHashed>> for FilteredScratch {
-    fn iter(&mut self) -> StateQueryResult<StmtIter<'_, Judged<SignedActionHashed>>> {
-        // We are assuming data in the scratch space is valid even though
-        // it hasn't been validated yet because if it does fail validation
-        // then this transaction will be rolled back.
-        // TODO: Write test to prove this assumption.
-        Ok(Box::new(fallible_iterator::convert(
-            self.drain().map(Judged::valid).map(Ok),
-        )))
-    }
-}
-
 #[derive(Error, Debug)]
 pub enum ScratchError {
     #[error(transparent)]
@@ -345,51 +311,4 @@ impl From<one_err::OneErr> for ScratchError {
 pub enum SyncScratchError {
     #[error("Scratch lock was poisoned")]
     ScratchLockPoison,
-}
-
-#[test]
-fn test_multiple_in_memory() {
-    use holochain_sqlite::rusqlite::*;
-
-    // blank string means "temporary database", which typically resides in
-    // memory but can be flushed to disk if sqlite is under memory pressure
-    let mut m1 = Connection::open("").unwrap();
-    let mut m2 = Connection::open("").unwrap();
-
-    let schema = "
-CREATE TABLE mytable (
-    x INTEGER PRIMARY KEY
-);
-    ";
-
-    m1.execute(schema, []).unwrap();
-    m2.execute(schema, []).unwrap();
-
-    let num = m1
-        .execute("INSERT INTO mytable (x) VALUES (1)", [])
-        .unwrap();
-    assert_eq!(num, 1);
-
-    let xs1: Vec<u16> = m1
-        .transaction()
-        .unwrap()
-        .prepare_cached("SELECT x FROM mytable")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-
-    let xs2: Vec<u16> = m2
-        .transaction()
-        .unwrap()
-        .prepare_cached("SELECT * FROM mytable")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-
-    assert_eq!(xs1, vec![1]);
-    assert!(xs2.is_empty());
 }

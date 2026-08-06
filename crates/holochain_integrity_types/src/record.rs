@@ -1,13 +1,9 @@
 //! Defines a Record, the basic unit of Holochain data.
 
-use crate::action::conversions::WrongActionError;
-use crate::action::ActionHashed;
-use crate::action::CreateLink;
-use crate::action::DeleteLink;
+use crate::action::Action;
+use crate::entry::Entry;
 use crate::entry_def::EntryVisibility;
 use crate::signature::Signature;
-use crate::Entry;
-use crate::{Action, ActionHashedContainer, ActionSequenceAndHash};
 use holo_hash::ActionHash;
 use holo_hash::HasHash;
 use holo_hash::HashableContent;
@@ -16,43 +12,6 @@ use holo_hash::HoloHashed;
 use holo_hash::PrimitiveHashType;
 use holochain_serialized_bytes::prelude::*;
 use std::borrow::Borrow;
-
-/// a chain record containing the signed action along with the
-/// entry if the action type has one.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, SerializedBytes)]
-pub struct Record {
-    /// The signed action for this record
-    pub signed_action: SignedActionHashed,
-    /// If there is an entry associated with this action it will be here.
-    /// If not, there will be an enum variant explaining the reason.
-    pub entry: RecordEntry<Entry>,
-}
-
-impl AsRef<SignedActionHashed> for Record {
-    fn as_ref(&self) -> &SignedActionHashed {
-        &self.signed_action
-    }
-}
-
-impl ActionHashedContainer for Record {
-    fn action(&self) -> &Action {
-        self.action()
-    }
-
-    fn action_hash(&self) -> &ActionHash {
-        self.action_address()
-    }
-}
-
-impl ActionSequenceAndHash for Record {
-    fn action_seq(&self) -> u32 {
-        self.action().action_seq()
-    }
-
-    fn address(&self) -> &ActionHash {
-        self.action_address()
-    }
-}
 
 /// Represents the different ways the entry_address reference within an action
 /// can be interpreted
@@ -68,7 +27,9 @@ pub enum RecordEntry<E: Borrow<Entry> = Entry> {
     NA,
     /// The Action has an entry but was stored without it.
     /// This can happen when you receive gossip of just an action
-    /// when the action type is a [`crate::EntryCreationAction`],
+    /// when the action type creates an entry (a
+    /// [`Create`](crate::action::ActionData::Create) or
+    /// [`Update`](crate::action::ActionData::Update)),
     /// in particular for certain DhtOps
     NotStored,
 }
@@ -176,15 +137,6 @@ impl<E: Borrow<Entry>> RecordEntry<E> {
 /// Alias for record with ref entry
 pub type RecordEntryRef<'a> = RecordEntry<&'a Entry>;
 
-/// The hashed action and the signature that signed it
-pub type SignedActionHashed = SignedHashed<Action>;
-
-impl AsRef<SignedActionHashed> for SignedActionHashed {
-    fn as_ref(&self) -> &SignedActionHashed {
-        self
-    }
-}
-
 /// Any content that has been hashed and signed.
 #[derive(Clone, Debug, Eq, Serialize, Deserialize)]
 pub struct SignedHashed<T>
@@ -195,90 +147,6 @@ where
     pub hashed: HoloHashed<T>,
     /// The signature of the content.
     pub signature: Signature,
-}
-
-impl Record {
-    /// Raw record constructor.  Used only when we know that the values are valid.
-    /// NOTE: this will NOT hide private entry data if present!
-    pub fn new(signed_action: SignedActionHashed, maybe_entry: Option<Entry>) -> Self {
-        let maybe_visibility = signed_action.action().entry_visibility();
-        let entry = RecordEntry::new(maybe_visibility, maybe_entry);
-        Self {
-            signed_action,
-            entry,
-        }
-    }
-
-    /// Access the signature from this record's signed action
-    pub fn signature(&self) -> &Signature {
-        self.signed_action.signature()
-    }
-
-    /// Mutable reference to the Action content.
-    /// This is useless and dangerous in production usage.
-    /// Guaranteed to make hashes and signatures mismatch whatever the Action is mutated to (at least).
-    /// This may be useful for tests that rely heavily on mocked and fixturated data.
-    #[cfg(feature = "test_utils")]
-    pub fn as_action_mut(&mut self) -> &mut Action {
-        &mut self.signed_action.hashed.content
-    }
-
-    /// If the Record contains private entry data, set the RecordEntry
-    /// to Hidden so that it cannot be leaked. If the entry was hidden,
-    /// return it separately.
-    pub fn privatized(self) -> (Self, Option<Entry>) {
-        let (entry, hidden) = if let Some(EntryVisibility::Private) = self
-            .signed_action
-            .action()
-            .entry_data()
-            .map(|(_, entry_type)| entry_type.visibility())
-        {
-            match self.entry {
-                RecordEntry::Present(entry) => (RecordEntry::Hidden, Some(entry)),
-                other => (other, None),
-            }
-        } else {
-            (self.entry, None)
-        };
-        let privatized = Self {
-            signed_action: self.signed_action,
-            entry,
-        };
-        (privatized, hidden)
-    }
-
-    /// Access the action address from this record's signed action
-    pub fn action_address(&self) -> &ActionHash {
-        self.signed_action.action_address()
-    }
-
-    /// Access the Action from this record's signed action
-    pub fn action(&self) -> &Action {
-        self.signed_action.action()
-    }
-
-    /// Access the ActionHashed from this record's signed action portion
-    pub fn action_hashed(&self) -> &ActionHashed {
-        &self.signed_action.hashed
-    }
-
-    /// Access the Entry portion of this record as a RecordEntry,
-    /// which includes the context around the presence or absence of the entry.
-    pub fn entry(&self) -> &RecordEntry {
-        &self.entry
-    }
-}
-
-impl Record {
-    /// Break this record into its components
-    pub fn into_inner(self) -> (SignedActionHashed, RecordEntry) {
-        (self.signed_action, self.entry)
-    }
-
-    /// The inner signed-action
-    pub fn signed_action(&self) -> &SignedActionHashed {
-        &self.signed_action
-    }
 }
 
 #[cfg(feature = "hashing")]
@@ -339,35 +207,6 @@ where
     }
 }
 
-impl SignedActionHashed {
-    /// Access the Action Hash.
-    pub fn action_address(&self) -> &ActionHash {
-        &self.hashed.hash
-    }
-
-    /// Access the Action portion.
-    pub fn action(&self) -> &Action {
-        &self.hashed.content
-    }
-
-    /// Create a new SignedActionHashed from a type that implements into `Action` and
-    /// has the same hash bytes.
-    /// The caller must make sure the hash does not change.
-    pub fn raw_from_same_hash<T>(other: SignedHashed<T>) -> Self
-    where
-        T: Into<Action>,
-        T: HashableContent<HashType = holo_hash::hash_type::Action>,
-    {
-        let SignedHashed {
-            hashed: HoloHashed { content, hash },
-            signature,
-        } = other;
-        let action = content.into();
-        let hashed = ActionHashed::with_pre_hashed(action, hash);
-        Self { hashed, signature }
-    }
-}
-
 impl<C: HashableContent<HashType = T>, T: PrimitiveHashType> HashableContent for SignedHashed<C> {
     type HashType = C::HashType;
 
@@ -401,46 +240,221 @@ where
     }
 }
 
-impl From<ActionHashed> for Action {
-    fn from(action_hashed: ActionHashed) -> Action {
-        action_hashed.into_content()
+/// A chain record: a signed action plus its entry, if the action has one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, SerializedBytes)]
+pub struct Record {
+    /// The signed, hashed action for this record.
+    pub signed_action: SignedHashed<Action>,
+    /// The entry associated with the action, or why it is absent.
+    pub entry: RecordEntry<Entry>,
+}
+
+impl Record {
+    /// Construct a record from a signed action and its entry slot.
+    pub fn new(signed_action: SignedHashed<Action>, entry: RecordEntry<Entry>) -> Self {
+        Self {
+            signed_action,
+            entry,
+        }
+    }
+
+    /// The action content.
+    pub fn action(&self) -> &Action {
+        &self.signed_action.hashed.content
+    }
+
+    /// The action hash of this record.
+    pub fn action_address(&self) -> &ActionHash {
+        self.signed_action.as_hash()
+    }
+
+    /// The signature over this record's action.
+    pub fn signature(&self) -> &Signature {
+        self.signed_action.signature()
+    }
+
+    /// The hashed action portion of this record's signed action.
+    pub fn action_hashed(&self) -> &HoloHashed<Action> {
+        &self.signed_action.hashed
+    }
+
+    /// The entry portion of this record, including the context around the
+    /// presence or absence of the entry.
+    pub fn entry(&self) -> &RecordEntry<Entry> {
+        &self.entry
+    }
+
+    /// The signed, hashed action for this record.
+    pub fn signed_action(&self) -> &SignedHashed<Action> {
+        &self.signed_action
+    }
+
+    /// Breaks this record into its signed-action and entry components.
+    pub fn into_inner(self) -> (SignedHashed<Action>, RecordEntry<Entry>) {
+        (self.signed_action, self.entry)
+    }
+
+    /// If the record contains private entry data, replaces the entry with
+    /// [`RecordEntry::Hidden`] so it cannot be leaked, and hands the hidden
+    /// entry back separately.
+    pub fn privatized(self) -> (Self, Option<Entry>) {
+        let (entry, hidden) = if let Some(EntryVisibility::Private) = self
+            .action()
+            .entry_type()
+            .map(|entry_type| entry_type.visibility())
+        {
+            match self.entry {
+                RecordEntry::Present(entry) => (RecordEntry::Hidden, Some(entry)),
+                other => (other, None),
+            }
+        } else {
+            (self.entry, None)
+        };
+        let privatized = Self {
+            signed_action: self.signed_action,
+            entry,
+        };
+        (privatized, hidden)
+    }
+
+    /// A mutable reference to the action content of this record.
+    ///
+    /// This bypasses the record's hash and signature guarantees: a mutation
+    /// through this reference leaves the hash and signature inconsistent with
+    /// the action. Intended only for constructing fixtures in tests.
+    #[cfg(feature = "test_utils")]
+    pub fn as_action_mut(&mut self) -> &mut Action {
+        &mut self.signed_action.hashed.content
     }
 }
 
-impl From<SignedActionHashed> for Action {
-    fn from(signed_action_hashed: SignedActionHashed) -> Action {
-        ActionHashed::from(signed_action_hashed).into()
+impl crate::action::ActionSequenceAndHash for Record {
+    fn action_seq(&self) -> u32 {
+        self.action().action_seq()
+    }
+
+    fn address(&self) -> &ActionHash {
+        self.action_address()
     }
 }
 
-impl From<Record> for Option<Entry> {
-    fn from(e: Record) -> Self {
-        e.entry.into_option()
+impl crate::action::ActionHashedContainer for Record {
+    fn action(&self) -> &Action {
+        Record::action(self)
+    }
+
+    fn action_hash(&self) -> &ActionHash {
+        self.action_address()
     }
 }
 
-impl TryFrom<Record> for CreateLink {
-    type Error = WrongActionError;
-    fn try_from(value: Record) -> Result<Self, Self::Error> {
-        value
-            .into_inner()
-            .0
-            .into_inner()
-            .0
-            .into_content()
-            .try_into()
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::action::{Action, ActionData, ActionHeader, CreateData, EntryType};
+    use crate::entry::AppEntryBytes;
+    use crate::record::{RecordEntry, SignedHashed};
+    use crate::signature::Signature;
+    use holo_hash::{ActionHash, AgentPubKey, EntryHash, HoloHashed};
 
-impl TryFrom<Record> for DeleteLink {
-    type Error = WrongActionError;
-    fn try_from(value: Record) -> Result<Self, Self::Error> {
-        value
-            .into_inner()
-            .0
-            .into_inner()
-            .0
-            .into_content()
-            .try_into()
+    fn sample_signed_action_with_entry_type(entry_type: EntryType) -> SignedHashed<Action> {
+        let action = Action {
+            header: ActionHeader {
+                author: AgentPubKey::from_raw_36(vec![1u8; 36]),
+                timestamp: holochain_timestamp::Timestamp::from_micros(42),
+                action_seq: 3,
+                prev_action: Some(ActionHash::from_raw_36(vec![2u8; 36])),
+            },
+            data: ActionData::Create(CreateData {
+                entry_type,
+                entry_hash: EntryHash::from_raw_36(vec![3u8; 36]),
+            }),
+        };
+        let hash = ActionHash::from_raw_36(vec![4u8; 36]);
+        let hashed = HoloHashed::with_pre_hashed(action, hash);
+        SignedHashed::with_presigned(hashed, Signature([0u8; 64]))
+    }
+
+    fn sample_signed_action() -> SignedHashed<Action> {
+        sample_signed_action_with_entry_type(EntryType::AgentPubKey)
+    }
+
+    #[test]
+    fn record_exposes_action_and_address() {
+        let sah = sample_signed_action();
+        let expected_hash = sah.as_hash().clone();
+        let record = Record::new(sah, RecordEntry::NA);
+
+        assert_eq!(record.action().header.action_seq, 3);
+        assert_eq!(record.action_address(), &expected_hash);
+        assert_eq!(record.entry, RecordEntry::NA);
+    }
+
+    #[test]
+    fn record_serde_roundtrip() {
+        let record = Record::new(sample_signed_action(), RecordEntry::NA);
+        let bytes = holochain_serialized_bytes::encode(&record).unwrap();
+        let decoded: Record = holochain_serialized_bytes::decode(&bytes).unwrap();
+        assert_eq!(decoded, record);
+    }
+
+    #[test]
+    fn record_signature_signed_action_and_action_hashed_accessors() {
+        let sah = sample_signed_action();
+        let expected_signature = sah.signature().clone();
+        let expected_hashed = sah.hashed.clone();
+        let record = Record::new(sah, RecordEntry::NA);
+
+        assert_eq!(record.signature(), &expected_signature);
+        assert_eq!(record.signed_action().hashed, expected_hashed);
+        assert_eq!(record.action_hashed(), &expected_hashed);
+    }
+
+    #[test]
+    fn record_entry_accessor_returns_the_entry_slot() {
+        let entry = Entry::Agent(AgentPubKey::from_raw_36(vec![5u8; 36]));
+        let record = Record::new(sample_signed_action(), RecordEntry::Present(entry.clone()));
+        assert_eq!(record.entry(), &RecordEntry::Present(entry));
+    }
+
+    #[test]
+    fn record_into_inner_returns_signed_action_and_entry() {
+        let sah = sample_signed_action();
+        let expected_hash = sah.as_hash().clone();
+        let record = Record::new(sah, RecordEntry::NA);
+
+        let (signed_action, entry) = record.into_inner();
+        assert_eq!(signed_action.as_hash(), &expected_hash);
+        assert_eq!(entry, RecordEntry::NA);
+    }
+
+    #[test]
+    fn record_privatized_hides_a_present_private_entry() {
+        let entry = Entry::App(AppEntryBytes(SerializedBytes::default()));
+        let sah = sample_signed_action_with_entry_type(EntryType::CapClaim);
+        let record = Record::new(sah, RecordEntry::Present(entry.clone()));
+
+        let (privatized, hidden) = record.privatized();
+        assert_eq!(privatized.entry, RecordEntry::Hidden);
+        assert_eq!(hidden, Some(entry));
+    }
+
+    #[test]
+    fn record_privatized_leaves_a_public_entry_present() {
+        let entry = Entry::Agent(AgentPubKey::from_raw_36(vec![6u8; 36]));
+        let sah = sample_signed_action_with_entry_type(EntryType::AgentPubKey);
+        let record = Record::new(sah, RecordEntry::Present(entry.clone()));
+
+        let (privatized, hidden) = record.privatized();
+        assert_eq!(privatized.entry, RecordEntry::Present(entry));
+        assert_eq!(hidden, None);
+    }
+
+    #[test]
+    fn record_as_action_mut_allows_mutation() {
+        let mut record = Record::new(sample_signed_action(), RecordEntry::NA);
+        let new_author = AgentPubKey::from_raw_36(vec![7u8; 36]);
+        record.as_action_mut().header.author = new_author.clone();
+        assert_eq!(record.action().author(), &new_author);
     }
 }

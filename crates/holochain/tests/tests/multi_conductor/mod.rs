@@ -1,8 +1,7 @@
 use hdk::prelude::*;
 use holochain::sweettest::SweetConductorConfig;
 use holochain::sweettest::*;
-use holochain_sqlite::db::{DbKindT, DbWrite};
-use holochain_sqlite::prelude::DatabaseResult;
+use holochain_state::dht_store::DhtStore;
 use unwrap_to::unwrap_to;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, SerializedBytes, derive_more::From)]
@@ -14,27 +13,22 @@ struct AppString(String);
 /// even with gossip disabled.
 #[cfg(feature = "test_utils")]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_publish() {
+async fn publish() {
     use holochain::{retry_until_timeout, test_utils::inline_zomes::simple_create_read_zome};
-    use holochain_conductor_api::conductor::{ConductorConfig, NetworkConfig};
 
     holochain_trace::test_run();
 
-    let config = ConductorConfig {
-        network: NetworkConfig {
-            #[cfg(feature = "transport-tx5-backend-go-pion")]
-            webrtc_config: Some(serde_json::json!({
-                // It's really hard to test this since it just goes straight
-                // to the webrtc implementation internals, so just adding
-                // here so I can manually verify it is getting at least
-                // passed in via tracing.
-                "ususedFieldTest": true,
-            })),
-            disable_gossip: true,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
+    let config = SweetConductorConfig::rendezvous(true)
+        .tune_network_config(|nc| {
+            nc.disable_gossip = true;
+        })
+        .tune_conductor(|tune| {
+            // Publishing an op is a best-effort notification. Keep the
+            // publish loop and the per-op publish cooldown short so that a
+            // missed notification is retried within this test's timeout.
+            tune.publish_trigger_interval = Some(std::time::Duration::from_millis(500));
+            tune.min_publish_interval = Some(std::time::Duration::from_millis(500));
+        });
 
     let mut conductors = SweetConductorBatch::from_config_rendezvous(2, config).await;
     let dna_file = SweetDnaFile::unique_from_inline_zomes(("simple", simple_create_read_zome()))
@@ -70,10 +64,6 @@ async fn test_publish() {
 
 #[cfg(feature = "test_utils")]
 #[tokio::test(flavor = "multi_thread")]
-#[cfg_attr(
-    not(feature = "transport-iroh"),
-    ignore = "requires Iroh transport for stability"
-)]
 async fn multi_conductor() -> anyhow::Result<()> {
     use holochain::test_utils::inline_zomes::simple_create_read_zome;
 
@@ -123,10 +113,6 @@ async fn multi_conductor() -> anyhow::Result<()> {
 /// Flaky on Windows separately from the pending fixes alongside Iroh networking upgrade.
 #[cfg(feature = "test_utils")]
 #[tokio::test(flavor = "multi_thread")]
-#[cfg_attr(
-    not(feature = "transport-iroh"),
-    ignore = "requires Iroh transport for stability"
-)]
 async fn private_entries_update_consistency() {
     use holochain::sweettest::SweetInlineZomes;
     use holochain_types::inline_zome::InlineZomeSet;
@@ -188,10 +174,6 @@ async fn private_entries_update_consistency() {
 /// Flaky on Windows separately from the pending fixes alongside Iroh networking upgrade.
 #[cfg(feature = "test_utils")]
 #[tokio::test(flavor = "multi_thread")]
-#[cfg_attr(
-    not(feature = "transport-iroh"),
-    ignore = "requires Iroh transport for stability"
-)]
 async fn private_entries_dont_leak() {
     use holochain::sweettest::SweetInlineZomes;
     use holochain_types::inline_zome::InlineZomeSet;
@@ -294,21 +276,20 @@ async fn private_entries_dont_leak() {
     )
     .await;
 
-    check_for_private_entries(alice.dht_db().clone()).await;
-    check_for_private_entries(conductors[0].get_cache_db(alice.cell_id()).await.unwrap()).await;
-    check_for_private_entries(bobbo.dht_db().clone()).await;
-    check_for_private_entries(conductors[1].get_cache_db(bobbo.cell_id()).await.unwrap()).await;
+    check_for_private_entries(alice.dht_store()).await;
+    check_for_private_entries(bobbo.dht_store()).await;
 }
 
+/// Private entries are never placed in the shared public `Entry` table; they
+/// live only in the separate `PrivateEntry` table. Assert the public table
+/// holds no private-visibility entries.
 #[cfg_attr(feature = "instrument", tracing::instrument(skip_all))]
-async fn check_for_private_entries<Kind: DbKindT>(env: DbWrite<Kind>) {
-    let count: usize = env.read_async(move |txn| -> DatabaseResult<usize> {
-        Ok(txn.query_row(
-            "select count(action.rowid) from action join entry on action.entry_hash = entry.hash where private_entry = 1",
-            [],
-            |row| row.get(0),
-        )?)
-    }).await.unwrap();
+async fn check_for_private_entries(dht_store: &DhtStore) {
+    let count = dht_store
+        .as_read()
+        .count_private_entries_in_public_table()
+        .await
+        .unwrap();
     assert_eq!(count, 0);
 }
 
@@ -346,7 +327,10 @@ async fn check_all_gets_for_private_entry(
         let details = unwrap_to!(entry=> Details::Entry).clone();
         let actions = details.actions;
         for action in actions {
-            assert_eq!(action.action().author(), zome.cell_id().agent_pubkey());
+            assert_eq!(
+                action.hashed.content.author(),
+                zome.cell_id().agent_pubkey()
+            );
         }
     }
 }

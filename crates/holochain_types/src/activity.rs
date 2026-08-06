@@ -1,9 +1,11 @@
 //! Types for agents chain activity
 
-use holo_hash::ActionHash;
 use holo_hash::AgentPubKey;
+use holo_hash::{ActionHash, HasHash};
 use holochain_serialized_bytes::prelude::*;
-use holochain_zome_types::prelude::*;
+use holochain_zome_types::prelude::{
+    ActionHashed, AgentActivityStatus, ChainStatus, HighestObserved, Record, SignedWarrant,
+};
 
 /// An agents chain records returned from a agent_activity_query
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, SerializedBytes)]
@@ -25,6 +27,21 @@ pub struct AgentActivityResponse {
 }
 
 impl AgentActivityResponse {
+    /// Whether this response carries no information about the agent's chain.
+    ///
+    /// An empty response means the authority holds nothing for the agent:
+    /// no valid or rejected activity, an [`ChainStatus::Empty`] status, no
+    /// highest observed action and no warrants. Callers that aggregate
+    /// responses from several authorities use this to tell "I hold
+    /// nothing" answers apart from answers that contribute data.
+    pub fn is_empty(&self) -> bool {
+        self.valid_activity.is_empty()
+            && self.rejected_activity.is_empty()
+            && matches!(self.status, ChainStatus::Empty)
+            && self.highest_observed.is_none()
+            && self.warrants.is_empty()
+    }
+
     /// Convert an empty response to a different type.
     pub fn from_empty(other: AgentActivityResponse) -> Self {
         let convert_activity = |items: &ChainItems| match items {
@@ -48,7 +65,7 @@ impl AgentActivityResponse {
             agent: other.agent,
             valid_activity: ChainItems::NotRequested,
             rejected_activity: ChainItems::NotRequested,
-            status: ChainStatus::Empty,
+            status: other.status,
             highest_observed: other.highest_observed,
             warrants: other.warrants,
         }
@@ -60,7 +77,7 @@ impl AgentActivityResponse {
             ChainItems::Full(records) => ChainItems::Hashes(
                 records
                     .into_iter()
-                    .map(|r| (r.action().action_seq(), r.address().clone()))
+                    .map(|r| (r.action().action_seq(), r.action_address().clone()))
                     .collect(),
             ),
             ChainItems::Hashes(h) => ChainItems::Hashes(h),
@@ -88,7 +105,19 @@ pub enum ChainItems {
     NotRequested,
 }
 
-impl From<AgentActivityResponse> for AgentActivity {
+impl ChainItems {
+    /// Whether these items carry no activity, either because none was
+    /// requested or because the requested list came back empty.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            ChainItems::Full(records) => records.is_empty(),
+            ChainItems::Hashes(hashes) => hashes.is_empty(),
+            ChainItems::NotRequested => true,
+        }
+    }
+}
+
+impl From<AgentActivityResponse> for AgentActivityStatus {
     fn from(a: AgentActivityResponse) -> Self {
         let valid_activity = match a.valid_activity {
             ChainItems::Full(records) => records
@@ -116,7 +145,7 @@ impl From<AgentActivityResponse> for AgentActivity {
     }
 }
 
-/// A helper trait to allow [Record]s, [SignedActionHashed]s, and [ActionHashed]s to be converted into [ChainItems]
+/// A helper trait to allow [`Record`]s, [`SignedActionHashed`](holochain_zome_types::prelude::SignedActionHashed)s, and [`ActionHashed`]s to be converted into [`ChainItems`]
 /// without needing to know which source type is being operated on.
 pub trait ChainItemsSource {
     /// Convert a source type into a [ChainItems] value.
@@ -142,5 +171,80 @@ impl ChainItemsSource for Vec<ActionHashed> {
 impl ChainItemsSource for Vec<(u32, ActionHash)> {
     fn to_chain_items(self) -> ChainItems {
         ChainItems::Hashes(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use holochain_zome_types::prelude::ChainHead;
+
+    #[test]
+    fn empty_response_detection() {
+        // An authority holding nothing for the agent: with activity
+        // requested the payload is an empty `Hashes` list, not
+        // `NotRequested`. Both shapes carry no information and must be
+        // treated as empty.
+        let empty = AgentActivityResponse {
+            agent: AgentPubKey::from_raw_32(vec![2; 32]),
+            valid_activity: ChainItems::Hashes(vec![]),
+            rejected_activity: ChainItems::Hashes(vec![]),
+            status: ChainStatus::Empty,
+            highest_observed: None,
+            warrants: vec![],
+        };
+        assert!(empty.is_empty());
+        assert!(AgentActivityResponse {
+            valid_activity: ChainItems::NotRequested,
+            rejected_activity: ChainItems::NotRequested,
+            ..empty.clone()
+        }
+        .is_empty());
+
+        // Any piece of information makes the response non-empty.
+        let head = ChainHead {
+            action_seq: 5,
+            hash: ActionHash::from_raw_32(vec![1; 32]),
+        };
+        assert!(!AgentActivityResponse {
+            valid_activity: ChainItems::Hashes(vec![(0, ActionHash::from_raw_32(vec![3; 32]))]),
+            ..empty.clone()
+        }
+        .is_empty());
+        assert!(!AgentActivityResponse {
+            status: ChainStatus::Valid(head.clone()),
+            ..empty.clone()
+        }
+        .is_empty());
+        assert!(!AgentActivityResponse {
+            highest_observed: Some(HighestObserved {
+                action_seq: head.action_seq,
+                hash: vec![head.hash],
+            }),
+            ..empty.clone()
+        }
+        .is_empty());
+    }
+
+    #[test]
+    fn status_only_preserves_status() {
+        let head = ChainHead {
+            action_seq: 5,
+            hash: ActionHash::from_raw_32(vec![1; 32]),
+        };
+        let response = AgentActivityResponse {
+            agent: AgentPubKey::from_raw_32(vec![2; 32]),
+            valid_activity: ChainItems::Hashes(vec![]),
+            rejected_activity: ChainItems::NotRequested,
+            status: ChainStatus::Valid(head.clone()),
+            highest_observed: None,
+            warrants: vec![],
+        };
+
+        let only = AgentActivityResponse::status_only(response);
+
+        assert_eq!(only.status, ChainStatus::Valid(head));
+        assert_eq!(only.valid_activity, ChainItems::NotRequested);
+        assert_eq!(only.rejected_activity, ChainItems::NotRequested);
     }
 }

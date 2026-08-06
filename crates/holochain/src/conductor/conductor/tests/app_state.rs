@@ -10,7 +10,6 @@ use crate::{
         error::ConductorError,
         ribosome_store::RibosomeStore,
         space::Spaces,
-        state::ConductorState,
         Conductor,
     },
     sweettest::*,
@@ -21,6 +20,7 @@ use holo_hash::{
     fixt::{AgentPubKeyFixturator, DnaHashFixturator},
     ActionHash,
 };
+use holochain_conductor_api::state::ConductorState;
 use holochain_conductor_api::{conductor::ConductorConfig, AppStatusFilter};
 use holochain_keystore::test_keystore;
 use holochain_state::prelude::test_db_dir;
@@ -40,6 +40,18 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
+
+/// Path to the per-DNA DhtStore database file backing `dna_hash` within this
+/// conductor's data directory.
+fn dht_store_db_path(conductor: &SweetConductor, dna_hash: &DnaHash) -> std::path::PathBuf {
+    let id = holochain_state::data::Dht::new(Arc::new(dna_hash.clone()));
+    conductor
+        .spaces
+        .db_dir
+        .as_ref()
+        .as_ref()
+        .join(holochain_state::data::DatabaseIdentifier::database_id(&id))
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn can_update_state() {
@@ -70,6 +82,7 @@ async fn can_update_state() {
         spaces,
         post_commit_sender,
         outcome_tx,
+        Default::default(),
     );
     let state = conductor.get_state().await.unwrap();
     let mut expected_state = ConductorState::default();
@@ -90,7 +103,7 @@ async fn can_update_state() {
             description: None,
             roles: vec![],
             bootstrap_url: None,
-            signal_url: None,
+            relay_url: None,
         }),
         Timestamp::now(),
     )
@@ -142,7 +155,7 @@ async fn uninstall_app() {
 
     // Await integration of both actions.
     retry_fn_until_timeout(
-        || async { conductor.all_ops_integrated(dna.dna_hash()).unwrap() },
+        || async { conductor.all_ops_integrated(dna.dna_hash()).await.unwrap() },
         None,
         None,
     )
@@ -178,23 +191,13 @@ async fn uninstall_app() {
     .await
     .unwrap();
 
-    let authored_db_1 = conductor
-        .spaces
-        .get_or_create_authored_db(dna.dna_hash(), app_1.agent().clone())
-        .unwrap();
-    let authored_db_2 = conductor
-        .spaces
-        .get_or_create_authored_db(dna.dna_hash(), app_2.agent().clone())
-        .unwrap();
-    let dht_db = conductor.get_dht_db(dna.dna_hash()).unwrap();
-    let cache_db = conductor
-        .get_cache_db(&CellId::new(dna.dna_hash().clone(), app_1.agent().clone()))
-        .await
-        .unwrap();
+    // app_1 and app_2 share a DNA, so a single per-DNA DhtStore database backs
+    // both cells. It exists while either app is installed and is deleted once
+    // the last app for the DNA is uninstalled.
+    let dht_store_path = dht_store_db_path(&conductor, dna.dna_hash());
 
-    // - Check that both authored database files exist
-    std::fs::File::open(authored_db_1.path()).unwrap();
-    std::fs::File::open(authored_db_2.path()).unwrap();
+    // - Check that the DhtStore database file exists
+    std::fs::File::open(&dht_store_path).unwrap();
 
     // - Uninstall the first app
     conductor
@@ -203,13 +206,8 @@ async fn uninstall_app() {
         .await
         .unwrap();
 
-    // - Check that the first authored DB file is deleted since the cell was removed.
-    #[cfg(not(windows))]
-    std::fs::File::open(authored_db_1.path()).unwrap_err();
-    std::fs::File::open(authored_db_2.path()).unwrap();
-    // - DHT and cache databases should still exist.
-    std::fs::File::open(dht_db.path()).unwrap();
-    std::fs::File::open(cache_db.path()).unwrap();
+    // - app_2 still uses the DNA, so the DhtStore database persists.
+    std::fs::File::open(&dht_store_path).unwrap();
 
     // - Ensure that the remaining app can still access both hashes
     assert!(conductor
@@ -238,11 +236,8 @@ async fn uninstall_app() {
 
     #[cfg(not(windows))]
     {
-        // - Check that second authored DB file is deleted since the cell was removed.
-        std::fs::File::open(authored_db_2.path()).unwrap_err();
-        // - Now the DHT and cache databases should be gone too.
-        std::fs::File::open(dht_db.path()).unwrap_err();
-        std::fs::File::open(cache_db.path()).unwrap_err();
+        // - The last app for the DNA is gone, so the DhtStore database is deleted.
+        std::fs::File::open(&dht_store_path).unwrap_err();
     }
 
     // - Ensure that the apps are removed
@@ -308,23 +303,13 @@ async fn delete_clone_cell_deletes_cell_databases() {
         .await
         .unwrap();
 
-    let clone_cell_1_db = conductor
-        .spaces
-        .get_or_create_authored_db(
-            clone_cell_1.cell_id.dna_hash(),
-            clone_cell_1.cell_id.agent_pubkey().clone(),
-        )
-        .unwrap();
-    let clone_cell_2_db = conductor
-        .spaces
-        .get_or_create_authored_db(
-            clone_cell_2.cell_id.dna_hash(),
-            clone_cell_2.cell_id.agent_pubkey().clone(),
-        )
-        .unwrap();
-    // - Check that the clone cells' authored database files exist
-    std::fs::File::open(clone_cell_1_db.path()).unwrap();
-    std::fs::File::open(clone_cell_2_db.path()).unwrap();
+    // Each clone cell has its own DNA, and therefore its own per-DNA DhtStore
+    // database.
+    let clone_cell_1_path = dht_store_db_path(&conductor, clone_cell_1.cell_id.dna_hash());
+    let clone_cell_2_path = dht_store_db_path(&conductor, clone_cell_2.cell_id.dna_hash());
+    // - Check that the clone cells' DhtStore database files exist
+    std::fs::File::open(&clone_cell_1_path).unwrap();
+    std::fs::File::open(&clone_cell_2_path).unwrap();
 
     // - Delete the first clone cell
     conductor
@@ -344,11 +329,11 @@ async fn delete_clone_cell_deletes_cell_databases() {
         .await
         .unwrap();
 
-    // - Check that the first clone cell's authored DB file is deleted
-    // and the second clone cell's authored DB is intact.
+    // - Check that the first clone cell's DhtStore DB file is deleted
+    // and the second clone cell's DhtStore DB is intact.
     #[cfg(not(windows))]
-    std::fs::File::open(clone_cell_1_db.path()).unwrap_err();
-    std::fs::File::open(clone_cell_2_db.path()).unwrap();
+    std::fs::File::open(&clone_cell_1_path).unwrap_err();
+    std::fs::File::open(&clone_cell_2_path).unwrap();
 
     // - Delete the second clone cell.
     conductor
@@ -368,9 +353,9 @@ async fn delete_clone_cell_deletes_cell_databases() {
         .await
         .unwrap();
 
-    // - Check that second clone cell's authored DB file is deleted too.
+    // - Check that second clone cell's DhtStore DB file is deleted too.
     #[cfg(not(windows))]
-    std::fs::File::open(clone_cell_2_db.path()).unwrap_err();
+    std::fs::File::open(&clone_cell_2_path).unwrap_err();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -467,7 +452,7 @@ async fn disabled_clone_cell_cannot_be_called() {
     ));
 
     conductor.shutdown().await;
-    conductor.startup(false).await;
+    conductor.startup().await;
 
     // - cell should still be disabled after restart
     let app_info = conductor.get_app_info(&app_id).await.unwrap().unwrap();
@@ -547,7 +532,7 @@ async fn app_status_filters() {
 
     // check that counts are still accurate after a restart
     conductor.shutdown().await;
-    conductor.startup(false).await;
+    conductor.startup().await;
 
     let inactive_apps = conductor
         .list_apps(Some(AppStatusFilter::Disabled))
@@ -668,6 +653,7 @@ async fn app_status_and_cell_state() {
             network_seed: None,
             roles_settings: None,
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();
@@ -786,6 +772,7 @@ async fn app_status_and_cell_state() {
             network_seed: None,
             roles_settings: None,
             ignore_genesis_failure: false,
+            restore_from_dht: false,
         })
         .await
         .unwrap();

@@ -1,40 +1,29 @@
 use hdk::prelude::{
-    ActionHashed, ActivityRequest, CellId, ChainFilter, ChainTopOrdering, CreateInput, EntryDef,
-    EntryDefIndex, EntryVisibility, GetAgentActivityInput, MustGetAgentActivityInput, Op,
-    SerializedBytes, ValidateCallbackResult,
+    ActivityRequest, CellId, ChainFilter, ChainTopOrdering, CreateInput, EntryDef, EntryDefIndex,
+    EntryVisibility, GetAgentActivityInput, MustGetAgentActivityInput, Op, SerializedBytes,
+    ValidateCallbackResult,
 };
 use holo_hash::{ActionHash, DnaHash};
 use holochain::{
     prelude::{DisabledAppReason, InlineZomeSet},
     sweettest::{
-        await_consistency, SweetCell, SweetConductor, SweetConductorBatch, SweetConductorConfig,
-        SweetDnaFile, SweetInlineZomes,
+        await_consistency, await_consistency_s, SweetCell, SweetConductor, SweetConductorBatch,
+        SweetConductorConfig, SweetDnaFile, SweetInlineZomes,
     },
     test_utils::retry_fn_until_timeout,
 };
-use holochain_sqlite::prelude::ReadAccess;
-use holochain_state::prelude::{
-    dump_db, insert_op_dht, set_validation_status, set_when_integrated,
-};
-use holochain_state::query::{from_blob, CascadeTxnWrapper, StateQueryResult, Store};
+use holochain_keystore::WarrantOpExt;
 use holochain_timestamp::Timestamp;
-use holochain_types::dht_op::DhtOpHashed;
+use holochain_types::op::{DhtOp, DhtOpHashed};
 use holochain_types::prelude::WarrantOp;
-use holochain_zome_types::op::ChainOpType;
-use holochain_zome_types::prelude::{ChainIntegrityWarrant, ValidationStatus, Warrant};
-use holochain_zome_types::record::SignedAction;
-use holochain_zome_types::warrant::WarrantProof;
-use holochain_zome_types::Entry;
-use rusqlite::named_params;
+use holochain_zome_types::prelude::{
+    ChainIntegrityWarrant, ChainOpType, Entry, SignedActionHashed, Warrant, WarrantProof,
+};
 use serde::{Deserialize, Serialize};
 
 // Alice creates an invalid op and publishes it to Bob. Bob issues a warrant and
 // blocks Alice.
 #[tokio::test(flavor = "multi_thread")]
-#[cfg_attr(
-    not(feature = "transport-iroh"),
-    ignore = "requires Iroh transport for stability"
-)]
 async fn warranted_agent_is_blocked() {
     holochain_trace::test_run();
 
@@ -60,18 +49,17 @@ async fn warranted_agent_is_blocked() {
 
     await_consistency([&alice_cell, &bob_cell]).await.unwrap();
 
-    // The warrant against Alice and the warrant op should have been written to Bob's authored database.
+    // The warrant against Alice should have been recorded in Bob's DHT store.
     retry_fn_until_timeout(
         || async {
-            let alice_pubkey = alice_cell.agent_pubkey().clone();
             let warrants = bob_conductor
                 .get_spaces()
-                .get_all_authored_dbs(&dna_hash)
-                .unwrap()[0]
-                .test_read(move |txn| {
-                    let store = CascadeTxnWrapper::from(txn);
-                    store.get_warrants_for_agent(&alice_pubkey, false).unwrap()
-                });
+                .dht_store(&dna_hash)
+                .unwrap()
+                .as_read()
+                .warrants_by_author(bob_cell.agent_pubkey().clone())
+                .await
+                .unwrap();
 
             tracing::info!("number of warrants: {}", warrants.len());
 
@@ -158,21 +146,20 @@ async fn warrant_is_gossiped() {
         || async {
             let alice_pubkey = alice_cell.agent_pubkey().clone();
             let invalid_ops = carol_conductor
-                .get_invalid_integrated_ops(&carol_conductor.get_dht_db(&dna_hash).unwrap())
+                .get_invalid_integrated_ops(&dna_hash)
                 .await
                 .unwrap();
             invalid_ops.len() == 3 && {
                 let warrants = carol_conductor
-                    .get_spaces()
-                    .dht_db(&dna_hash)
+                    .get_dht_store(&dna_hash)
                     .unwrap()
-                    .test_read(move |txn| {
-                        let store = CascadeTxnWrapper::from(txn);
-                        store.get_warrants_for_agent(&alice_pubkey, true).unwrap()
-                    });
+                    .as_read()
+                    .get_warrants_by_warrantee(alice_pubkey)
+                    .await
+                    .unwrap();
                 !warrants.is_empty()
-                    && warrants[0].warrant().warrantee == *alice_cell.agent_pubkey()
-                    && warrants[0].warrant().author == *bob_cell.agent_pubkey() // Make sure that Bob authored the warrant and it's not been authored by Carol.
+                    && warrants[0].data().warrantee == *alice_cell.agent_pubkey()
+                    && warrants[0].data().author == *bob_cell.agent_pubkey() // Make sure that Bob authored the warrant and it's not been authored by Carol.
             }
         },
         Some(60_000),
@@ -236,32 +223,22 @@ async fn author_of_invalid_warrant_is_blocked() {
     // Wait for Alice and Bob to sync.
     await_consistency([&alice, &bob]).await.unwrap();
 
-    let alice_authored_db = conductors[0]
-        .get_spaces()
-        .get_or_create_authored_db(dna_file.dna_hash(), alice.agent_pubkey().clone())
-        .unwrap();
-    let action = alice_authored_db
-        .read_async(move |txn| -> StateQueryResult<SignedAction> {
-            let action: Vec<u8> = txn.query_row(
-                "SELECT blob FROM Action WHERE hash = :hash",
-                named_params! {":hash": valid_action_hash},
-                |row| row.get(0),
-            )?;
-
-            from_blob(action)
-        })
+    // Fetch Alice's signed action from the DhtStore.
+    let action: SignedActionHashed = alice
+        .dht_store()
+        .as_read()
+        .retrieve_action(&valid_action_hash)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("Alice's valid action should be in the DhtStore");
 
     // Now Bob needs to create a warrant against Alice's perfectly valid action.
     let warrant = Warrant::new(
         WarrantProof::ChainIntegrity(ChainIntegrityWarrant::InvalidChainOp {
             action_author: alice.agent_pubkey().clone(),
-            action: (
-                ActionHashed::from_content_sync(action.action().clone()).hash,
-                action.signature().clone(),
-            ),
-            chain_op_type: ChainOpType::StoreRecord,
+            action: (action.hashed.hash.clone(), action.signature.clone()),
+            chain_op_type: ChainOpType::CreateRecord,
+            reason: "test warrant".into(),
         }),
         bob.agent_pubkey().clone(),
         Timestamp::now(),
@@ -271,17 +248,21 @@ async fn author_of_invalid_warrant_is_blocked() {
         .await
         .unwrap();
 
-    // Insert the warrant into Bob's DHT database.
-    let warrant_op_hashed = DhtOpHashed::from_content_sync(warrant_op);
+    let warrant_op_hashed = DhtOpHashed::from_content_sync(DhtOp::from((*warrant_op).clone()));
 
+    // Seed the warrant in Bob's DhtStore so K2 gossip can find and serve it.
+    // Use the test-only helper instead of `record_locally_validated_warrants`:
+    // the latter (correctly) drives the integration workflow to block the
+    // warrantee, which would prevent Bob from gossiping the warrant to Alice.
+    // This test injects an objectively invalid warrant to verify Alice rejects
+    // it, so Bob must not act on it.
     conductors[1]
-        .get_dht_db(dna_file.dna_hash())
+        .get_spaces()
+        .dht_store(dna_file.dna_hash())
         .unwrap()
-        .test_write(move |txn| {
-            insert_op_dht(txn, &warrant_op_hashed, 0, None).unwrap();
-            set_validation_status(txn, &warrant_op_hashed.hash, ValidationStatus::Valid).unwrap();
-            set_when_integrated(txn, &warrant_op_hashed.hash, Timestamp::now()).unwrap();
-        });
+        .test_insert_integrated_warrant(warrant_op_hashed)
+        .await
+        .unwrap();
 
     // Wait for Alice and Bob to sync so that Alice receives the warrant.
     await_consistency([&alice, &bob]).await.unwrap();
@@ -292,18 +273,12 @@ async fn author_of_invalid_warrant_is_blocked() {
 
             let alice_pubkey = alice.agent_pubkey().clone();
             let warrants = conductors[0]
-                .get_dht_db(dna_file.dna_hash())
+                .get_dht_store(dna_file.dna_hash())
                 .unwrap()
-                .test_read(move |txn| {
-                    dump_db(txn);
-
-                    txn.query_row("select count(*) from Warrant", [], |r| r.get::<_, i32>(0))
-                        .map(|c| tracing::warn!("Warrant count: {}", c))
-                        .unwrap();
-
-                    let store = CascadeTxnWrapper::from(txn);
-                    store.get_warrants_for_agent(&alice_pubkey, false).unwrap()
-                });
+                .as_read()
+                .get_warrants_by_warrantee(alice_pubkey)
+                .await
+                .unwrap();
 
             tracing::warn!("Warrants: {:#?}", warrants);
 
@@ -340,8 +315,9 @@ async fn author_of_invalid_warrant_is_blocked() {
 
 mod zero_arc {
     use super::*;
-    use hdk::prelude::{AgentActivity, BlockTargetId, RegisterAgentActivity};
+    use hdk::prelude::{AgentActivity as OpAgentActivity, BlockTargetId};
     use holochain::prelude::DisabledAppReason;
+    use holochain_zome_types::query::AgentActivityStatus;
 
     // Alice creates an invalid op, Bob receives it and issues a warrant.
     // Carol is a zero arc node and makes a get_agent_activity request to Bob.
@@ -396,7 +372,7 @@ mod zero_arc {
         // and Carol might contact Alice first before finding Bob.
         retry_fn_until_timeout(
             || async {
-                let alice_activity: Result<AgentActivity, _> = carol_conductor
+                let alice_activity: Result<AgentActivityStatus, _> = carol_conductor
                     .call_fallible(
                         &carol_cell.zome(SweetInlineZomes::COORDINATOR),
                         "get_agent_activity",
@@ -441,7 +417,9 @@ mod zero_arc {
         let (bob_conductor, bob_cell) = conductors_and_cells.remove(0);
         let (carol_conductor, carol_cell) = conductors_and_cells.remove(0);
 
-        await_consistency([&alice_cell, &bob_cell]).await.unwrap();
+        await_consistency_s(120, [&alice_cell, &bob_cell])
+            .await
+            .unwrap();
 
         // Ensure that Carol knows about Bob's full arc.
         bob_conductor
@@ -460,7 +438,9 @@ mod zero_arc {
             )
             .await;
 
-        await_consistency([&alice_cell, &bob_cell]).await.unwrap();
+        await_consistency_s(120, [&alice_cell, &bob_cell])
+            .await
+            .unwrap();
 
         // Bob should have issued a warrant against Alice.
 
@@ -475,7 +455,7 @@ mod zero_arc {
         // and Carol might contact Alice first before finding Bob.
         retry_fn_until_timeout(
             || async {
-                let result: Result<AgentActivity, _> = carol_conductor
+                let result: Result<AgentActivityStatus, _> = carol_conductor
                     .call_fallible(
                         &carol_cell.zome(SweetInlineZomes::COORDINATOR),
                         "get_agent_activity",
@@ -576,7 +556,7 @@ mod zero_arc {
         // first attempt might fail if Carol tries to contact the now-disabled Alice.
         retry_fn_until_timeout(
             || async {
-                let result: Result<Vec<RegisterAgentActivity>, _> = carol_conductor
+                let result: Result<Vec<OpAgentActivity>, _> = carol_conductor
                     .call_fallible(
                         &carol_cell.zome(SweetInlineZomes::COORDINATOR),
                         "must_get_agent_activity",

@@ -73,9 +73,10 @@ impl AdminInterfaceApi {
             GetDnaDefinition(cell_id) => {
                 let dna_def = self
                     .conductor_handle
-                    .get_dna_def(&cell_id)
+                    .get_dna_definition(&cell_id)
+                    .await?
                     .ok_or(ConductorApiError::CellMissing(*cell_id))?;
-                Ok(AdminResponse::DnaDefinitionReturned(dna_def))
+                Ok(AdminResponse::DnaDefinitionReturned(dna_def.content))
             }
             UpdateCoordinators(payload) => {
                 let UpdateCoordinatorsPayload { cell_id, source } = *payload;
@@ -101,7 +102,7 @@ impl AdminInterfaceApi {
                     .clone()
                     .install_app_bundle(*payload)
                     .await?;
-                let dna_definitions = self.conductor_handle.get_dna_definitions(&app)?;
+                let dna_definitions = self.conductor_handle.get_dna_definitions(&app).await?;
                 Ok(AdminResponse::AppInstalled(AppInfo::from_installed_app(
                     &app,
                     &dna_definitions,
@@ -118,7 +119,7 @@ impl AdminInterfaceApi {
                 Ok(AdminResponse::AppUninstalled)
             }
             ListDnas => {
-                let dna_list = self.conductor_handle.list_dna_hashes();
+                let dna_list = self.conductor_handle.list_dna_hashes().await?;
                 Ok(AdminResponse::DnasListed(dna_list.into_iter().collect()))
             }
             GenerateAgentPubKey => {
@@ -187,8 +188,15 @@ impl AdminInterfaceApi {
                 let interfaces = self.conductor_handle.list_app_interfaces().await?;
                 Ok(AdminResponse::AppInterfacesListed(interfaces))
             }
-            DumpState { cell_id } => {
-                let state = self.conductor_handle.dump_cell_state(&cell_id).await?;
+            DumpState {
+                cell_id,
+                source_chain_cursor,
+                limit,
+            } => {
+                let state = self
+                    .conductor_handle
+                    .dump_cell_state(&cell_id, source_chain_cursor.as_ref(), limit)
+                    .await?;
                 Ok(AdminResponse::StateDumped(state))
             }
             DumpConductorState => {
@@ -198,12 +206,24 @@ impl AdminInterfaceApi {
             DumpFullState {
                 cell_id,
                 dht_ops_cursor,
+                limit,
             } => {
                 let state = self
                     .conductor_handle
-                    .dump_full_cell_state(&cell_id, dht_ops_cursor)
+                    .dump_full_cell_state(&cell_id, dht_ops_cursor, limit)
                     .await?;
                 Ok(AdminResponse::FullStateDumped(state))
+            }
+            DumpOpTimings {
+                dna_hash,
+                cursor,
+                limit,
+            } => {
+                let timings = self
+                    .conductor_handle
+                    .dump_op_timings(&dna_hash, cursor, limit)
+                    .await?;
+                Ok(AdminResponse::OpTimingsDumped(timings))
             }
             DumpNetworkMetrics {
                 dna_hash,

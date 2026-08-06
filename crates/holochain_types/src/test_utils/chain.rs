@@ -1,4 +1,5 @@
-//! Implements TestChainItem, a type used with isotest
+//! Implements TestChainItem, a minimal `ChainItem` used to drive chain-shape tests
+//! without constructing real signed actions.
 
 use crate::prelude::ChainItem;
 use ::fixt::prelude::*;
@@ -35,23 +36,22 @@ impl From<i32> for TestChainHash {
 }
 
 impl TestChainHash {
-    fn forked(n: u8, i: u8) -> TestChainHash {
+    /// Generate deterministic TestChainHash for forked chain Action
+    pub fn forked(n: u8, i: u8) -> TestChainHash {
         TestChainHash(u32::from_le_bytes([n, i, 0, 0]))
     }
 }
 
-isotest::iso! {
-    TestChainHash => |h| hash_from_u32(*h),
-    ActionHash => |h| Self(u32::from_le_bytes(h.get_raw_32()[0..4].try_into().unwrap())),
-    test_cases: [
-        TestChainHash(0),
-        TestChainHash(256),
-        TestChainHash(u32::MAX)
-    ],
-    real_cases: [
-        ActionHash::from_raw_32(vec![0; 32]),
-        ActionHash::from_raw_32(vec![255; 32])
-    ],
+impl From<TestChainHash> for ActionHash {
+    fn from(h: TestChainHash) -> Self {
+        hash_from_u32(*h)
+    }
+}
+
+impl From<&ActionHash> for TestChainHash {
+    fn from(h: &ActionHash) -> Self {
+        Self(u32::from_le_bytes(h.get_raw_32()[0..4].try_into().unwrap()))
+    }
 }
 
 /// A test implementation of a minimal ChainItem which uses simple numbers for hashes
@@ -256,17 +256,18 @@ pub fn chain_item_to_action(i: &impl ChainItem) -> SignedActionHashed {
     let mut action = fixt!(SignedActionHashed);
     match (action_seq, prev_action) {
         (_, None) => {
-            let mut dna = fixt!(Dna);
-            dna.timestamp = Timestamp(0);
-            action.hashed.content = Action::Dna(dna);
+            // `DnaAction` already carries `action_seq == 0` and `prev_action == None`.
+            let mut dna = fixt!(Action, DnaAction);
+            dna.header.timestamp = Timestamp(0);
+            action.hashed.content = dna;
             action.hashed.hash = hash;
         }
         (action_seq, Some(prev_action)) => {
-            let mut create = fixt!(Create);
-            create.action_seq = action_seq;
-            create.prev_action = prev_action;
-            create.timestamp = i.get_timestamp();
-            action.hashed.content = Action::Create(create);
+            let mut create = fixt!(Action, CreateAction);
+            create.header.timestamp = i.get_timestamp();
+            create.header.action_seq = action_seq;
+            create.header.prev_action = Some(prev_action);
+            action.hashed.content = create;
             action.hashed.hash = hash;
         }
     }
@@ -274,16 +275,12 @@ pub fn chain_item_to_action(i: &impl ChainItem) -> SignedActionHashed {
 }
 
 /// Produce a sequence of AgentActivity ops from a Vec of ChainItems
-pub fn chain_to_ops(chain: Vec<impl ChainItem>) -> Vec<RegisterAgentActivity> {
+pub fn chain_to_ops(chain: Vec<impl ChainItem>) -> Vec<AgentActivity> {
     chain
         .into_iter()
-        .map(|i| {
-            let mut op = RegisterAgentActivity {
-                action: fixt!(SignedActionHashed),
-                cached_entry: None,
-            };
-            op.action = chain_item_to_action(&i);
-            op
+        .map(|i| AgentActivity {
+            action: chain_item_to_action(&i),
+            cached_entry: None,
         })
         .collect()
 }

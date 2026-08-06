@@ -9,8 +9,7 @@ use {
         SerializedBytes, ValidateCallbackResult,
     },
     holochain::prelude::InlineZomeSet,
-    holochain_state::query::{CascadeTxnWrapper, Store},
-    holochain_zome_types::Entry,
+    holochain_zome_types::prelude::Entry,
     serde::{Deserialize, Serialize},
     std::time::Duration,
 };
@@ -19,8 +18,12 @@ use {
 #[cfg(feature = "test_utils")]
 #[tokio::test(flavor = "multi_thread")]
 #[cfg_attr(
-    not(any(target_os = "linux", all(target_os = "macos", feature = "wasmer_sys"))),
-    ignore = "flaky on macos+wasmer_wamr and windows"
+    not(any(
+        target_os = "linux",
+        all(target_os = "macos", feature = "wasmer-sys-cranelift"),
+        all(target_os = "macos", feature = "wasmer-sys-llvm")
+    )),
+    ignore = "flaky on macos+wasmer-wasmi and windows"
 )]
 async fn publish_terminates_after_receiving_required_validation_receipts() {
     use holochain::test_utils::retry_fn_until_timeout;
@@ -74,7 +77,7 @@ async fn publish_terminates_after_receiving_required_validation_receipts() {
             let receipt_sets_complete = receipt_sets.iter().all(|r| r.receipts_complete);
             let agent_activity_receipt_set = match receipt_sets
                 .into_iter()
-                .find(|r| r.op_type == "RegisterAgentActivity")
+                .find(|r| r.op_type == "AgentActivity")
             {
                 None => 0,
                 Some(r) => r.receipts.len(),
@@ -96,10 +99,6 @@ async fn publish_terminates_after_receiving_required_validation_receipts() {
 // Carol has warrant issuance disabled and receives the warrant from Bob
 // as he publishes it.
 #[tokio::test(flavor = "multi_thread")]
-#[cfg_attr(
-    not(feature = "transport-iroh"),
-    ignore = "requires Iroh transport for stability"
-)]
 async fn warrant_is_published() {
     holochain_trace::test_run();
 
@@ -188,7 +187,8 @@ async fn warrant_is_published() {
             .await
             .unwrap()
             .transport_stats
-            .peer_urls[0]
+            .peer_urls
+            .first()
     );
     println!(
         "1 bob   {} url {:?}",
@@ -198,7 +198,8 @@ async fn warrant_is_published() {
             .await
             .unwrap()
             .transport_stats
-            .peer_urls[0]
+            .peer_urls
+            .first()
     );
     println!(
         "2 carol {} url {:?}",
@@ -208,7 +209,8 @@ async fn warrant_is_published() {
             .await
             .unwrap()
             .transport_stats
-            .peer_urls[0]
+            .peer_urls
+            .first()
     );
 
     await_consistency([&alice, &bob, &carol]).await.unwrap();
@@ -232,18 +234,17 @@ async fn warrant_is_published() {
         loop {
             let alice_pubkey = alice.agent_pubkey().clone();
             let warrants = conductors[2]
-                .get_spaces()
-                .dht_db(dna_hash)
+                .get_dht_store(dna_hash)
                 .unwrap()
-                .test_read(move |txn| {
-                    let store = CascadeTxnWrapper::from(txn);
-                    store.get_warrants_for_agent(&alice_pubkey, true).unwrap()
-                });
+                .as_read()
+                .get_warrants_by_warrantee(alice_pubkey)
+                .await
+                .unwrap();
 
             if warrants.len() == 1 {
-                assert_eq!(warrants[0].warrant().warrantee, *alice.agent_pubkey());
+                assert_eq!(warrants[0].data().warrantee, *alice.agent_pubkey());
                 // Make sure that Bob authored the warrant and it's not been authored by Carol.
-                assert_eq!(warrants[0].warrant().author, *bob.agent_pubkey());
+                assert_eq!(warrants[0].data().author, *bob.agent_pubkey());
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
