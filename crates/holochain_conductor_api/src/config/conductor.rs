@@ -43,6 +43,7 @@ use schemars::Schema;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::Path;
 
 mod admin_interface_config;
@@ -318,6 +319,29 @@ pub enum ReportConfig {
     },
 }
 
+/// Per-space network configuration overrides, keyed by DNA hash (base64).
+///
+/// These override the default bootstrap_url, relay_url, and auth material
+/// for specific spaces/DNAs.
+#[derive(Clone, Deserialize, Serialize, Debug, PartialEq, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SpaceNetworkOverride {
+    /// Override the bootstrap server URL for this space.
+    #[serde(default)]
+    #[schemars(schema_with = "holochain_util::jsonschema::optional_url2_schema")]
+    pub bootstrap_url: Option<url2::Url2>,
+    /// Override the relay server URL for this space. When set, this relay will
+    /// be dynamically added to the iroh endpoint when the space is created.
+    #[serde(default)]
+    #[schemars(schema_with = "holochain_util::jsonschema::optional_url2_schema")]
+    pub relay_url: Option<url2::Url2>,
+    /// Override the base64-encoded authentication material for the bootstrap
+    /// service for this space. Required when the space's bootstrap server
+    /// uses a different auth credential than the conductor default.
+    #[serde(default)]
+    pub base64_auth_material: Option<String>,
+}
+
 /// All the network config information for the conductor.
 #[derive(Clone, Deserialize, Serialize, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -362,6 +386,26 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub report: ReportConfig,
 
+    /// Per-space network configuration overrides, keyed by DNA hash (base64).
+    ///
+    /// Allows configuring different bootstrap and relay servers, and per-space
+    /// bootstrap auth material, for specific DNA spaces. Overrides specified
+    /// here take effect as a fallback when the app manifest does not provide
+    /// its own override.
+    ///
+    /// Example:
+    /// ```yaml
+    /// space_overrides:
+    ///   "uhC0k...base64DnaHash...":
+    ///     bootstrap_url: https://special-bootstrap.example.com
+    ///   "uhC0k...anotherDnaHash...":
+    ///     bootstrap_url: https://other-bootstrap.example.com
+    ///     relay_url: https://other-relay.example.com
+    ///     base64_auth_material: dGVzdA==
+    /// ```
+    #[serde(default)]
+    pub space_overrides: HashMap<String, SpaceNetworkOverride>,
+
     /// Use this advanced field to directly configure kitsune2.
     ///
     /// The above options actually just set specific values in this config.
@@ -395,6 +439,7 @@ impl Default for NetworkConfig {
             request_timeout_s: default_request_timeout_s(),
             target_arc_factor: default_target_arc_factor(),
             report: Default::default(),
+            space_overrides: HashMap::new(),
             advanced: None,
             #[cfg(feature = "test-utils")]
             disable_bootstrap: false,
@@ -1148,6 +1193,74 @@ admin_interfaces:
                 }
             })
         );
+    }
+
+    #[test]
+    fn config_space_overrides() {
+        let yaml = r#"---
+    data_root_path: /path/to/env
+    keystore:
+      type: danger_test_keystore
+    network:
+      bootstrap_url: https://default-boot.tld
+      relay_url: https://relay.tld
+      space_overrides:
+        "uhC0kDnaHash1":
+          bootstrap_url: https://special-boot.tld
+        "uhC0kDnaHash2":
+          bootstrap_url: https://other-boot.tld
+          relay_url: https://other-relay.tld
+        "uhC0kDnaHash3":
+          bootstrap_url: https://authed-boot.tld
+          base64_auth_material: dGVzdA==
+          relay_url: https://authed-relay.tld/relay
+    "#;
+        let result: ConductorConfig = config_from_yaml(yaml).unwrap();
+        assert_eq!(result.network.space_overrides.len(), 3);
+
+        let override1 = result.network.space_overrides.get("uhC0kDnaHash1").unwrap();
+        assert_eq!(
+            override1.bootstrap_url.as_ref().unwrap().as_str(),
+            "https://special-boot.tld/"
+        );
+        assert!(override1.relay_url.is_none());
+        assert!(override1.base64_auth_material.is_none());
+
+        let override2 = result.network.space_overrides.get("uhC0kDnaHash2").unwrap();
+        assert_eq!(
+            override2.bootstrap_url.as_ref().unwrap().as_str(),
+            "https://other-boot.tld/"
+        );
+        assert_eq!(
+            override2.relay_url.as_ref().unwrap().as_str(),
+            "https://other-relay.tld/"
+        );
+
+        let override3 = result.network.space_overrides.get("uhC0kDnaHash3").unwrap();
+        assert_eq!(
+            override3.bootstrap_url.as_ref().unwrap().as_str(),
+            "https://authed-boot.tld/"
+        );
+        assert_eq!(override3.base64_auth_material.as_ref().unwrap(), "dGVzdA==");
+        assert_eq!(
+            override3.relay_url.as_ref().unwrap().as_str(),
+            "https://authed-relay.tld/relay"
+        );
+    }
+
+    #[test]
+    fn config_without_space_overrides_still_works() {
+        // Existing configs without space_overrides should parse fine
+        let yaml = r#"---
+    data_root_path: /path/to/env
+    keystore:
+      type: danger_test_keystore
+    network:
+      bootstrap_url: https://default-boot.tld
+      relay_url: https://relay.tld
+    "#;
+        let result: ConductorConfig = config_from_yaml(yaml).unwrap();
+        assert!(result.network.space_overrides.is_empty());
     }
 
     #[test]

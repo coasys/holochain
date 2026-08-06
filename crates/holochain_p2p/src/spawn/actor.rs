@@ -1055,6 +1055,14 @@ impl HolochainP2pActor {
             config.set_module_config(&core_bootstrap_config)?;
             override_needed = true;
         }
+        if let Some(auth_material) = space_overrides.base64_auth_material.as_ref() {
+            // get current bootstrap config and override auth_material_base64
+            let mut core_bootstrap_config: kitsune2_core::factories::CoreBootstrapModConfig =
+                config.get_module_config().unwrap_or_default();
+            core_bootstrap_config.core_bootstrap.auth_material_base64 = Some(auth_material.clone());
+            config.set_module_config(&core_bootstrap_config)?;
+            override_needed = true;
+        }
 
         if let Some(relay_url) = space_overrides.relay_url.as_ref() {
             // get current iroh transport config and override relay_url
@@ -2987,6 +2995,7 @@ mod tests {
         let space_overrides = CellConfigOverrides {
             bootstrap_url: Some("http://override:1234".to_string()),
             relay_url: Some("wss://override:5678".to_string()),
+            base64_auth_material: None,
         };
         let overrides = actor_p2p
             .space_config_override(space_overrides)
@@ -3021,6 +3030,7 @@ mod tests {
         let space_overrides = CellConfigOverrides {
             bootstrap_url: Some("http://override:1234".to_string()),
             relay_url: Some("wss://override:5678".to_string()),
+            base64_auth_material: None,
         };
         let overrides = actor_p2p
             .space_config_override(space_overrides)
