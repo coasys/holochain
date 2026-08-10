@@ -103,3 +103,12 @@ lto = true
 # holochain_serialized_bytes_derive = { git = "https://github.com/holochain/holochain-serialization.git", branch = "develop" }
 # lair_keystore_api = { path = "../lair/crates/lair_keystore_api" }
 # lair_keystore = { path = "../lair/crates/lair_keystore" }
+
+# Point lair_keystore at the coasys fork that carries the rusqlite = 0.34
+# downgrade (see coasys/lair branch `0.7.1-coasys` = upstream `main`/v0.7.1
+# + `set rusqlite to 0.34.0` on top). Required so that libsqlite3-sys stays
+# at 0.32 to line up with coasys/deno's rusqlite pin — a single native-lib
+# link value is a Cargo hard requirement.
+lair_keystore = { git = "https://github.com/coasys/lair.git", branch = "0.7.1-coasys" }
+lair_keystore_api = { git = "https://github.com/coasys/lair.git", branch = "0.7.1-coasys" }
+hc_seed_bundle = { git = "https://github.com/coasys/lair.git", branch = "0.7.1-coasys" }
