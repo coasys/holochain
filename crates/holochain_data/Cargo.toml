@@ -20,12 +20,11 @@ sqlx = { version = "0.9.0", features = [
 base64 = "0.22"
 sodoken = "0.1.0"
 tokio = { version = "1.27", features = ["full"] }
-# coasys: dropped the `libsqlite3-sys = "0.32"` pin. It was a downgrade to
-# match the OLD coasys/deno's rusqlite 0.34 (which used libsqlite3-sys 0.32).
-# coasys/deno v2.9.5 now uses rusqlite ^0.40 with libsqlite3-sys 0.38+, so
-# holochain_data can (and must) align on the modern version. Letting rusqlite
-# drive its own transitive libsqlite3-sys version.
-libsqlite3-sys = "0.35"
+# coasys: was `libsqlite3-sys = "0.32"` (downgrade for OLD coasys/deno's
+# rusqlite 0.34), then briefly "0.35" (matching lair 0.7.1's rusqlite ^0.37).
+# Now loosened to `>=0.35` so cargo can pick 0.38 to also satisfy coasys/deno
+# v2.9.5's rusqlite ^0.40 (only one crate can own links="sqlite3").
+libsqlite3-sys = ">=0.35"
 opentelemetry = "0.31"
 holo_hash = { version = "^0.7.0", path = "../holo_hash" }
 holochain_types = { version = "^0.7.0", path = "../holochain_types" }
