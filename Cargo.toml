@@ -104,11 +104,9 @@ lto = true
 # lair_keystore_api = { path = "../lair/crates/lair_keystore_api" }
 # lair_keystore = { path = "../lair/crates/lair_keystore" }
 
-# Point lair_keystore at the coasys fork that carries the rusqlite = 0.34
-# downgrade (see coasys/lair branch `0.7.1-coasys` = upstream `main`/v0.7.1
-# + `set rusqlite to 0.34.0` on top). Required so that libsqlite3-sys stays
-# at 0.32 to line up with coasys/deno's rusqlite pin — a single native-lib
-# link value is a Cargo hard requirement.
-lair_keystore = { git = "https://github.com/coasys/lair.git", branch = "0.7.1-coasys" }
-lair_keystore_api = { git = "https://github.com/coasys/lair.git", branch = "0.7.1-coasys" }
-hc_seed_bundle = { git = "https://github.com/coasys/lair.git", branch = "0.7.1-coasys" }
+# coasys/lair 0.7.1-coasys fork intentionally dropped as part of the deno
+# v2.9.5 upgrade. It existed only to downgrade rusqlite to 0.34 for compat
+# with the OLD coasys/deno's deno_cache (which was on rusqlite 0.34). Now
+# that coasys/deno v2.9.5 uses rusqlite ^0.40, upstream lair 0.7.1 (which
+# uses rusqlite ^0.37) aligns cleanly with everything through the modern
+# libsqlite3-sys chain. No fork needed, no patch needed.
