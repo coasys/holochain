@@ -739,6 +739,21 @@ mod dna_impls {
         /// Remove cells from conductor state,
         /// then call cleanup on each cell, which stops its networking tasks.
         pub(crate) async fn remove_cells(&self, cell_ids: &[CellId]) {
+            // NET-DIAG (coasys 2026-08-25): log every remove_cells invocation
+            // with a backtrace so we can pinpoint which caller is churning
+            // running_cells during ad4m multi-user integration tests. The
+            // AD4M CI's NET-DIAG snapshot showed the SAME 5 DNA hashes
+            // vanishing and reappearing from running_cells every ~7s while
+            // no explicit uninstall/disable was requested by the test. This
+            // print + BT identifies the guilty call path.
+            tracing::warn!(
+                target: "coasys_netdiag",
+                "NET-DIAG remove_cells called for {} cell(s): {:?}\nBacktrace:\n{}",
+                cell_ids.len(),
+                cell_ids.iter().map(|c| c.dna_hash().to_string()).collect::<Vec<_>>(),
+                std::backtrace::Backtrace::force_capture()
+            );
+
             // Remove cells from conductor state
             let cells = self.running_cells.share_mut(|c| -> Vec<_> {
                 cell_ids
